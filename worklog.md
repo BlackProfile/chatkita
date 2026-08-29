@@ -101,3 +101,21 @@ Stage Summary:
 - App fully working end-to-end via gateway; both servers running (Next.js :3000, chat-service :3003 with bun --hot)
 - Verified screenshots: desktop light/dark customer chat, admin dashboard, mobile 375px list⇄chat toggle, sticky footer OK (mt-auto pattern)
 - Key lesson: socket tests MUST go through gateway port 81, never direct :3000
+
+---
+Task ID: 4
+Agent: main (Z.ai Code)
+Task: Make customer chat AND admin dashboard full-screen (user request: "buat chatnya full layar jangan setengah gini, buat juga ke role admin")
+
+Work Log:
+- page.tsx: root changed min-h-screen → h-dvh + overflow-hidden (app-shell pattern); header is now shrink-0, container max-w-none in chat views (max-w-5xl only on home); main gets overflow-y-auto on home / overflow-hidden in chat views; footer rendered ONLY on home (chat fills viewport, no footer strip)
+- CustomerChat.tsx: removed max-w-2xl/px-4/pb-4 wrapper and h-[calc(100dvh-10rem)] min-h-[460px] rounded-2xl border card → full-bleed flex-1 min-h-0 bg-card surface; message column centered via max-w-3xl with p-4 md:p-6 so bubbles stay readable on wide screens
+- AdminPanel.tsx: same full-bleed treatment (removed max-w-5xl wrapper + fixed-height rounded card); grid sidebar now md:320px lg:360px; chat pane message column max-w-3xl centered
+- ChatBubble.tsx: max-w-[80%] → max-w-[85%] sm:max-w-[75%] md:max-w-[560px] cap for full-width surfaces
+- LESSON: MultiEdit here is NOT atomic in practice — on a failing edit, earlier edits in the same call REMAIN applied and only the failure is reported. Always re-read the file after any MultiEdit error before retrying (caused a confusing double-apply on page.tsx; final state verified correct by full read).
+- Verified via agent-browser through gateway :81 (2 sessions, customer + admin): measured chat container = exactly viewport minus 65px header (1280×735 at 1280×800), footer absent in chat views; real-time Budi⇄admin messaging re-tested OK; mobile 375×700 both roles (admin list⇄chat toggle) OK; dark mode both roles OK; home on 375×700 scrolls internally (main scrollTop max 290) with footer pinned below the scroll area; lint clean; dev.log clean (only transient fast-refresh warnings during editing)
+
+Stage Summary:
+- Chat (customer + admin) is now a true full-screen app shell: header on top, chat surface fills 100% of remaining viewport edge-to-edge (no max-width, no rounded floating card, no page scroll), footer only on beranda
+- Height is flex-driven (h-dvh root + flex-1/min-h-0 chain), so no magic calc numbers; adapts to mobile keyboard/dvh changes automatically
+- Files changed: src/app/page.tsx, src/components/chat/CustomerChat.tsx, src/components/chat/AdminPanel.tsx, src/components/chat/ChatBubble.tsx

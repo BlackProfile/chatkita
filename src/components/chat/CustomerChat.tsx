@@ -242,7 +242,7 @@ export function CustomerChat() {
   /* ---------------------------------------------------------------- */
   if (!session) {
     return (
-      <div className="flex flex-1 items-center justify-center px-4 pb-6">
+      <div className="flex min-h-0 w-full flex-1 items-center justify-center px-4 pb-6">
         <Card className="w-full max-w-md rounded-2xl">
           <CardHeader>
             <CardTitle className="text-xl">Mulai Percakapan</CardTitle>
@@ -293,8 +293,8 @@ export function CustomerChat() {
   /* Render: chat                                                      */
   /* ---------------------------------------------------------------- */
   return (
-    <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col px-4 pb-4">
-      <div className="flex h-[calc(100dvh-10rem)] min-h-[460px] flex-col overflow-hidden rounded-2xl border bg-card">
+    <div className="flex min-h-0 w-full flex-1 flex-col">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-card">
         {/* Header */}
         <div className="flex items-center gap-3 border-b p-3">
           <Avatar className="size-10">
@@ -338,7 +338,7 @@ export function CustomerChat() {
         {/* Messages */}
         <div ref={scrollRef} className="chat-scroll min-h-0 flex-1">
           <ScrollArea className="h-full">
-            <div className="flex flex-col gap-2 p-4">
+            <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 p-4 md:p-6">
               {messages.length === 0 ? (
                 <p className="py-10 text-center text-sm text-muted-foreground">
                   Belum ada pesan. Sapa admin kami!

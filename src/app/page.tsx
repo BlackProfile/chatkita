@@ -23,17 +23,25 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
 
 type View = "home" | "customer" | "admin";
 
 export default function Page() {
   const [view, setView] = useState<View>("home");
 
+  const isChatView = view !== "home";
+
   return (
-    <div className="flex min-h-screen flex-col bg-background">
+    <div className="flex h-dvh flex-col overflow-hidden bg-background">
       {/* ------------------------------ Header ------------------------------ */}
-      <header className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur">
-        <div className="mx-auto flex h-16 w-full max-w-5xl items-center justify-between px-4">
+      <header className="z-40 shrink-0 border-b bg-background/80 backdrop-blur">
+        <div
+          className={cn(
+            "mx-auto flex h-16 w-full items-center justify-between px-4",
+            isChatView ? "max-w-none" : "max-w-5xl"
+          )}
+        >
           <div className="flex min-w-0 items-center gap-2.5">
             <span
               className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white"
@@ -58,7 +66,12 @@ export default function Page() {
       </header>
 
       {/* ------------------------------- Main ------------------------------- */}
-      <main className="flex flex-1 flex-col">
+      <main
+        className={cn(
+          "flex min-h-0 flex-1 flex-col",
+          isChatView ? "overflow-hidden" : "overflow-y-auto"
+        )}
+      >
         <AnimatePresence mode="wait" initial={false}>
           {view === "home" ? (
             <motion.div
@@ -149,7 +162,7 @@ export default function Page() {
           {view === "customer" ? (
             <motion.div
               key="customer"
-              className="flex flex-1 flex-col"
+              className="flex min-h-0 flex-1 flex-col"
               initial={{ opacity: 0, y: 4 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -4 }}
@@ -162,7 +175,7 @@ export default function Page() {
           {view === "admin" ? (
             <motion.div
               key="admin"
-              className="flex flex-1 flex-col"
+              className="flex min-h-0 flex-1 flex-col"
               initial={{ opacity: 0, y: 4 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -4 }}
@@ -175,9 +188,12 @@ export default function Page() {
       </main>
 
       {/* ------------------------------ Footer ------------------------------ */}
-      <footer className="mt-auto border-t py-4 text-center text-sm text-muted-foreground">
-        © 2025 ChatKita · Demo Customer Service
-      </footer>
+      {/* Footer hanya tampil di beranda — saat chat, area chat memenuhi layar */}
+      {view === "home" ? (
+        <footer className="mt-auto shrink-0 border-t py-4 text-center text-sm text-muted-foreground">
+          © 2025 ChatKita · Demo Customer Service
+        </footer>
+      ) : null}
     </div>
   );
 }

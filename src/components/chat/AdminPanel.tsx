@@ -305,7 +305,7 @@ export function AdminPanel() {
   /* ---------------------------------------------------------------- */
   if (!authed) {
     return (
-      <div className="flex flex-1 items-center justify-center px-4 pb-6">
+      <div className="flex min-h-0 w-full flex-1 items-center justify-center px-4 pb-6">
         <Card className="w-full max-w-sm rounded-2xl">
           <CardHeader>
             <span
@@ -365,8 +365,8 @@ export function AdminPanel() {
   const showChatPane = !isMobile || activeId !== null;
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 pb-4">
-      <div className="flex h-[calc(100dvh-10rem)] min-h-[520px] flex-col overflow-hidden rounded-2xl border bg-card">
+    <div className="flex min-h-0 w-full flex-1 flex-col">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-card">
         {/* Reconnecting strip */}
         {!connected ? (
           <p className="bg-amber-500/10 px-3 py-1.5 text-xs text-amber-600 dark:text-amber-400">
@@ -374,7 +374,7 @@ export function AdminPanel() {
           </p>
         ) : null}
 
-        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] md:grid-cols-[320px_1fr]">
+        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] md:grid-cols-[320px_1fr] lg:grid-cols-[360px_1fr]">
           {/* ------------------------- Sidebar ------------------------- */}
           {showSidebar ? (
             <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden md:border-r">
@@ -507,7 +507,7 @@ export function AdminPanel() {
                 {/* Messages */}
                 <div ref={scrollRef} className="chat-scroll min-h-0 flex-1">
                   <ScrollArea className="h-full">
-                    <div className="flex flex-col gap-2 p-4">
+                    <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 p-4 md:p-6">
                       {activeMessages.length === 0 ? (
                         <p className="py-10 text-center text-sm text-muted-foreground">
                           Belum ada pesan.
