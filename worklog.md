@@ -162,3 +162,24 @@ Stage Summary:
 - ChatKita v3 final model: user logs in with a name and lands DIRECTLY in a private 1-on-1 chat with Admin (Telegram-feel full-screen); users can never see each other's messages or presence (server-enforced rooms + participant gates); Admin logs in with password (admin123 / ADMIN_PASSWORD env) and reads + replies to EVERY user's conversation from one inbox with unread badges, search, online dots, typing indicators
 - Files: src/components/chat/Messenger.tsx rewritten; src/components/chat/AdminPanel.tsx recreated; src/components/chat/NewChatDialog.tsx deleted; src/app/page.tsx + src/app/layout.tsx updated; mini-services/chat-service/test-protocol.ts rewritten (32/32); backend index.ts + src/lib/chat-types.ts already v3 (verified, untouched)
 - Key lessons: (a) pkill -f can kill the invoking shell (pattern matches its own cmdline) — kill by explicit PID; (b) async test assertions must register listeners BEFORE the triggering emit, and never await a "wait-for-event" promise before causing the event; (c) bun --hot on crash keeps serving with the old module — after schema changes always wipe chat.db AND fully restart
+
+---
+Task ID: 7
+Agent: main (Z.ai Code)
+Task: Fix "aplikasi tidak terbuka" (app won't open) — all services were dead after the previous session ended
+
+Work Log:
+- Found BOTH services down: no bun/next processes alive (stale dev.pid 997), no dev.log, ports 3000/3003 unbound — only gateway :81 was up. That is why the user could not open the app (no code bug)
+- First restart attempt with `nohup bun run dev &` did NOT survive the tool-call shell exit (process group killed despite nohup)
+- Correct method: `.zscripts/dev.sh` (uses `disown`) started everything, BUT piping its output (`| tail`) hung the tool call forever because the backgrounded `bun run dev` inherits the pipe (never EOF). Services were actually up; only the tool call was stuck
+- Later found next-server worker ORPHANED in runaway state (132% CPU, 2.3GB RSS for ~12min CPU time) holding :3000 — its parent bash/node had been killed but the worker survived, accept() stuck, backlog Recv-Q 9, curl hangs. Restart attempts then hit EADDRINUSE :::3000
+- Final clean recovery: kill -9 orphaned next-server + postcss + stale `bun run dev` wrapper → port freed, memory recovered (4041MB total, 2.9GB free) → start detached via `(setsid nohup bun run dev > /dev/null 2>&1 < /dev/null &)` (subshell + setsid + full fd redirect = survives shell exit, no pipe hang) → next:200 in 0.15s
+- chat-service restarted the same setsid way on :3003 with a FRESH chat.db (Admin account seeded)
+- E2E verified via agent-browser through gateway :81: home renders → "Masuk Chat" → login "Budi" → full-screen 1-on-1 chat with Admin → message sent & rendered as green bubble (screenshot /tmp/final-user.png); earlier in the session also verified admin flow: admin123 login → inbox shows ALL users w/ unread badges → opening a conversation shows messages & clears badge (screenshots /tmp/restart-02-admin.png, /tmp/restart-03-admin-chat.png)
+- Cleaned test data (chat.db wiped, service restarted fresh for handover); final: :3000 → 200, :3003 listening, admin seeded
+- KEY LESSONS for future sessions: (a) services die when a session ends — ALWAYS check ports/processes first when user reports "app won't open"; (b) never pipe dev.sh output (background child keeps pipe open → tool call hangs); (c) killing the `bun run dev` wrapper does NOT kill the next-server worker — kill `next-server` PID explicitly (it can orphan and spin at 100%+ CPU while holding the port); (d) the reliable detached start pattern here is `(setsid nohup <cmd> > /dev/null 2>&1 < /dev/null &)`
+
+Stage Summary:
+- No application code changed — pure infrastructure recovery. ChatKita (user 1-on-1 with Admin + admin inbox, Telegram-style full-screen) is back online and browser-verified end-to-end
+- Services: Next.js dev :3000 (HTTP 200, fast), chat-service :3003 (fresh DB, admin123 login works)
+- Nothing for the user to do differently: open the app via the Preview Panel / gateway :81
