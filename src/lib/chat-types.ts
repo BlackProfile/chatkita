@@ -1,13 +1,40 @@
 /**
- * Shared contract between the Next.js frontend and the messenger-service
+ * Shared contract between the Next.js frontend and the chat-service
  * mini service (socket.io, port 3003). DO NOT change event names or
  * payload shapes without updating BOTH sides.
+ *
+ * Model (v3 — "Telegram-style, private 1-on-1 with Admin"):
+ *   Every human user chats with exactly ONE partner: the Admin.
+ *   - A user NEVER sees other users, their presence, or their messages
+ *     (enforced server-side via participant checks).
+ *   - The Admin sees ALL users' conversations in one list.
  */
+
+/** Fixed id of the admin account (seeded by the server on boot). */
+export const ADMIN_ID = "admin";
+export const ADMIN_NAME = "Admin";
+
+/** Persisted user login ({ userId, name }) — Telegram-style, no password. */
+export const CHAT_SESSION_KEY = "chatkita:user";
+
+/** Demo hint rendered on the admin login form (server default password). */
+export const ADMIN_PASSWORD_HINT = "admin123";
+
+/* ------------------------------------------------------------------ */
+/* Entities                                                            */
+/* ------------------------------------------------------------------ */
 
 export interface ChatUser {
   id: string;
   name: string;
 }
+
+/** A chat partner including live presence info. */
+export type PartnerInfo = ChatUser & {
+  online: boolean;
+  /** ISO timestamp of the last time this user was online (null if unknown). */
+  lastSeenAt: string | null;
+};
 
 export interface ChatMessage {
   id: number;
@@ -18,10 +45,13 @@ export interface ChatMessage {
   createdAt: string;
 }
 
+/**
+ * One conversation as seen by the requesting side.
+ * For the admin: `partner` is the human user. For a user: `partner` is Admin.
+ */
 export interface ConversationOverview {
   id: string;
-  /** The OTHER participant of this 1-on-1 conversation */
-  partner: ChatUser & { online: boolean };
+  partner: PartnerInfo;
   lastMessage: {
     id: number;
     senderId: string;
@@ -29,47 +59,40 @@ export interface ConversationOverview {
     createdAt: string;
   } | null;
   lastMessageAt: string;
-  /** Unread messages sent by the partner */
+  /** Unread messages sent by the partner. */
   unread: number;
-}
-
-export interface SearchUser {
-  id: string;
-  name: string;
-  online: boolean;
 }
 
 /* ------------------------------------------------------------------ */
 /* Ack payloads                                                        */
 /* ------------------------------------------------------------------ */
 
-/** Ack payload returned by `user:auth` */
+/** Ack payload returned by `user:auth`. */
 export interface UserAuthAck {
   ok: true;
   user: ChatUser;
+  /** The user's single conversation (with Admin). */
+  conversationId: string;
+  /** Always the Admin in this model. */
+  partner: PartnerInfo;
+  /** Full history of the conversation (already marked as read). */
+  messages: ChatMessage[];
+}
+
+/** Ack payload returned by `admin:auth`. */
+export interface AdminAuthAck {
+  ok: true;
   conversations: ConversationOverview[];
 }
 
-/** Ack payload returned by `users:search` */
-export interface SearchAck {
-  ok: true;
-  users: SearchUser[];
-}
-
-/** Ack payload returned by `conversations:start` */
-export interface StartConversationAck {
-  ok: true;
-  conversation: ConversationOverview;
-}
-
-/** Ack payload returned by `messages:history` */
+/** Ack payload returned by `messages:history` (both roles, participant-only). */
 export interface HistoryAck {
   ok: true;
   messages: ChatMessage[];
-  partner: ChatUser & { online: boolean };
+  partner: PartnerInfo;
 }
 
-/** Ack payload returned by `messages:send` */
+/** Ack payload returned by `messages:send`. */
 export interface MessageAck {
   ok: true;
   message: ChatMessage;
@@ -78,6 +101,7 @@ export interface MessageAck {
 /** Generic error ack: `{ ok: false, error: ErrorCode }` */
 export type ChatErrorCode =
   | "INVALID_NAME"
+  | "NAME_RESERVED"
   | "INVALID_MESSAGE"
   | "NOT_FOUND"
   | "FORBIDDEN"
@@ -93,47 +117,55 @@ export interface ChatErrorAck {
 /* Client → Server events (ack via callback where listed)              */
 /* ------------------------------------------------------------------ */
 //
-// user:auth          { name: string; userId?: string }
-//                      → UserAuthAck | ChatErrorAck
-//                      Login (userId) or register/find-by-name. Joins the
-//                      personal `user:<id>` room + global `users` room.
+// user:auth         { name: string; userId?: string }
+//                     → UserAuthAck | ChatErrorAck
+//                     Login (userId) or find-or-create by (case-insensitive)
+//                     name. Ensures the 1-on-1 conversation with Admin,
+//                     marks it read, returns the full history. Joins the
+//                     personal `user:<id>` room.
 //
-// users:search       { query?: string }
-//                      → SearchAck | ChatErrorAck
-//                      Find users by name (empty query = recent users),
-//                      excluding self.
+// admin:auth        { password: string }
+//                     → AdminAuthAck | ChatErrorAck
+//                     Password login (ADMIN_PASSWORD env or "admin123").
+//                     Joins the `admins` room; returns ALL conversations.
 //
-// conversations:start { userId: string }
-//                      → StartConversationAck | ChatErrorAck
-//                      Get-or-create a 1-on-1 conversation. Both sides get
-//                      a fresh `conversations:update`.
+// messages:history  { conversationId: string }
+//                     → HistoryAck | ChatErrorAck
+//                     Both roles; participant-gated; marks the
+//                     conversation read for the caller.
 //
-// messages:history   { conversationId: string }
-//                      → HistoryAck | ChatErrorAck
-//                      Participant-only. Marks the conversation read.
+// messages:send     { conversationId: string; content: string }
+//                     → MessageAck | ChatErrorAck
+//                     Both roles; participant-gated. Sender auto-reads.
 //
-// messages:send      { conversationId: string; content: string }
-//                      → MessageAck | ChatErrorAck
+// messages:read     { conversationId: string }                 (no ack)
 //
-// messages:read      { conversationId: string }            (no ack)
-//
-// typing             { conversationId: string; isTyping: boolean } (no ack)
+// typing            { conversationId: string; isTyping: boolean } (no ack)
 
 /* ------------------------------------------------------------------ */
 /* Server → Client events                                              */
 /* ------------------------------------------------------------------ */
 //
 // message:new          ChatMessage
-//                        To BOTH participants' personal rooms.
+//                        Fan-out to the two participants: the human
+//                        user's `user:<id>` room AND the `admins` room.
+//                        (Clients append ONLY from this event; ignore
+//                        message payloads inside success acks.)
 //
 // conversations:update ConversationOverview[]
-//                        Personalized list for ONE user (their own room).
+//                        Personalized: full list to the `admins` room;
+//                        the caller's own list to a `user:<id>` room.
 //
 // partner:typing       { conversationId: string; isTyping: boolean }
+//                        Relayed to the OTHER participant (admins room
+//                        when the typer is a user, user room when the
+//                        typer is admin).
 //
-// presence:update      { userId: string; online: boolean }
-//                        To the `users` room whenever someone goes
-//                        online/offline.
+// presence:update      { userId: string; online: boolean;
+//                        lastSeenAt: string | null }
+//                        User online/offline → `admins` room ONLY
+//                        (users must never learn about other users).
+//                        Admin online/offline → all `user:<id>` rooms.
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -146,6 +178,3 @@ export const SOCKET_URL = `/?XTransformPort=${CHAT_SERVICE_PORT}`;
 
 export const MAX_MESSAGE_LENGTH = 1000;
 export const MAX_NAME_LENGTH = 40;
-
-/** Persisted login (Telegram-style: name + user id, no password). */
-export const MESSENGER_STORAGE_KEY = "chatkita:messenger-user";

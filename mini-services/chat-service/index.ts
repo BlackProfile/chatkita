@@ -1,8 +1,14 @@
 /**
- * ChatKita messenger-service — socket.io mini service (port 3003)
+ * ChatKita chat-service — socket.io mini service (port 3003)
  *
- * Telegram-style 1-on-1 messenger:
- *   users ──< conversations ──< messages        (+ per-user read state)
+ * Model (v3 — every human user chats 1-on-1 with the Admin):
+ *   users(role) ──< conversations(user ↔ admin) ──< messages
+ *   + per-user read state (reads) + presence (last_seen_at / online map)
+ *
+ * - Users are isolated from each other: every event is participant-gated
+ *   and user presence is visible to the `admins` room ONLY (privacy).
+ * - The admin sees ALL users' conversations in one list (`admins` room).
+ * - Admin presence is public by design (broadcast to everyone).
  *
  * Implements the shared protocol contract defined in
  * /home/z/my-project/src/lib/chat-types.ts (DO NOT change event names
@@ -23,10 +29,11 @@ import { Server, type Socket as IoSocket } from 'socket.io'
 /* ------------------------------------------------------------------ */
 
 const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
+const ADMIN_ID = 'admin'
+const ADMIN_NAME = 'Admin'
 const MAX_NAME_LENGTH = 40
 const MAX_MESSAGE_LENGTH = 1000
 const HISTORY_LIMIT = 500
-const SEARCH_LIMIT = 15
 
 /* ------------------------------------------------------------------ */
 /* Storage (bun:sqlite, WAL)                                           */
@@ -39,6 +46,7 @@ db.run(`
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
     created_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL
   )
@@ -82,6 +90,7 @@ db.run(`
 interface UserRow {
   id: string
   name: string
+  role: string
   created_at: number
   last_seen_at: number
 }
@@ -102,11 +111,35 @@ interface MessageRow {
   created_at: number
 }
 
+/** API-side mirrors of the shared contract types (kept in sync manually). */
+interface ChatMessageApi {
+  id: number
+  conversationId: string
+  senderId: string
+  content: string
+  createdAt: string
+}
+
+interface PartnerInfoApi {
+  id: string
+  name: string
+  online: boolean
+  lastSeenAt: string | null
+}
+
+interface ConversationOverviewApi {
+  id: string
+  partner: PartnerInfoApi
+  lastMessage: { id: number; senderId: string; content: string; createdAt: string } | null
+  lastMessageAt: string
+  unread: number
+}
+
 /* ------------------------------ helpers ------------------------------ */
 
 const now = () => Date.now()
 
-const toChatMessage = (row: MessageRow) => ({
+const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   id: row.id,
   conversationId: row.conversation_id,
   senderId: row.sender_id,
@@ -114,16 +147,27 @@ const toChatMessage = (row: MessageRow) => ({
   createdAt: new Date(row.created_at).toISOString(),
 })
 
+const toPartnerInfo = (user: UserRow): PartnerInfoApi => ({
+  id: user.id,
+  name: user.name,
+  online: isOnline(user.id),
+  lastSeenAt: new Date(user.last_seen_at).toISOString(),
+})
+
 /** Ordered pair so a conversation between two users is unique. */
-const pairKey = (a: string, b: string) => (a < b ? [a, b] : [b, a])
+const pairKey = (a: string, b: string): [string, string] => (a < b ? [a, b] : [b, a])
 
 const findUserById = (id: string): UserRow | null =>
   (db.query('SELECT * FROM users WHERE id = ?').get(id) as UserRow | null) ?? null
 
-const findUserByName = (name: string): UserRow | null =>
+/** Lookup restricted to one role (the admin account is unreachable via login). */
+const findUserByRoleAndId = (id: string, role: string): UserRow | null =>
+  (db.query('SELECT * FROM users WHERE id = ? AND role = ?').get(id, role) as UserRow | null) ?? null
+
+const findUserByRoleAndName = (name: string, role: string): UserRow | null =>
   (db
-    .query('SELECT * FROM users WHERE lower(name) = lower(?) LIMIT 1')
-    .get(name) as UserRow | null) ?? null
+    .query('SELECT * FROM users WHERE lower(name) = lower(?) AND role = ? LIMIT 1')
+    .get(name, role) as UserRow | null) ?? null
 
 const getConversation = (conversationId: string): ConversationRow | null =>
   (db
@@ -139,11 +183,32 @@ const findConversationBetween = (a: string, b: string): ConversationRow | null =
   )
 }
 
+/** Get-or-create the (only) conversation between a user and the admin. */
+const ensureConversationWithAdmin = (userId: string): ConversationRow => {
+  const existing = findConversationBetween(userId, ADMIN_ID)
+  if (existing) return existing
+  const [a, b] = pairKey(userId, ADMIN_ID)
+  const id = crypto.randomUUID()
+  const ts = now()
+  db.run(
+    'INSERT INTO conversations (id, user_a_id, user_b_id, created_at, last_message_at) VALUES (?, ?, ?, ?, ?)',
+    [id, a, b, ts, ts]
+  )
+  console.log(`Conversation ${id} ensured: ${a} <-> ${b}`)
+  return { id, user_a_id: a, user_b_id: b, created_at: ts, last_message_at: ts }
+}
+
 const getPartnerId = (conversation: ConversationRow, userId: string) =>
   conversation.user_a_id === userId ? conversation.user_b_id : conversation.user_a_id
 
 const isParticipant = (conversation: ConversationRow, userId: string) =>
   conversation.user_a_id === userId || conversation.user_b_id === userId
+
+const getPartnerUser = (conversation: ConversationRow, userId: string): UserRow => {
+  const partner = findUserById(getPartnerId(conversation, userId))
+  if (!partner) throw new Error(`Partner of conversation ${conversation.id} missing`)
+  return partner
+}
 
 const getMessages = (conversationId: string): ChatMessageApi[] => {
   const rows = db
@@ -173,7 +238,8 @@ const markRead = (conversationId: string, userId: string, upTo?: number) => {
   )
 }
 
-/** Full conversation list for one user, newest activity first. */
+/** Full conversation list for one user, newest activity first. Includes
+ *  zero-message conversations (LEFT JOIN) so a fresh user shows up. */
 const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
   const rows = db
     .query(
@@ -182,6 +248,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         c.last_message_at,
         CASE WHEN c.user_a_id = $me THEN c.user_b_id ELSE c.user_a_id END AS partner_id,
         p.name AS partner_name,
+        p.last_seen_at AS partner_last_seen,
         lm.id AS last_id,
         lm.sender_id AS last_sender,
         lm.content AS last_content,
@@ -208,6 +275,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     last_message_at: number
     partner_id: string
     partner_name: string
+    partner_last_seen: number
     last_id: number | null
     last_sender: string | null
     last_content: string | null
@@ -221,6 +289,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
       id: r.partner_id,
       name: r.partner_name,
       online: isOnline(r.partner_id),
+      lastSeenAt: new Date(r.partner_last_seen).toISOString(),
     },
     lastMessage:
       r.last_id != null
@@ -234,46 +303,6 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     lastMessageAt: new Date(r.last_message_at).toISOString(),
     unread: r.unread,
   }))
-}
-
-/** Overview of a single conversation as seen by `userId`. */
-const getConversationOverview = (
-  conversation: ConversationRow,
-  userId: string
-): ConversationOverviewApi => {
-  const partner = getPartnerUser(conversation, userId)
-  const last = db
-    .query('SELECT * FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 1')
-    .get(conversation.id) as MessageRow | null
-  const unread = (db
-    .query(
-      `SELECT COUNT(*) AS unread FROM messages
-       WHERE conversation_id = ? AND sender_id != ?
-         AND id > COALESCE((SELECT last_read_message_id FROM reads
-                            WHERE conversation_id = ? AND user_id = ?), 0)`
-    )
-    .get(conversation.id, userId, conversation.id, userId) as { unread: number }).unread
-  return {
-    id: conversation.id,
-    partner: { id: partner.id, name: partner.name, online: isOnline(partner.id) },
-    lastMessage: last
-      ? {
-          id: last.id,
-          senderId: last.sender_id,
-          content: last.content,
-          createdAt: new Date(last.created_at).toISOString(),
-        }
-      : null,
-    lastMessageAt: new Date(conversation.last_message_at).toISOString(),
-    unread,
-  }
-}
-
-const getPartnerUser = (conversation: ConversationRow, userId: string): UserRow => {
-  const partnerId = getPartnerId(conversation, userId)
-  const partner = findUserById(partnerId)
-  if (!partner) throw new Error(`Partner ${partnerId} missing`)
-  return partner
 }
 
 /* ------------------------------------------------------------------ */
@@ -311,7 +340,7 @@ const removeOnlineSocket = (userId: string, socketId: string) => {
 
 const httpServer = createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' })
-  res.end('ChatKita messenger-service is running')
+  res.end('ChatKita chat-service is running')
 })
 
 const io = new Server(httpServer, {
@@ -326,23 +355,6 @@ const io = new Server(httpServer, {
 })
 
 type AckFn = (res: unknown) => void
-
-/** API-side mirrors of the shared contract types (kept in sync manually). */
-interface ChatMessageApi {
-  id: number
-  conversationId: string
-  senderId: string
-  content: string
-  createdAt: string
-}
-
-interface ConversationOverviewApi {
-  id: string
-  partner: { id: string; name: string; online: boolean }
-  lastMessage: { id: number; senderId: string; content: string; createdAt: string } | null
-  lastMessageAt: string
-  unread: number
-}
 
 /**
  * Wraps a handler with flexible ack extraction (last function argument)
@@ -364,15 +376,21 @@ const handler =
     }
   }
 
-/** Authenticated user id for a socket (set by `user:auth`). */
+/** Authenticated user id for a socket (set by `user:auth` / `admin:auth`). */
 const authedUserId = (socket: IoSocket): string | null => {
   const id = socket.data?.userId
   return typeof id === 'string' && id.length > 0 && !!findUserById(id) ? id : null
 }
 
-/** Push the freshest conversation list to every socket of `userId`. */
-const pushConversations = (userId: string) => {
-  io.to(`user:${userId}`).emit('conversations:update', getConversationsFor(userId))
+/**
+ * Push the freshest conversation list to every socket in `userId`'s scope.
+ * The admin's list goes to the `admins` room (covers all admin sockets);
+ * a normal user's list goes to their personal room.
+ */
+const pushConversationsTo = (userId: string) => {
+  const list = getConversationsFor(userId)
+  if (userId === ADMIN_ID) io.to('admins').emit('conversations:update', list)
+  else io.to(`user:${userId}`).emit('conversations:update', list)
 }
 
 io.on('connection', (socket) => {
@@ -388,107 +406,90 @@ io.on('connection', (socket) => {
         ack({ ok: false, error: 'INVALID_NAME' })
         return
       }
+      if (name.toLowerCase() === ADMIN_NAME.toLowerCase()) {
+        console.log(`Rejected reserved name "${name}" (socket ${socket.id})`)
+        ack({ ok: false, error: 'NAME_RESERVED' })
+        return
+      }
 
-      // 1) explicit userId (stored login) — fall back to name lookup, then create
+      // Find-or-create among role='user' rows only:
+      // 1) stored userId login, 2) case-insensitive name, 3) create.
       let user: UserRow | null =
-        (typeof data?.userId === 'string' && data.userId.length > 0
-          ? findUserById(data.userId)
-          : null) ?? findUserByName(name)
+        typeof data?.userId === 'string' && data.userId.length > 0
+          ? findUserByRoleAndId(data.userId, 'user')
+          : null
+      if (!user) user = findUserByRoleAndName(name, 'user')
 
       if (!user) {
         const id = crypto.randomUUID()
         const ts = now()
-        db.run('INSERT INTO users (id, name, created_at, last_seen_at) VALUES (?, ?, ?, ?)', [
-          id,
-          name,
-          ts,
-          ts,
-        ])
-        user = { id, name, created_at: ts, last_seen_at: ts }
+        db.run(
+          "INSERT INTO users (id, name, role, created_at, last_seen_at) VALUES (?, ?, 'user', ?, ?)",
+          [id, name, ts, ts]
+        )
+        user = { id, name, role: 'user', created_at: ts, last_seen_at: ts }
         console.log(`New user registered: "${name}" (${id})`)
+      } else {
+        const ts = now()
+        db.run('UPDATE users SET last_seen_at = ? WHERE id = ?', [ts, user.id])
+        user.last_seen_at = ts
       }
+
+      // A user's single conversation is the one with the admin.
+      const conversation = ensureConversationWithAdmin(user.id)
+      // The user is looking at the chat right now → mark everything read.
+      markRead(conversation.id, user.id)
 
       socket.data.userId = user.id
       socket.join(`user:${user.id}`)
-      socket.join('users')
       const becameOnline = addOnlineSocket(user.id, socket.id)
       if (becameOnline) {
-        socket.to('users').emit('presence:update', { userId: user.id, online: true })
+        // User presence is private: only the admins room may know.
+        io.to('admins').emit('presence:update', {
+          userId: user.id,
+          online: true,
+          lastSeenAt: null,
+        })
       }
 
       console.log(`User "${user.name}" authenticated (socket ${socket.id})`)
+      const admin = findUserById(ADMIN_ID) // seeded on boot — always exists
       ack({
         ok: true,
         user: { id: user.id, name: user.name },
-        conversations: getConversationsFor(user.id),
+        conversationId: conversation.id,
+        partner: admin
+          ? toPartnerInfo(admin)
+          : { id: ADMIN_ID, name: ADMIN_NAME, online: false, lastSeenAt: null },
+        messages: getMessages(conversation.id),
       })
-    })
-  )
 
-  /* --------------------------- discovery --------------------------- */
-
-  socket.on(
-    'users:search',
-    handler(socket, (data, ack) => {
-      const me = authedUserId(socket)
-      if (!me) {
-        ack({ ok: false, error: 'UNAUTHORIZED' })
-        return
-      }
-      const raw = typeof data?.query === 'string' ? data.query.trim() : ''
-      const escaped = raw.replace(/[\\%_]/g, (ch) => `\\${ch}`)
-      const rows = db
-        .query(
-          `SELECT id, name FROM users
-           WHERE id != $me
-             AND ($q = '' OR name LIKE '%' || $q || '%' ESCAPE '\\')
-           ORDER BY last_seen_at DESC
-           LIMIT ${SEARCH_LIMIT}`
-        )
-        .all({ $me: me, $q: escaped }) as Array<{ id: string; name: string }>
-      ack({
-        ok: true,
-        users: rows.map((u) => ({ id: u.id, name: u.name, online: isOnline(u.id) })),
-      })
+      // A (newly registered) user must immediately appear in the admin sidebar.
+      pushConversationsTo(ADMIN_ID)
     })
   )
 
   socket.on(
-    'conversations:start',
+    'admin:auth',
     handler(socket, (data, ack) => {
-      const me = authedUserId(socket)
-      if (!me) {
+      const password = typeof data?.password === 'string' ? data.password : ''
+      const expected = process.env.ADMIN_PASSWORD || 'admin123'
+      if (password !== expected) {
+        console.log(`Rejected admin login (wrong password, socket ${socket.id})`)
         ack({ ok: false, error: 'UNAUTHORIZED' })
         return
       }
-      const targetId = typeof data?.userId === 'string' ? data.userId : ''
-      if (targetId === me) {
-        ack({ ok: false, error: 'FORBIDDEN' })
-        return
-      }
-      const target = findUserById(targetId)
-      if (!target) {
-        ack({ ok: false, error: 'NOT_FOUND' })
-        return
+
+      socket.data.userId = ADMIN_ID
+      socket.join('admins')
+      const becameOnline = addOnlineSocket(ADMIN_ID, socket.id)
+      if (becameOnline) {
+        // Admin presence is public by design.
+        io.emit('presence:update', { userId: ADMIN_ID, online: true, lastSeenAt: null })
       }
 
-      let conversation = findConversationBetween(me, targetId)
-      if (!conversation) {
-        const [a, b] = pairKey(me, targetId)
-        const id = crypto.randomUUID()
-        const ts = now()
-        db.run(
-          'INSERT INTO conversations (id, user_a_id, user_b_id, created_at, last_message_at) VALUES (?, ?, ?, ?, ?)',
-          [id, a, b, ts, ts]
-        )
-        conversation = { id, user_a_id: a, user_b_id: b, created_at: ts, last_message_at: ts }
-        console.log(`Conversation ${id} started: ${a} <-> ${b}`)
-      }
-
-      ack({ ok: true, conversation: getConversationOverview(conversation, me) })
-      // both sides see the conversation in their list
-      pushConversations(me)
-      pushConversations(targetId)
+      console.log(`Admin authenticated (socket ${socket.id})`)
+      ack({ ok: true, conversations: getConversationsFor(ADMIN_ID) })
     })
   )
 
@@ -517,9 +518,9 @@ io.on('connection', (socket) => {
       ack({
         ok: true,
         messages: getMessages(conversation.id),
-        partner: { id: partner.id, name: partner.name, online: isOnline(partner.id) },
+        partner: toPartnerInfo(partner),
       })
-      pushConversations(me)
+      pushConversationsTo(me)
     })
   )
 
@@ -563,42 +564,49 @@ io.on('connection', (socket) => {
         createdAt: new Date(ts).toISOString(),
       }
 
-      const partnerId = getPartnerId(conversation, me)
       ack({ ok: true, message })
-      // both participants (all their tabs/devices)
-      io.to(`user:${me}`).emit('message:new', message)
-      io.to(`user:${partnerId}`).emit('message:new', message)
-      pushConversations(me)
-      pushConversations(partnerId)
+      // Fan out to BOTH participants' personal rooms AND the admins room.
+      // (`user:admin` is empty — the admins room carries admin-side delivery
+      // and keeps every admin socket in sync.)
+      io.to(`user:${conversation.user_a_id}`).emit('message:new', message)
+      io.to(`user:${conversation.user_b_id}`).emit('message:new', message)
+      io.to('admins').emit('message:new', message)
+      pushConversationsTo(conversation.user_a_id)
+      pushConversationsTo(conversation.user_b_id)
       console.log(`[${me.slice(0, 8)}] -> ${conversation.id.slice(0, 8)}: ${content.slice(0, 60)}`)
     })
   )
 
   socket.on(
     'messages:read',
-    handler(socket, (data, ack) => {
+    handler(socket, (data) => {
       const me = authedUserId(socket)
       if (!me) return
       const conversation =
         typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
       if (!conversation || !isParticipant(conversation, me)) return
       markRead(conversation.id, me)
-      pushConversations(me)
+      pushConversationsTo(me)
     })
   )
 
   socket.on(
     'typing',
-    handler(socket, (data, ack) => {
+    handler(socket, (data) => {
       const me = authedUserId(socket)
       if (!me) return
       const conversation =
         typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
       if (!conversation || !isParticipant(conversation, me)) return
-      io.to(`user:${getPartnerId(conversation, me)}`).emit('partner:typing', {
+      const partnerId = getPartnerId(conversation, me)
+      const payload = {
         conversationId: conversation.id,
         isTyping: data?.isTyping === true,
-      })
+      }
+      // The `user:admin` room is empty; when the partner is the admin the
+      // relay must additionally reach the `admins` room.
+      io.to(`user:${partnerId}`).emit('partner:typing', payload)
+      if (partnerId === ADMIN_ID) io.to('admins').emit('partner:typing', payload)
     })
   )
 
@@ -610,8 +618,16 @@ io.on('connection', (socket) => {
     if (typeof userId !== 'string') return
     const wentOffline = removeOnlineSocket(userId, socket.id)
     if (wentOffline) {
-      db.run('UPDATE users SET last_seen_at = ? WHERE id = ?', [now(), userId])
-      socket.to('users').emit('presence:update', { userId, online: false })
+      const ts = now()
+      db.run('UPDATE users SET last_seen_at = ? WHERE id = ?', [ts, userId])
+      const payload = { userId, online: false, lastSeenAt: new Date(ts).toISOString() }
+      if (userId === ADMIN_ID) {
+        // Admin presence is public: everyone may know.
+        io.emit('presence:update', payload)
+      } else {
+        // User presence is private: only the admins room.
+        io.to('admins').emit('presence:update', payload)
+      }
       console.log(`User ${userId} went offline`)
     }
   })
@@ -625,8 +641,20 @@ io.on('connection', (socket) => {
 /* Boot                                                                */
 /* ------------------------------------------------------------------ */
 
+/** Seed the fixed admin account (id 'admin') if it is not present. */
+const ensureAdmin = () => {
+  if (findUserById(ADMIN_ID)) return
+  const ts = now()
+  db.run(
+    "INSERT INTO users (id, name, role, created_at, last_seen_at) VALUES (?, ?, 'admin', ?, ?)",
+    [ADMIN_ID, ADMIN_NAME, ts, ts]
+  )
+  console.log(`Admin account seeded (${ADMIN_ID})`)
+}
+ensureAdmin()
+
 httpServer.listen(PORT, () => {
-  console.log(`ChatKita messenger-service listening on port ${PORT} (path: '/')`)
+  console.log(`ChatKita chat-service listening on port ${PORT} (path: '/')`)
 })
 
 process.on('SIGTERM', () => {
