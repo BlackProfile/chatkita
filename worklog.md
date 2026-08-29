@@ -119,3 +119,26 @@ Stage Summary:
 - Chat (customer + admin) is now a true full-screen app shell: header on top, chat surface fills 100% of remaining viewport edge-to-edge (no max-width, no rounded floating card, no page scroll), footer only on beranda
 - Height is flex-driven (h-dvh root + flex-1/min-h-0 chain), so no magic calc numbers; adapts to mobile keyboard/dvh changes automatically
 - Files changed: src/app/page.tsx, src/components/chat/CustomerChat.tsx, src/components/chat/AdminPanel.tsx, src/components/chat/ChatBubble.tsx
+
+---
+Task ID: 5
+Agent: main (Z.ai Code)
+Task: Transform ChatKita from customer-service app into a Telegram-style general messenger (user request: "sekarang aplikasi ini bukan buat customer service, buat chattingan biasa kayak telegram")
+
+Work Log:
+- Backend (mini-services/chat-service/index.ts) fully rewritten around a new model: users(id,name,created_at,last_seen_at) → conversations(id, user_a_id, user_b_id [ordered pair = unique], created_at, last_message_at) → messages(id, conversation_id, sender_id, content, created_at) + reads(conversation_id, user_id, last_read_message_id) per-user-per-conversation unread tracking
+- New protocol (documented in src/lib/chat-types.ts): user:auth {name, userId?} (find-or-create by case-insensitive name; stored userId = login), users:search {query?} (empty = recent users, excludes self, ESCAPE '\\', limit 15), conversations:start {userId} (get-or-create, FORBIDDEN on self, pushes list to BOTH users), messages:history {conversationId} (participant-gated, marks read, returns partner+online), messages:send (sender auto-reads up to own message), messages:read (no ack), typing → partner:typing relay
+- Server→client: message:new (to both personal rooms), conversations:update (personalized per user), partner:typing, presence:update (onlineSockets Map<userId,Set<socketId>>; broadcast on first socket connect / last disconnect; last_seen_at updated on offline)
+- Fixed self-inflicted handler-wrapper bug mid-way: handlers need the socket — signature is now handler(socket, fn) with closure binding (socket is NOT part of socket.io event args)
+- Deleted old incompatible chat.db (customer-service schema); restart = cd mini-services/chat-service && pkill -f 'bun --hot index.ts' && rm -f chat.db* && nohup bun run dev
+- New test-messenger.ts: 26 assertions across auth/search/start/messaging/unread/typing/presence/isolation — all PASS. Debugging lesson: the long "c2 failure" was a TEST bug (conversations:update payload is an ARRAY; test read data.id instead of data[0].id) — onAny logging exposed it. Also learned bun --hot keeps OLD module instances alive on file change (split state) → never debug protocol right after editing files without a clean restart
+- Frontend: chat-types.ts rewritten (ChatUser/ChatMessage{senderId}/ConversationOverview/SearchUser + acks; MESSENGER_STORAGE_KEY replaces CUSTOMER_STORAGE_KEY); Messenger.tsx (login-by-name → full-screen split: profile header + Chat Baru + filter + conversation list w/ online dots & unread badges | chat pane w/ partner status "sedang mengetik…/Online/Offline", history, live messages, typing dots); NewChatDialog.tsx (shadcn Dialog, debounced users:search, starting-state disable, error mapping); AdminPanel.tsx + CustomerChat.tsx DELETED; page.tsx simplified to view: home|chat with new copy ("Ngobrol dengan siapa saja, real-time.", 3-step card, feature row)
+- Lint fixes: socket passed to dialog via STATE (set inside connect callback) not socketRef.current (react-hooks/refs); dialog state reset moved from useEffect into onOpenChange wrapper (react-hooks/set-state-in-effect)
+- E2E verified via gateway :81 with two browser sessions (Andi & Sinta): new-chat dialog (Sinta shown Online), real-time both directions, unread badge 2 → resets on open, typing indicator "sedang mengetik…", Sinta logout → Andi sees "Offline" + gray dot, reload → login persists from localStorage + full history restored, mobile 375px list⇄chat toggle, dark mode desktop+mobile, fresh-DB empty states with guidance copy
+- Mid-test scare documented: a stray Next.js HMR full reload reset in-memory view state to home mid-verification — dev-server artifact, not an app bug (localStorage login survived, conversation intact after re-entry)
+- Cleaned protocol-test junk users from chat.db (fresh handover); final lint clean, dev.log clean, services on :3000/:3003/:81 healthy
+
+Stage Summary:
+- ChatKita is now a Telegram-style 1-on-1 messenger: name-only login (same name = same account, works across tabs like multi-device), search users by name, start/reopen conversations, real-time messages, typing indicators, per-conversation unread counts, online/offline presence — all in the full-screen layout from Task 4
+- Admin role fully removed (no password, no admin panel); old customer data model replaced by users/conversations/messages + per-user read state
+- Files: mini-services/chat-service/index.ts (+test-messenger.ts) rewritten; src/lib/chat-types.ts rewritten; src/components/chat/Messenger.tsx + NewChatDialog.tsx new; AdminPanel/CustomerChat deleted; src/app/page.tsx rewritten

@@ -3,16 +3,15 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  Headset,
   History,
   Lock,
   MessageCircleMore,
-  ShieldCheck,
+  MessagesSquare,
+  UserPlus,
   Zap,
 } from "lucide-react";
 
-import { AdminPanel } from "@/components/chat/AdminPanel";
-import { CustomerChat } from "@/components/chat/CustomerChat";
+import { Messenger } from "@/components/chat/Messenger";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,11 +24,10 @@ import {
 } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
-type View = "home" | "customer" | "admin";
+type View = "home" | "chat";
 
 export default function Page() {
   const [view, setView] = useState<View>("home");
-
   const isChatView = view !== "home";
 
   return (
@@ -51,12 +49,12 @@ export default function Page() {
             </span>
             <span className="truncate text-lg font-bold tracking-tight">ChatKita</span>
             <Badge variant="outline" className="hidden sm:inline-flex">
-              Customer Service
+              Chat Sederhana
             </Badge>
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <ThemeToggle />
-            {view !== "home" ? (
+            {isChatView ? (
               <Button variant="ghost" className="h-11" onClick={() => setView("home")}>
                 ← Beranda
               </Button>
@@ -85,70 +83,69 @@ export default function Page() {
               <div className="mx-auto w-full max-w-3xl px-4 py-10">
                 <div className="text-center">
                   <h1 className="text-3xl font-bold tracking-tight md:text-4xl">
-                    Butuh bantuan? Kami siap membantu.
+                    Ngobrol dengan siapa saja, real-time.
                   </h1>
                   <p className="mt-3 text-balance text-muted-foreground">
-                    Pilih peran Anda untuk melanjutkan — chat berjalan real-time dan privat.
+                    Masuk dengan namamu, cari teman, dan mulai chat 1-on-1 —
+                    sederhana seperti aplikasi pesan biasa.
                   </p>
                 </div>
 
-                <div className="mt-8 grid gap-4 md:grid-cols-2">
-                  <Card className="rounded-2xl">
-                    <CardHeader>
-                      <span
-                        className="w-fit rounded-lg bg-emerald-600/10 p-3 text-emerald-600"
-                        aria-hidden="true"
-                      >
-                        <Headset className="size-6" />
-                      </span>
-                      <CardTitle className="text-xl">Saya Customer</CardTitle>
-                      <CardDescription>
-                        Chat privat 1-on-1 dengan tim admin kami
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                      <Button
-                        className="h-11 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
-                        onClick={() => setView("customer")}
-                      >
-                        Mulai Chat
-                      </Button>
-                    </CardContent>
-                  </Card>
-
-                  <Card className="rounded-2xl">
-                    <CardHeader>
-                      <span
-                        className="w-fit rounded-lg bg-emerald-600/10 p-3 text-emerald-600"
-                        aria-hidden="true"
-                      >
-                        <ShieldCheck className="size-6" />
-                      </span>
-                      <CardTitle className="text-xl">Saya Admin</CardTitle>
-                      <CardDescription>
-                        Lihat daftar customer &amp; balas pesan mereka
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                      <Button
-                        variant="outline"
-                        className="h-11 w-full"
-                        onClick={() => setView("admin")}
-                      >
-                        Masuk Admin
-                      </Button>
-                    </CardContent>
-                  </Card>
-                </div>
+                <Card className="mx-auto mt-8 max-w-md rounded-2xl">
+                  <CardHeader className="items-center text-center">
+                    <span
+                      className="mx-auto rounded-full bg-emerald-600/10 p-4 text-emerald-600"
+                      aria-hidden="true"
+                    >
+                      <MessagesSquare className="size-7" />
+                    </span>
+                    <CardTitle className="text-xl">Mulai Chat</CardTitle>
+                    <CardDescription>
+                      Tidak perlu akun — cukup nama untuk masuk dan chat
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <Button
+                      className="h-11 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+                      onClick={() => setView("chat")}
+                    >
+                      Masuk Chat
+                    </Button>
+                    <ol className="space-y-1.5 text-left text-sm text-muted-foreground">
+                      <li className="flex items-center gap-2">
+                        <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-600/10 text-[10px] font-bold text-emerald-700">
+                          1
+                        </span>
+                        Masukkan nama Anda
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-600/10 text-[10px] font-bold text-emerald-700">
+                          2
+                        </span>
+                        Ketuk “Chat Baru” dan cari nama teman
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-600/10 text-[10px] font-bold text-emerald-700">
+                          3
+                        </span>
+                        Ngobrol real-time — pesan, status online, &amp; lampu typing
+                      </li>
+                    </ol>
+                  </CardContent>
+                </Card>
 
                 <ul className="mt-8 flex flex-wrap items-center justify-center gap-x-6 gap-y-3">
                   <li className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <Lock className="size-4 text-emerald-600" aria-hidden="true" />
-                    Privat 1-on-1
+                    <UserPlus className="size-4 text-emerald-600" aria-hidden="true" />
+                    Cari teman by nama
                   </li>
                   <li className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Zap className="size-4 text-emerald-600" aria-hidden="true" />
                     Real-time
+                  </li>
+                  <li className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Lock className="size-4 text-emerald-600" aria-hidden="true" />
+                    Privat 1-on-1
                   </li>
                   <li className="flex items-center gap-2 text-sm text-muted-foreground">
                     <History className="size-4 text-emerald-600" aria-hidden="true" />
@@ -159,29 +156,16 @@ export default function Page() {
             </motion.div>
           ) : null}
 
-          {view === "customer" ? (
+          {view === "chat" ? (
             <motion.div
-              key="customer"
+              key="chat"
               className="flex min-h-0 flex-1 flex-col"
               initial={{ opacity: 0, y: 4 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -4 }}
               transition={{ duration: 0.2 }}
             >
-              <CustomerChat />
-            </motion.div>
-          ) : null}
-
-          {view === "admin" ? (
-            <motion.div
-              key="admin"
-              className="flex min-h-0 flex-1 flex-col"
-              initial={{ opacity: 0, y: 4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.2 }}
-            >
-              <AdminPanel />
+              <Messenger />
             </motion.div>
           ) : null}
         </AnimatePresence>
@@ -190,8 +174,8 @@ export default function Page() {
       {/* ------------------------------ Footer ------------------------------ */}
       {/* Footer hanya tampil di beranda — saat chat, area chat memenuhi layar */}
       {view === "home" ? (
-        <footer className="mt-auto shrink-0 border-t py-4 text-center text-sm text-muted-foreground">
-          © 2025 ChatKita · Demo Customer Service
+        <footer className="shrink-0 border-t py-4 text-center text-sm text-muted-foreground">
+          © 2025 ChatKita · Chat Sederhana
         </footer>
       ) : null}
     </div>
