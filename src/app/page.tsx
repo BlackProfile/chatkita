@@ -7,10 +7,11 @@ import {
   Lock,
   MessageCircleMore,
   MessagesSquare,
-  UserPlus,
+  ShieldCheck,
   Zap,
 } from "lucide-react";
 
+import { AdminPanel } from "@/components/chat/AdminPanel";
 import { Messenger } from "@/components/chat/Messenger";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Badge } from "@/components/ui/badge";
@@ -24,7 +25,7 @@ import {
 } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
-type View = "home" | "chat";
+type View = "home" | "chat" | "admin";
 
 export default function Page() {
   const [view, setView] = useState<View>("home");
@@ -49,7 +50,7 @@ export default function Page() {
             </span>
             <span className="truncate text-lg font-bold tracking-tight">ChatKita</span>
             <Badge variant="outline" className="hidden sm:inline-flex">
-              Chat Sederhana
+              Chat 1-on-1
             </Badge>
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -83,11 +84,11 @@ export default function Page() {
               <div className="mx-auto w-full max-w-3xl px-4 py-10">
                 <div className="text-center">
                   <h1 className="text-3xl font-bold tracking-tight md:text-4xl">
-                    Ngobrol dengan siapa saja, real-time.
+                    Chatting simpel, langsung terhubung.
                   </h1>
                   <p className="mt-3 text-balance text-muted-foreground">
-                    Masuk dengan namamu, cari teman, dan mulai chat 1-on-1 —
-                    sederhana seperti aplikasi pesan biasa.
+                    Masuk dengan namamu dan ngobrol real-time dengan Admin —
+                    privat 1-on-1, rasanya seperti aplikasi chat biasa.
                   </p>
                 </div>
 
@@ -101,7 +102,7 @@ export default function Page() {
                     </span>
                     <CardTitle className="text-xl">Mulai Chat</CardTitle>
                     <CardDescription>
-                      Tidak perlu akun — cukup nama untuk masuk dan chat
+                      Tidak perlu akun — cukup nama untuk langsung terhubung
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3">
@@ -111,7 +112,7 @@ export default function Page() {
                     >
                       Masuk Chat
                     </Button>
-                    <ol className="space-y-1.5 text-left text-sm text-muted-foreground">
+                    <ol className="space-y-1.5 pt-1 text-left text-sm text-muted-foreground">
                       <li className="flex items-center gap-2">
                         <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-600/10 text-[10px] font-bold text-emerald-700">
                           1
@@ -122,7 +123,7 @@ export default function Page() {
                         <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-600/10 text-[10px] font-bold text-emerald-700">
                           2
                         </span>
-                        Ketuk “Chat Baru” dan cari nama teman
+                        Langsung terhubung dengan Admin
                       </li>
                       <li className="flex items-center gap-2">
                         <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-600/10 text-[10px] font-bold text-emerald-700">
@@ -134,18 +135,28 @@ export default function Page() {
                   </CardContent>
                 </Card>
 
+                <div className="mt-5 flex flex-col items-center gap-1.5">
+                  <Button
+                    variant="outline"
+                    className="h-11"
+                    onClick={() => setView("admin")}
+                  >
+                    <ShieldCheck className="size-4" aria-hidden="true" />
+                    Masuk Admin
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    Untuk pemilik — baca &amp; balas pesan semua user
+                  </p>
+                </div>
+
                 <ul className="mt-8 flex flex-wrap items-center justify-center gap-x-6 gap-y-3">
                   <li className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <UserPlus className="size-4 text-emerald-600" aria-hidden="true" />
-                    Cari teman by nama
+                    <Lock className="size-4 text-emerald-600" aria-hidden="true" />
+                    Privat 1-on-1
                   </li>
                   <li className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Zap className="size-4 text-emerald-600" aria-hidden="true" />
                     Real-time
-                  </li>
-                  <li className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <Lock className="size-4 text-emerald-600" aria-hidden="true" />
-                    Privat 1-on-1
                   </li>
                   <li className="flex items-center gap-2 text-sm text-muted-foreground">
                     <History className="size-4 text-emerald-600" aria-hidden="true" />
@@ -166,6 +177,19 @@ export default function Page() {
               transition={{ duration: 0.2 }}
             >
               <Messenger />
+            </motion.div>
+          ) : null}
+
+          {view === "admin" ? (
+            <motion.div
+              key="admin"
+              className="flex min-h-0 flex-1 flex-col"
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              transition={{ duration: 0.2 }}
+            >
+              <AdminPanel />
             </motion.div>
           ) : null}
         </AnimatePresence>

@@ -15,18 +15,18 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ChatKita — Customer Service Chat",
+  title: "ChatKita — Chat Sederhana",
   description:
-    "Aplikasi chat customer service real-time: percakapan privat 1-on-1 antara customer dan admin, lengkap dengan dasbor admin untuk membalas pesan.",
-  keywords: ["ChatKita", "customer service", "chat", "real-time", "Indonesia"],
+    "Aplikasi chat sederhana real-time: ngobrol privat 1-on-1 dengan Admin, lengkap dengan panel admin untuk membaca & membalas pesan semua user.",
+  keywords: ["ChatKita", "chat", "real-time", "1-on-1", "Indonesia"],
   authors: [{ name: "ChatKita" }],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },
   openGraph: {
-    title: "ChatKita — Customer Service Chat",
+    title: "ChatKita — Chat Sederhana",
     description:
-      "Chat privat 1-on-1 dengan tim customer service kami — real-time dan mudah digunakan.",
+      "Chat privat 1-on-1 dengan Admin — real-time, simpel, seperti aplikasi chat biasa.",
     siteName: "ChatKita",
     type: "website",
   },
