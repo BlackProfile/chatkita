@@ -281,3 +281,20 @@ Work Log:
 
 Stage Summary:
 - Chat is now edge-to-edge: kiri nempel kiri, kanan nempel kanan at any window width (mobile unchanged — it already filled the width). Files: src/components/chat/Messenger.tsx, src/components/chat/AdminPanel.tsx, src/components/chat/ChatBubble.tsx
+
+---
+Task ID: 12 (continued)
+Agent: main (Z.ai Code)
+Task: Re-verification after context continuation — user re-sent the "ga rata kanan kiri" screenshots; confirm Task 12 fix is live end-to-end
+
+Work Log:
+- Confirmed on-disk code already contains the Task 12 fix (Messenger.tsx + AdminPanel.tsx message containers = `flex w-full flex-col gap-2 p-3 sm:p-4 md:p-6`, ChatBubble proportional max-w) — user's screenshots matched the OLD centered `max-w-3xl` layout geometry exactly, i.e. taken before the fix
+- dev.log showed a benign EADDRINUSE from a duplicate start attempt; real server on 3000 answers 200. chat-service "missing" via pgrep was a false alarm (runs as `bun --hot index.ts`); port 3003 + gateway 81 both answer socket.io 200
+- NEW GOTCHA: agent-browser sessions opened http://localhost:3000 directly → socket stuck "Menghubungkan…" forever, because port 3000 (Next) does NOT proxy /socket.io — the Caddy gateway (81) does (3000 even 308-redirects the polling URL to the SPA HTML). Fix: open the app via http://localhost:81/ — socket connects instantly. All future browser E2E MUST use port 81
+- Browser-verified (1280×720, light): user chat own bubble right-edge distance = 24px (= p-6) on full 1280px pane; admin pane (900px wide) user msg left distance = 24px, admin reply right distance = 24px; screenshots /tmp/rata-user.png, /tmp/rata-admin.png confirm visually — kiri nempel kiri, kanan nempel kanan
+- Cleanup: cleared agent-browser localStorage BEFORE deleting rows (lesson applied), then surgical bun:sqlite script removed CekRata + stale Repro631 (users/conversations/messages/reads). Remaining: Admin + iji (real owner traffic, untouched)
+- lint clean
+
+Stage Summary:
+- Task 12 fix CONFIRMED LIVE in browser on both user chat and admin pane. User just needs a reload (their screenshots predate the fix)
+- Environment fact for all future agents: browser E2E via localhost:81 (gateway), never localhost:3000 (no socket proxy there)
