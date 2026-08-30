@@ -20,6 +20,21 @@
  *   - AI: auto-reply while admin is offline, reply suggestions,
  *     conversation summary, voice-note transcription (z-ai-web-dev-sdk)
  *
+ * New in v5:
+ *   - Emoji reactions (message_reactions, one per user per message)
+ *   - Edit own text messages (15-min window, edited_at marker)
+ *   - On-demand AI translation (messages.translation, cached)
+ *   - Pin a message per conversation (banner on both sides)
+ *   - Archive / unarchive conversations (admin inbox hygiene; a new user
+ *     message auto-unarchives)
+ *   - Broadcast announcement to ALL conversations at once
+ *   - Conversation export (client renders CSV / print-to-PDF)
+ *   - Chatbot menu: direct mapped answers before AI/human
+ *   - Pre-chat topic (users.topic, chosen at login) + star ratings
+ *   - Web Push notifications when the recipient has no live socket
+ *     (VAPID keys generated once, stored in settings; subscriptions in
+ *     push_subscriptions; dead endpoints pruned on 404/410)
+ *
  * Users are isolated from each other: every event is participant-gated
  * and user presence is visible to the `admins` room ONLY (privacy).
  *
@@ -34,6 +49,7 @@ import { createHash, randomUUID } from 'crypto'
 import { Database } from 'bun:sqlite'
 import { Server, type Socket as IoSocket } from 'socket.io'
 import ZAI from 'z-ai-web-dev-sdk'
+import webpush from 'web-push'
 
 /* ------------------------------------------------------------------ */
 /* Configuration                                                       */
@@ -50,6 +66,10 @@ const MAX_MEDIA_LENGTH = 2_500_000
 /** Fixed UTC offset of the operating-hours timezone (Asia/Bangkok). */
 const TZ_OFFSET_MS = 7 * 3600_000
 const USER_LABELS = ['new', 'priority', 'vip'] as const
+/** Fixed reaction palette (v5). */
+const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const
+/** Window in which a sender may edit their own text message. */
+const EDIT_WINDOW_MS = 15 * 60_000
 
 /* ------------------------------------------------------------------ */
 /* Storage (bun:sqlite, WAL)                                           */
@@ -125,6 +145,42 @@ addColumn('messages', 'deleted_at', 'INTEGER')
 addColumn('users', 'pin_hash', 'TEXT')
 addColumn('users', 'label', 'TEXT')
 addColumn('users', 'note', 'TEXT')
+/* v5 migrations */
+addColumn('messages', 'edited_at', 'INTEGER')
+addColumn('messages', 'translation', 'TEXT')
+addColumn('messages', 'kind', 'TEXT')
+addColumn('conversations', 'archived_at', 'INTEGER')
+addColumn('conversations', 'pinned_message_id', 'INTEGER')
+addColumn('users', 'topic', 'TEXT')
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS message_reactions (
+    message_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    PRIMARY KEY (message_id, user_id)
+  )
+`)
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS ratings (
+    conversation_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    stars INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (conversation_id, user_id)
+  )
+`)
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  )
+`)
 
 /* ------------------------------ row types ------------------------------ */
 
@@ -137,6 +193,7 @@ interface UserRow {
   pin_hash?: string | null
   label?: string | null
   note?: string | null
+  topic?: string | null
 }
 
 interface ConversationRow {
@@ -145,6 +202,8 @@ interface ConversationRow {
   user_b_id: string
   created_at: number
   last_message_at: number
+  archived_at?: number | null
+  pinned_message_id?: number | null
 }
 
 interface MessageRow {
@@ -158,6 +217,9 @@ interface MessageRow {
   duration_ms?: number | null
   transcript?: string | null
   deleted_at?: number | null
+  edited_at?: number | null
+  translation?: string | null
+  kind?: string | null
 }
 
 /* ------------------------------ API types ------------------------------ */
@@ -168,12 +230,18 @@ interface ChatMessageApi {
   senderId: string
   content: string
   createdAt: string
-  type: 'text' | 'image' | 'voice' | 'system'
+  type: 'text' | 'image' | 'voice' | 'system' | 'broadcast'
   replyToId?: number
   replyTo?: { id: number; senderId: string; snippet: string; type: string }
   durationMs?: number
   transcript?: string
   deletedAt?: string
+  editedAt?: string
+  translation?: string
+  /** Emoji reactions grouped by emoji with the reacting user ids. */
+  reactions?: { emoji: string; userIds: string[] }[]
+  /** Marker for special system cards (e.g. rating request/thanks). */
+  kind?: string
 }
 
 interface PartnerInfoApi {
@@ -182,6 +250,7 @@ interface PartnerInfoApi {
   online: boolean
   lastSeenAt: string | null
   label?: string | null
+  topic?: string | null
 }
 
 interface ConversationOverviewApi {
@@ -194,6 +263,11 @@ interface ConversationOverviewApi {
   unread: number
   /** How far the PARTNER has read → powers ✓✓ on own bubbles. */
   partnerLastReadId: number
+  /** v5 — archive state (admin side). */
+  archived?: boolean
+  /** v5 — pinned message (banner on both sides). */
+  pinnedMessageId?: number | null
+  pinned?: { id: number; senderId: string; snippet: string; type: string } | null
 }
 
 interface ServiceSettings {
@@ -202,6 +276,13 @@ interface ServiceSettings {
   aiKb: string
   outsideMsg: string
   quickReplies: { label: string; text: string }[]
+  /** v5 — SLA: alert the admin when a user waits longer than this. */
+  slaMinutes: number
+  /** v5 — chatbot menu: instant mapped answers before AI/human. */
+  chatMenuEnabled: boolean
+  chatMenuItems: { label: string; answer: string }[]
+  /** v5 — comma-separated topics offered on the login (pre-chat) form. */
+  preChatTopics: string
 }
 
 const DEFAULT_SETTINGS: ServiceSettings = {
@@ -221,6 +302,14 @@ const DEFAULT_SETTINGS: ServiceSettings = {
     { label: 'Diterima', text: 'Baik, permintaan Anda sudah kami terima dan segera diproses ✅' },
     { label: 'Penutup', text: 'Senang bisa membantu! Kalau ada lagi, silakan chat kapan saja 🙏' },
   ],
+  slaMinutes: 10,
+  chatMenuEnabled: false,
+  chatMenuItems: [
+    { label: 'Jam buka', answer: 'Jam operasional kami Senin–Jumat 09.00–17.00. Di luar jam itu admin akan membalas keesokan harinya 😊' },
+    { label: 'Info produk', answer: 'Silakan tanyakan produk yang Anda maksud — admin akan memberi info lengkap beserta harganya 🙏' },
+    { label: 'Chat admin', answer: 'Baik, pesan Anda saya teruskan ke admin. Mohon tunggu sebentar ya 🙏' },
+  ],
+  preChatTopics: '',
 }
 
 let settings: ServiceSettings = loadSettings()
@@ -238,6 +327,10 @@ function loadSettings(): ServiceSettings {
       aiKb: parsed.aiKb ?? DEFAULT_SETTINGS.aiKb,
       outsideMsg: parsed.outsideMsg ?? DEFAULT_SETTINGS.outsideMsg,
       quickReplies: parsed.quickReplies ?? DEFAULT_SETTINGS.quickReplies,
+      slaMinutes: parsed.slaMinutes ?? DEFAULT_SETTINGS.slaMinutes,
+      chatMenuEnabled: parsed.chatMenuEnabled ?? DEFAULT_SETTINGS.chatMenuEnabled,
+      chatMenuItems: parsed.chatMenuItems ?? DEFAULT_SETTINGS.chatMenuItems,
+      preChatTopics: parsed.preChatTopics ?? DEFAULT_SETTINGS.preChatTopics,
     }
   } catch {
     return { ...DEFAULT_SETTINGS }
@@ -250,6 +343,88 @@ function saveSettings() {
     ['service', JSON.stringify(settings)]
   )
 }
+
+/* --------------------- Web Push (v5, offline delivery) --------------------- */
+
+let VAPID_PUBLIC = ''
+try {
+  const getSetting = (key: string) =>
+    (db.query('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | null)?.value
+  const pub = getSetting('vapidPublic')
+  const priv = getSetting('vapidPrivate')
+  if (pub && priv) {
+    VAPID_PUBLIC = pub
+    webpush.setVapidDetails('mailto:admin@chatkita.local', pub, priv)
+  } else {
+    const keys = webpush.generateVAPIDKeys()
+    VAPID_PUBLIC = keys.publicKey
+    db.run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', ['vapidPublic', keys.publicKey])
+    db.run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', ['vapidPrivate', keys.privateKey])
+    webpush.setVapidDetails('mailto:admin@chatkita.local', keys.publicKey, keys.privateKey)
+    console.log('VAPID keys generated and stored')
+  }
+} catch (err) {
+  console.error('VAPID bootstrap failed (push disabled):', (err as Error)?.message ?? err)
+}
+
+interface PushPayload {
+  title: string
+  body: string
+  /** URL to open/focus when the notification is clicked. */
+  url: string
+}
+
+/** Fire-and-forget push to every stored subscription of `userId`. */
+const pushSend = async (userId: string, payload: PushPayload) => {
+  if (!VAPID_PUBLIC) return
+  try {
+    const subs = db
+      .query('SELECT * FROM push_subscriptions WHERE user_id = ?')
+      .all(userId) as Array<{ endpoint: string; p256dh: string; auth: string }>
+    if (subs.length === 0) return
+    await Promise.all(
+      subs.map(async (s) => {
+        try {
+          await webpush.sendNotification(
+            { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
+            JSON.stringify(payload),
+            { TTL: 3600 }
+          )
+        } catch (err) {
+          const status = (err as { statusCode?: number }).statusCode
+          if (status === 404 || status === 410) {
+            db.run('DELETE FROM push_subscriptions WHERE endpoint = ?', [s.endpoint])
+          }
+        }
+      })
+    )
+  } catch (err) {
+    console.error('Push send error:', (err as Error)?.message ?? err)
+  }
+}
+
+/** Push a new message to `recipientId` when they have no live socket. */
+const pushNewMessageIfOffline = (recipientId: string, senderName: string, body: string) => {
+  if (isOnline(recipientId)) return
+  const isAdmin = recipientId === ADMIN_ID
+  void pushSend(recipientId, {
+    title: isAdmin ? `${senderName} · ChatKita` : senderName,
+    body,
+    url: isAdmin ? '/?admin' : '/',
+  })
+}
+
+/** Settings that are safe/needed on the PUBLIC (user) side of the app. */
+const getPublicSettings = () => ({
+  chatMenuEnabled: settings.chatMenuEnabled,
+  chatMenuItems: settings.chatMenuItems,
+  preChatTopics: settings.preChatTopics
+    .split(',')
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0)
+    .slice(0, 12),
+  pushPublicKey: VAPID_PUBLIC,
+})
 
 /* ------------------------------ helpers ------------------------------ */
 
@@ -266,6 +441,9 @@ const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   ...(row.duration_ms ? { durationMs: row.duration_ms } : {}),
   ...(row.transcript ? { transcript: row.transcript } : {}),
   ...(row.deleted_at ? { deletedAt: new Date(row.deleted_at).toISOString() } : {}),
+  ...(row.edited_at ? { editedAt: new Date(row.edited_at).toISOString() } : {}),
+  ...(row.translation && !row.deleted_at ? { translation: row.translation } : {}),
+  ...(row.kind ? { kind: row.kind } : {}),
 })
 
 /** Human-readable one-liner for previews and reply quotes. */
@@ -275,7 +453,67 @@ const snippetOf = (row: Pick<MessageRow, 'type' | 'content' | 'deleted_at'>): st
   if (type === 'image') return '📷 Foto'
   if (type === 'voice') return '🎤 Pesan suara'
   if (type === 'system') return row.content
+  if (type === 'broadcast') return `📢 ${row.content}`
   return row.content
+}
+
+/** Grouped reactions for one message (message:updated payloads). */
+const reactionsFor = (messageId: number): { emoji: string; userIds: string[] }[] => {
+  const rows = db
+    .query('SELECT user_id, emoji FROM message_reactions WHERE message_id = ?')
+    .all(messageId) as Array<{ user_id: string; emoji: string }>
+  const byEmoji = new Map<string, string[]>()
+  for (const r of rows) {
+    const users = byEmoji.get(r.emoji) ?? []
+    users.push(r.user_id)
+    byEmoji.set(r.emoji, users)
+  }
+  return [...byEmoji.entries()].map(([emoji, userIds]) => ({ emoji, userIds }))
+}
+
+/** Attach grouped reactions to a batch of messages (single query). */
+const attachReactions = (rows: MessageRow[], messages: ChatMessageApi[]) => {
+  if (rows.length === 0) return
+  const placeholders = rows.map(() => '?').join(',')
+  const reRows = db
+    .query(
+      `SELECT message_id, user_id, emoji FROM message_reactions WHERE message_id IN (${placeholders})`
+    )
+    .all(...rows.map((r) => r.id)) as Array<{ message_id: number; user_id: string; emoji: string }>
+  if (reRows.length === 0) return
+  const byMsg = new Map<number, Map<string, string[]>>()
+  for (const r of reRows) {
+    let byEmoji = byMsg.get(r.message_id)
+    if (!byEmoji) {
+      byEmoji = new Map()
+      byMsg.set(r.message_id, byEmoji)
+    }
+    const users = byEmoji.get(r.emoji) ?? []
+    users.push(r.user_id)
+    byEmoji.set(r.emoji, users)
+  }
+  for (const msg of messages) {
+    const byEmoji = byMsg.get(msg.id)
+    if (byEmoji && byEmoji.size > 0) {
+      msg.reactions = [...byEmoji.entries()].map(([emoji, userIds]) => ({ emoji, userIds }))
+    }
+  }
+}
+
+/** Snapshot of the conversation's pinned message (or null). */
+const pinnedSnapshotOf = (conversation: ConversationRow) => {
+  const pid = conversation.pinned_message_id
+  if (!pid) return null
+  const row = db
+    .query('SELECT * FROM messages WHERE id = ? AND conversation_id = ?')
+    .get(pid, conversation.id) as MessageRow | null
+  if (!row) return null
+  return {
+    id: row.id,
+    senderId: row.sender_id,
+    snippet: snippetOf(row),
+    type: row.type ?? 'text',
+  }
 }
 
 /** Fetch reply-quote snapshots for a batch of messages (single query). */
@@ -343,7 +581,7 @@ const ensureConversationWithAdmin = (userId: string): ConversationRow => {
     [id, a, b, ts, ts]
   )
   console.log(`Conversation ${id} ensured: ${a} <-> ${b}`)
-  return { id, user_a_id: a, user_b_id: b, created_at: ts, last_message_at: ts }
+  return { id, user_a_id: a, user_b_id: b, created_at: ts, last_message_at: ts, archived_at: null, pinned_message_id: null }
 }
 
 const getPartnerId = (conversation: ConversationRow, userId: string) =>
@@ -369,6 +607,7 @@ const getMessages = (conversationId: string): ChatMessageApi[] => {
     .all(conversationId) as MessageRow[]
   const messages = rows.map(toChatMessage)
   attachReplyPreviews(rows, messages)
+  attachReactions(rows, messages)
   return messages
 }
 
@@ -418,16 +657,24 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
       `SELECT
         c.id,
         c.last_message_at,
+        c.archived_at,
+        c.pinned_message_id,
         CASE WHEN c.user_a_id = $me THEN c.user_b_id ELSE c.user_a_id END AS partner_id,
         p.name AS partner_name,
         p.last_seen_at AS partner_last_seen,
         p.label AS partner_label,
+        p.topic AS partner_topic,
         lm.id AS last_id,
         lm.sender_id AS last_sender,
         lm.content AS last_content,
         lm.created_at AS last_at,
         lm.type AS last_type,
         lm.deleted_at AS last_deleted,
+        pm.id AS pin_id,
+        pm.sender_id AS pin_sender,
+        pm.content AS pin_content,
+        pm.type AS pin_type,
+        pm.deleted_at AS pin_deleted,
         (SELECT r.last_read_message_id FROM reads r
           WHERE r.conversation_id = c.id
             AND r.user_id = (CASE WHEN c.user_a_id = $me THEN c.user_b_id ELSE c.user_a_id END)
@@ -447,22 +694,32 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
       LEFT JOIN messages lm
         ON lm.id = (SELECT m2.id FROM messages m2
                     WHERE m2.conversation_id = c.id ORDER BY m2.id DESC LIMIT 1)
+      LEFT JOIN messages pm
+        ON pm.id = c.pinned_message_id
       WHERE c.user_a_id = $me OR c.user_b_id = $me
       ORDER BY c.last_message_at DESC`
     )
     .all({ $me: userId }) as Array<{
     id: string
     last_message_at: number
+    archived_at: number | null
+    pinned_message_id: number | null
     partner_id: string
     partner_name: string
     partner_last_seen: number
     partner_label: string | null
+    partner_topic: string | null
     last_id: number | null
     last_sender: string | null
     last_content: string | null
     last_at: number | null
     last_type: string | null
     last_deleted: number | null
+    pin_id: number | null
+    pin_sender: string | null
+    pin_content: string | null
+    pin_type: string | null
+    pin_deleted: number | null
     partner_read: number | null
     unread: number
   }>
@@ -475,6 +732,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
       online: isOnline(r.partner_id),
       lastSeenAt: new Date(r.partner_last_seen).toISOString(),
       ...(r.partner_label ? { label: r.partner_label } : {}),
+      ...(r.partner_topic ? { topic: r.partner_topic } : {}),
     },
     lastMessage:
       r.last_id != null
@@ -490,6 +748,21 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     lastMessageAt: new Date(r.last_message_at).toISOString(),
     unread: r.unread,
     partnerLastReadId: r.partner_read ?? 0,
+    archived: r.archived_at != null,
+    pinnedMessageId: r.pinned_message_id ?? null,
+    pinned:
+      r.pin_id != null
+        ? {
+            id: r.pin_id,
+            senderId: r.pin_sender as string,
+            snippet: snippetOf({
+              type: r.pin_type ?? 'text',
+              content: r.pin_content ?? '',
+              deleted_at: r.pin_deleted,
+            }),
+            type: r.pin_type ?? 'text',
+          }
+        : null,
   }))
 }
 
@@ -557,19 +830,19 @@ const startOfBangkokDay = () => {
 /* Message persistence + fan-out (shared by human send / AI / system)  */
 /* ------------------------------------------------------------------ */
 
-type MessageType = 'text' | 'image' | 'voice' | 'system'
+type MessageType = 'text' | 'image' | 'voice' | 'system' | 'broadcast'
 
 const insertAndFanOut = (
   conversation: ConversationRow,
   senderId: string,
   content: string,
   type: MessageType,
-  opts: { replyToId?: number; durationMs?: number } = {}
+  opts: { replyToId?: number; durationMs?: number; kind?: string } = {}
 ): ChatMessageApi => {
   const ts = now()
   const result = db.run(
-    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [conversation.id, senderId, content, ts, type, opts.replyToId ?? null, opts.durationMs ?? null]
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [conversation.id, senderId, content, ts, type, opts.replyToId ?? null, opts.durationMs ?? null, opts.kind ?? null]
   )
   db.run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [ts, conversation.id])
   const id = Number(result.lastInsertRowid)
@@ -585,6 +858,16 @@ const insertAndFanOut = (
   io.to('admins').emit('message:new', message)
   pushConversationsTo(conversation.user_a_id)
   pushConversationsTo(conversation.user_b_id)
+
+  // Web Push for recipients with zero live sockets (v5).
+  if (type !== 'system') {
+    const senderName = findUserById(senderId)?.name ?? 'ChatKita'
+    const body = snippetOf(row)
+    for (const rid of [conversation.user_a_id, conversation.user_b_id]) {
+      if (rid === senderId) continue
+      pushNewMessageIfOffline(rid, senderName, body)
+    }
+  }
   return message
 }
 
@@ -730,6 +1013,33 @@ const maybeOutsideHoursNotice = (conversation: ConversationRow) => {
   insertAndFanOut(conversation, ADMIN_ID, settings.outsideMsg, 'system')
 }
 
+/* ---------------------- chatbot menu (v5) ---------------------- */
+
+const menuListing = (): string | null => {
+  if (settings.chatMenuItems.length === 0) return null
+  return (
+    '📋 Menu layanan — balas dengan angka atau ketuk tombolnya:\n' +
+    settings.chatMenuItems.map((it, i) => `${i + 1}. ${it.label}`).join('\n')
+  )
+}
+
+/**
+ * Direct chatbot-menu answer for a user's text, or the menu listing for
+ * "menu". Null when the menu is off or nothing matches (falls through to
+ * the AI auto-reply). Runs BEFORE the AI so mapped answers are instant.
+ */
+const matchChatMenu = (text: string): string | null => {
+  if (!settings.chatMenuEnabled || settings.chatMenuItems.length === 0) return null
+  const t = text.trim().toLowerCase()
+  if (t === 'menu' || t === '0') return menuListing()
+  if (/^\d+$/.test(t)) {
+    const item = settings.chatMenuItems[Number(t) - 1]
+    return item ? item.answer : null
+  }
+  const item = settings.chatMenuItems.find((it) => it.label.trim().toLowerCase() === t)
+  return item ? item.answer : null
+}
+
 /* ------------------------------------------------------------------ */
 /* Socket.io server                                                    */
 /* ------------------------------------------------------------------ */
@@ -826,12 +1136,40 @@ const computeStats = () => {
        ) WHERE resp IS NOT NULL AND resp >= 0 AND resp < 86400000`
     )
     .get(weekAgo) as { avg: number | null }
+
+  /* v5 — 7-day activity chart (two-way) + rating summary. */
+  const weekRows = db
+    .query('SELECT created_at, sender_id FROM messages WHERE created_at >= ? AND deleted_at IS NULL')
+    .all(weekAgo) as Array<{ created_at: number; sender_id: string }>
+  const daily: { date: string; user: number; admin: number }[] = []
+  for (let i = 6; i >= 0; i -= 1) {
+    const d = new Date(startDay - i * 86400_000 + TZ_OFFSET_MS)
+    daily.push({
+      date: `${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}`,
+      user: 0,
+      admin: 0,
+    })
+  }
+  for (const r of weekRows) {
+    const idx = 6 - Math.floor((r.created_at - weekAgo) / 86400_000)
+    if (idx < 0 || idx > 6) continue
+    if (r.sender_id === ADMIN_ID) daily[idx].admin += 1
+    else daily[idx].user += 1
+  }
+  const ratingRow = db.query('SELECT AVG(stars) AS avg, COUNT(*) AS c FROM ratings').get() as {
+    avg: number | null
+    c: number
+  }
+
   return {
     totalUsers,
     totalMessages,
     messagesToday,
     activeToday,
     avgResponseMin: avgRow.avg == null ? null : Math.round((avgRow.avg / 60000) * 10) / 10,
+    daily,
+    avgRating: ratingRow.avg == null ? null : Math.round(ratingRow.avg * 10) / 10,
+    ratingCount: ratingRow.c,
   }
 }
 
@@ -841,6 +1179,12 @@ const computeStats = () => {
 
 io.on('connection', (socket) => {
   console.log(`Socket connected: ${socket.id}`)
+
+  /* ---------------------- public config (pre-login) ---------------------- */
+
+  socket.on('public:settings', handler(socket, (_data, ack) => {
+    ack({ ok: true, publicSettings: getPublicSettings() })
+  }))
 
   /* ---------------------------- auth ---------------------------- */
 
@@ -872,11 +1216,12 @@ io.on('connection', (socket) => {
       if (!user) {
         const id = crypto.randomUUID()
         const ts = now()
+        const topicRaw = typeof data?.topic === 'string' ? data.topic.trim().slice(0, 60) : ''
         db.run(
-          "INSERT INTO users (id, name, role, created_at, last_seen_at) VALUES (?, ?, 'user', ?, ?)",
-          [id, name, ts, ts]
+          "INSERT INTO users (id, name, role, created_at, last_seen_at, topic) VALUES (?, ?, 'user', ?, ?, ?)",
+          [id, name, ts, ts, topicRaw || null]
         )
-        user = { id, name, role: 'user', created_at: ts, last_seen_at: ts }
+        user = { id, name, role: 'user', created_at: ts, last_seen_at: ts, topic: topicRaw || null }
         console.log(`New user registered: "${name}" (${id})`)
       } else {
         // PIN gate: fresh (name-only) logins must present the PIN.
@@ -900,6 +1245,12 @@ io.on('connection', (socket) => {
           }
         }
         const ts = now()
+        // v5 — remember the optional pre-chat topic if one was chosen.
+        const topicRaw = typeof data?.topic === 'string' ? data.topic.trim().slice(0, 60) : ''
+        if (topicRaw && topicRaw !== (user.topic ?? '')) {
+          db.run('UPDATE users SET topic = ? WHERE id = ?', [topicRaw, user.id])
+          user.topic = topicRaw
+        }
         db.run('UPDATE users SET last_seen_at = ? WHERE id = ?', [ts, user.id])
         user.last_seen_at = ts
       }
@@ -934,6 +1285,10 @@ io.on('connection', (socket) => {
         messages: getMessages(conversation.id),
         /** How far the admin has read → ✓✓ on my sent messages. */
         partnerLastReadId: getReadUpTo(conversation.id, ADMIN_ID),
+        // v5 — public service config for the user UI + pinned banner.
+        publicSettings: getPublicSettings(),
+        pinnedMessageId: conversation.pinned_message_id ?? null,
+        pinned: pinnedSnapshotOf(conversation),
       })
 
       // A (newly registered) user must immediately appear in the admin sidebar.
@@ -985,6 +1340,7 @@ io.on('connection', (socket) => {
         ack({ ok: false, error: 'FORBIDDEN' })
         return
       }
+      const lastReadBefore = getReadUpTo(conversation.id, me)
       const readUpTo = markRead(conversation.id, me)
       broadcastRead(conversation, me, readUpTo)
       const partner = getPartnerUser(conversation, me)
@@ -993,6 +1349,10 @@ io.on('connection', (socket) => {
         messages: getMessages(conversation.id),
         partner: toPartnerInfo(partner),
         partnerLastReadId: getReadUpTo(conversation.id, partner.id),
+        // v5 — where I had read BEFORE this call → "new messages" divider.
+        lastReadBefore,
+        pinnedMessageId: conversation.pinned_message_id ?? null,
+        pinned: pinnedSnapshotOf(conversation),
       })
       pushConversationsTo(me)
     })
@@ -1073,10 +1433,22 @@ io.on('connection', (socket) => {
       // Voice notes: transcribe in the background.
       if (type === 'voice') void transcribeAsync(message.id, conversation.id, trimmed)
 
+      // v5 — a new user message pulls the conversation out of the archive.
+      if (me !== ADMIN_ID && conversation.archived_at != null) {
+        db.run('UPDATE conversations SET archived_at = NULL WHERE id = ?', [conversation.id])
+        conversation.archived_at = null
+        pushConversationsTo(ADMIN_ID)
+      }
+
       // AI hooks only for human user messages (never for the admin).
       if (me !== ADMIN_ID && type !== 'system') {
         maybeOutsideHoursNotice(conversation)
-        if (!isOnline(ADMIN_ID) && settings.aiEnabled) {
+        // v5 — the chatbot menu answers instantly, before the AI kicks in.
+        const menuAnswer = type === 'text' ? matchChatMenu(trimmed) : null
+        if (menuAnswer) {
+          insertAndFanOut(conversation, ADMIN_ID, menuAnswer, 'text')
+          console.log(`Chat menu answered in ${conversation.id.slice(0, 8)}`)
+        } else if (!isOnline(ADMIN_ID) && settings.aiEnabled) {
           const userRow = findUserById(me)
           if (userRow) void aiAutoReply(conversation, userRow)
         }
@@ -1168,6 +1540,349 @@ io.on('connection', (socket) => {
       // relay must additionally reach the `admins` room.
       io.to(`user:${partnerId}`).emit('partner:typing', payload)
       if (partnerId === ADMIN_ID) io.to('admins').emit('partner:typing', payload)
+    })
+  )
+
+  /* ------------------- v5: reactions / edit / translate ------------------- */
+
+  socket.on(
+    'message:react',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const id = Number(data?.messageId)
+      const emoji = typeof data?.emoji === 'string' ? data.emoji : ''
+      if (!Number.isInteger(id) || id <= 0 || !(REACTION_EMOJIS as readonly string[]).includes(emoji)) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const row = db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null
+      if (!row || row.deleted_at) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const conversation = getConversation(row.conversation_id)
+      if (!conversation || !isParticipant(conversation, me)) {
+        ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      const existing = db
+        .query('SELECT emoji FROM message_reactions WHERE message_id = ? AND user_id = ?')
+        .get(id, me) as { emoji: string } | null
+      if (existing && existing.emoji === emoji) {
+        db.run('DELETE FROM message_reactions WHERE message_id = ? AND user_id = ?', [id, me])
+      } else {
+        db.run(
+          'INSERT INTO message_reactions (message_id, user_id, emoji) VALUES (?, ?, ?) ON CONFLICT(message_id, user_id) DO UPDATE SET emoji = excluded.emoji',
+          [id, me, emoji]
+        )
+      }
+      ack({ ok: true })
+      const payload = { id, conversationId: conversation.id, reactions: reactionsFor(id) }
+      io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+      io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+      io.to('admins').emit('message:updated', payload)
+    })
+  )
+
+  socket.on(
+    'message:edit',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const id = Number(data?.messageId)
+      const content = typeof data?.content === 'string' ? data.content.trim() : ''
+      if (!Number.isInteger(id) || id <= 0 || content.length < 1 || content.length > MAX_MESSAGE_LENGTH) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const row = db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null
+      if (!row || row.deleted_at) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const conversation = getConversation(row.conversation_id)
+      if (
+        !conversation ||
+        !isParticipant(conversation, me) ||
+        row.sender_id !== me ||
+        (row.type ?? 'text') !== 'text'
+      ) {
+        ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      if (now() - row.created_at > EDIT_WINDOW_MS) {
+        ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      const ts = now()
+      db.run('UPDATE messages SET content = ?, edited_at = ? WHERE id = ?', [content, ts, id])
+      ack({ ok: true })
+      const payload = {
+        id,
+        conversationId: conversation.id,
+        content,
+        editedAt: new Date(ts).toISOString(),
+      }
+      io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+      io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+      io.to('admins').emit('message:updated', payload)
+      pushConversationsTo(conversation.user_a_id)
+      pushConversationsTo(conversation.user_b_id)
+      console.log(`Message ${id} edited by ${me.slice(0, 8)}`)
+    })
+  )
+
+  socket.on(
+    'message:translate',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const id = Number(data?.messageId)
+      const row =
+        Number.isInteger(id) && id > 0
+          ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+          : null
+      if (!row || row.deleted_at || (row.type ?? 'text') !== 'text') {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const conversation = getConversation(row.conversation_id)
+      if (!conversation || !isParticipant(conversation, me)) {
+        ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      if (row.translation) {
+        ack({ ok: true, translation: row.translation })
+        return
+      }
+      llmComplete(
+        'Terjemahkan teks pesan berikut ke bahasa Indonesia. Jawab HANYA hasil terjemahannya ' +
+          'tanpa penjelasan, tanpa tanda kutip, tanpa markdown. Pertahankan emoji yang ada.',
+        row.content,
+        800
+      ).then((translation) => {
+        if (!translation) {
+          ack({ ok: false, error: 'AI_UNAVAILABLE' })
+          return
+        }
+        db.run('UPDATE messages SET translation = ? WHERE id = ?', [translation, id])
+        ack({ ok: true, translation })
+        const payload = { id, conversationId: conversation.id, translation }
+        io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+        io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+        io.to('admins').emit('message:updated', payload)
+      })
+    })
+  )
+
+  /* ------------------ v5: pin / archive / export / broadcast ------------------ */
+
+  socket.on(
+    'conversation:pin',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me || me !== ADMIN_ID) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const conversation =
+        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+      if (!conversation) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      let pinned: { id: number; senderId: string; snippet: string; type: string } | null = null
+      if (data?.messageId != null) {
+        const id = Number(data.messageId)
+        const row =
+          Number.isInteger(id) && id > 0
+            ? (db
+                .query('SELECT * FROM messages WHERE id = ? AND conversation_id = ?')
+                .get(id, conversation.id) as MessageRow | null)
+            : null
+        if (!row) {
+          ack({ ok: false, error: 'NOT_FOUND' })
+          return
+        }
+        db.run('UPDATE conversations SET pinned_message_id = ? WHERE id = ?', [id, conversation.id])
+        pinned = { id: row.id, senderId: row.sender_id, snippet: snippetOf(row), type: row.type ?? 'text' }
+      } else {
+        db.run('UPDATE conversations SET pinned_message_id = NULL WHERE id = ?', [conversation.id])
+      }
+      const payload = {
+        conversationId: conversation.id,
+        pinnedMessageId: pinned?.id ?? null,
+        pinned,
+      }
+      ack({ ok: true, ...payload })
+      io.to(`user:${conversation.user_a_id}`).emit('conversation:update', payload)
+      io.to(`user:${conversation.user_b_id}`).emit('conversation:update', payload)
+      io.to('admins').emit('conversation:update', payload)
+    })
+  )
+
+  socket.on(
+    'conversation:archive',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me || me !== ADMIN_ID) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const conversation =
+        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+      if (!conversation) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const archived = data?.archived !== false
+      db.run('UPDATE conversations SET archived_at = ? WHERE id = ?', [
+        archived ? now() : null,
+        conversation.id,
+      ])
+      conversation.archived_at = archived ? now() : null
+      ack({ ok: true, conversationId: conversation.id, archived })
+      io.to('admins').emit('conversation:archive:update', {
+        conversationId: conversation.id,
+        archived,
+      })
+      // v5 — closing a conversation asks the customer for a star rating.
+      if (archived) {
+        insertAndFanOut(
+          conversation,
+          ADMIN_ID,
+          'Chat ditutup. Bagaimana layanan kami hari ini? Nilai dengan ketuk bintang di bawah 🙏',
+          'system',
+          { kind: 'rating_request' }
+        )
+      }
+      pushConversationsTo(ADMIN_ID)
+      console.log(`Conversation ${conversation.id.slice(0, 8)} ${archived ? 'archived' : 'unarchived'}`)
+    })
+  )
+
+  socket.on(
+    'conversation:export',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me || me !== ADMIN_ID) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const conversation =
+        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+      if (!conversation) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const partner = getPartnerUser(conversation, me)
+      ack({
+        ok: true,
+        conversationId: conversation.id,
+        partnerName: partner.name,
+        messages: getMessages(conversation.id),
+      })
+    })
+  )
+
+  socket.on(
+    'broadcast:send',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me || me !== ADMIN_ID) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const content = typeof data?.content === 'string' ? data.content.trim() : ''
+      if (content.length < 1 || content.length > MAX_MESSAGE_LENGTH) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const rows = db
+        .query(
+          `SELECT c.* FROM conversations c
+           JOIN users u ON u.id = (CASE WHEN c.user_a_id = 'admin' THEN c.user_b_id ELSE c.user_a_id END)
+           WHERE u.role = 'user'`
+        )
+        .all() as ConversationRow[]
+      let sent = 0
+      for (const conversation of rows) {
+        try {
+          insertAndFanOut(conversation, ADMIN_ID, content, 'broadcast')
+          sent += 1
+        } catch (err) {
+          console.error('Broadcast insert failed:', (err as Error)?.message ?? err)
+        }
+      }
+      ack({ ok: true, sent })
+      console.log(`Broadcast sent to ${sent} conversations`)
+    })
+  )
+
+  /* ------------------------- v5: rating + web push ------------------------- */
+
+  socket.on(
+    'rating:submit',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me || me === ADMIN_ID) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const stars = Number(data?.stars)
+      if (!Number.isInteger(stars) || stars < 1 || stars > 5) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const conversation =
+        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+      if (!conversation || !isParticipant(conversation, me)) {
+        ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      db.run(
+        `INSERT INTO ratings (conversation_id, user_id, stars, created_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(conversation_id, user_id) DO UPDATE SET stars = excluded.stars, created_at = excluded.created_at`,
+        [conversation.id, me, stars, now()]
+      )
+      ack({ ok: true, stars })
+      insertAndFanOut(
+        conversation,
+        ADMIN_ID,
+        '⭐ Terima kasih atas penilaian Anda! Masukan ini membantu kami melayani lebih baik.',
+        'system',
+        { kind: 'rating_thanks' }
+      )
+      console.log(`Rating ${String(stars)}★ from ${me.slice(0, 8)}`)
+    })
+  )
+
+  socket.on(
+    'push:subscribe',
+    handler(socket, (data) => {
+      const me = authedUserId(socket)
+      if (!me) return
+      const sub = data?.subscription
+      const endpoint = typeof sub?.endpoint === 'string' ? sub.endpoint : ''
+      const p256dh = typeof sub?.keys?.p256dh === 'string' ? sub.keys.p256dh : ''
+      const auth = typeof sub?.keys?.auth === 'string' ? sub.keys.auth : ''
+      if (!endpoint || !p256dh || !auth) return
+      db.run(
+        `INSERT INTO push_subscriptions (endpoint, user_id, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, created_at = excluded.created_at`,
+        [endpoint.slice(0, 500), me, p256dh.slice(0, 300), auth.slice(0, 300), now()]
+      )
+      console.log(`Push subscription stored for ${me.slice(0, 8)}`)
     })
   )
 
@@ -1293,9 +2008,34 @@ io.on('connection', (socket) => {
           .slice(0, 20)
         settings.quickReplies = valid
       }
+      /* v5 fields */
+      if (typeof s.slaMinutes === 'number' && Number.isFinite(s.slaMinutes)) {
+        settings.slaMinutes = Math.min(240, Math.max(1, Math.round(s.slaMinutes)))
+      }
+      if (typeof s.chatMenuEnabled === 'boolean') settings.chatMenuEnabled = s.chatMenuEnabled
+      if (Array.isArray(s.chatMenuItems)) {
+        const valid = s.chatMenuItems
+          .filter(
+            (m: unknown) =>
+              !!m &&
+              typeof (m as { label?: unknown }).label === 'string' &&
+              typeof (m as { answer?: unknown }).answer === 'string'
+          )
+          .map((m: { label: string; answer: string }) => ({
+            label: m.label.trim().slice(0, 60),
+            answer: m.answer.trim().slice(0, 500),
+          }))
+          .filter((m) => m.label && m.answer)
+          .slice(0, 12)
+        settings.chatMenuItems = valid
+      }
+      if (typeof s.preChatTopics === 'string') settings.preChatTopics = s.preChatTopics.slice(0, 300)
       saveSettings()
       console.log('Settings updated by admin')
       ack({ ok: true, settings })
+      // v5 — push fresh public config to every connected user right away
+      // (chatbot menu chips / topics appear without a reload).
+      io.emit('public:settings:update', getPublicSettings())
     })
   )
 
@@ -1448,7 +2188,7 @@ ensureAdmin()
 
 httpServer.listen(PORT, () => {
   console.log(
-    `ChatKita chat-service v4 listening on port ${PORT} (path: '/', ai: ${settings.aiEnabled ? 'on' : 'off'})`
+    `ChatKita chat-service v5 listening on port ${PORT} (path: '/', ai: ${settings.aiEnabled ? 'on' : 'off'}, push: ${VAPID_PUBLIC ? 'on' : 'off'})`
   )
 })
 

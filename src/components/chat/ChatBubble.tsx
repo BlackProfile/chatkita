@@ -6,22 +6,29 @@ import {
   Check,
   CheckCheck,
   Copy,
+  Languages,
   Pause,
+  Pencil,
+  Pin,
   Play,
   Reply,
+  SmilePlus,
   Trash2,
 } from "lucide-react";
 
-import type { ReplyPreview } from "@/lib/chat-types";
+import type { MessageReaction, ReplyPreview } from "@/lib/chat-types";
 import { formatChatTime } from "@/lib/chat-utils";
 import { cn } from "@/lib/utils";
+
+/** Fixed reaction palette (mirrors the server). */
+const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"] as const;
 
 interface ChatBubbleProps {
   content: string;
   createdAt: string;
   /** left = received (admin/customer partner), right = sent by current user */
   side: "left" | "right";
-  type?: "text" | "image" | "voice" | "system";
+  type?: "text" | "image" | "voice" | "system" | "broadcast";
   /** Partner has read up to this message → ✓✓ on own bubbles. */
   read?: boolean;
   replyTo?: ReplyPreview;
@@ -30,9 +37,31 @@ interface ChatBubbleProps {
   durationMs?: number;
   transcript?: string;
   deleted?: boolean;
+  /** v5 — message id (jump-to-message anchor + aria). */
+  messageId?: number;
+  /** v5 — grouped emoji reactions. */
+  reactions?: MessageReaction[];
+  /** v5 — current user id (highlights own reactions). */
+  myUserId?: string;
+  /** v5 — the message was edited (shows "diedit"). */
+  edited?: boolean;
+  /** v5 — Indonesian translation (on demand). */
+  translation?: string;
+  /** v5 — translation request in flight. */
+  translating?: boolean;
+  /** v5 — this message is pinned in the conversation. */
+  pinned?: boolean;
+  /** v5 — can the user edit this message now (own text < window). */
+  canEdit?: boolean;
+  /** v5 — show the "Sematkan" action (admin only). */
+  canPin?: boolean;
   onReply?: () => void;
   onDelete?: () => void;
   onImageOpen?: (src: string) => void;
+  onReact?: (emoji: string) => void;
+  onEdit?: () => void;
+  onTranslate?: () => void;
+  onPin?: () => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -128,8 +157,9 @@ function VoicePlayer({
 /**
  * A single chat message bubble. Message text is rendered as plain text
  * (never dangerouslySetInnerHTML) with `whitespace-pre-wrap break-words`
- * so multi-line messages and long unbroken strings behave.
- * Clicking a bubble toggles a small action row (reply/copy/delete).
+ * so multi-line messages and long unbroken strings behave. The text size
+ * is INHERITED so the per-device font-size setting works.
+ * Clicking a bubble toggles the action row (react/reply/edit/…).
  */
 export function ChatBubble({
   content,
@@ -142,11 +172,25 @@ export function ChatBubble({
   durationMs,
   transcript,
   deleted = false,
+  messageId,
+  reactions,
+  myUserId,
+  edited = false,
+  translation,
+  translating = false,
+  pinned = false,
+  canEdit = false,
+  canPin = false,
   onReply,
   onDelete,
   onImageOpen,
+  onReact,
+  onEdit,
+  onTranslate,
+  onPin,
 }: ChatBubbleProps) {
   const [actionsOpen, setActionsOpen] = useState(false);
+  const [reactOpen, setReactOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -156,6 +200,11 @@ export function ChatBubble({
     },
     []
   );
+
+  const closeActions = () => {
+    setActionsOpen(false);
+    setReactOpen(false);
+  };
 
   /* System notices: centered pill, no side, no actions. */
   if (type === "system") {
@@ -173,8 +222,31 @@ export function ChatBubble({
     );
   }
 
+  /* Broadcast: prominent centered card (📢 pengumuman admin ke semua user). */
+  if (type === "broadcast") {
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.15 }}
+        className="flex justify-center"
+      >
+        <div className="max-w-[92%] rounded-xl border border-amber-500/40 bg-amber-500/10 px-3.5 py-2 sm:max-w-[80%]">
+          <p className="mb-0.5 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">
+            📢 Pengumuman
+          </p>
+          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{content}</p>
+          <p className="mt-1 text-right text-[10px] text-muted-foreground">
+            {formatChatTime(createdAt)}
+          </p>
+        </div>
+      </motion.div>
+    );
+  }
+
   const isRight = side === "right";
   const canDelete = !deleted && isRight && !!onDelete;
+  const reactionList = reactions ?? [];
 
   const handleCopy = () => {
     if (type !== "text" || deleted) return;
@@ -194,6 +266,7 @@ export function ChatBubble({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.15 }}
       className={cn("flex w-full flex-col", isRight ? "items-end" : "items-start")}
+      data-mid={messageId}
     >
       <div className="group relative max-w-[85%] sm:max-w-[75%] md:max-w-[65%]">
         <div
@@ -205,7 +278,8 @@ export function ChatBubble({
               ? "rounded-br-md bg-emerald-600 text-white"
               : "rounded-bl-md border bg-card text-foreground shadow-sm",
             type !== "text" && !deleted && "p-1.5",
-            !deleted && "cursor-pointer"
+            !deleted && "cursor-pointer",
+            pinned && !deleted && "ring-1 ring-amber-400/70"
           )}
           onClick={() => setActionsOpen((v) => !v)}
           onKeyDown={(e) => {
@@ -264,8 +338,30 @@ export function ChatBubble({
               ) : null}
             </div>
           ) : (
-            <p className="whitespace-pre-wrap break-words text-sm">{content}</p>
+            <p className="whitespace-pre-wrap break-words">{content}</p>
           )}
+
+          {/* v5 — translation */}
+          {!deleted && translation ? (
+            <p
+              className={cn(
+                "mt-1.5 border-t pt-1.5 text-xs italic leading-relaxed",
+                isRight ? "border-white/20 text-white/85" : "border-border text-muted-foreground"
+              )}
+            >
+              🌐 {translation}
+            </p>
+          ) : null}
+          {!deleted && translating ? (
+            <p
+              className={cn(
+                "mt-1.5 border-t pt-1.5 text-xs italic",
+                isRight ? "border-white/50" : "border-border text-muted-foreground"
+              )}
+            >
+              🌐 Menerjemahkan…
+            </p>
+          ) : null}
 
           {/* Time + read receipts */}
           <span
@@ -275,6 +371,8 @@ export function ChatBubble({
             )}
           >
             {formatChatTime(createdAt)}
+            {edited && !deleted ? <span aria-label="Pesan diedit">· diedit</span> : null}
+            {pinned && !deleted ? <Pin className="size-3" aria-label="Disematkan" /> : null}
             {isRight ? (
               read ? (
                 <CheckCheck className="size-3.5" aria-label="Dibaca" />
@@ -286,6 +384,36 @@ export function ChatBubble({
         </div>
       </div>
 
+      {/* Reaction pills (v5) */}
+      {reactionList.length > 0 ? (
+        <div className={cn("mt-0.5 flex flex-wrap gap-1", isRight ? "mr-1" : "ml-1")}>
+          {reactionList.map((r) => {
+            const mine = !!myUserId && r.userIds.includes(myUserId);
+            return (
+              <button
+                key={r.emoji}
+                type="button"
+                aria-label={`Reaksi ${r.emoji} (${r.userIds.length})`}
+                onClick={() => onReact?.(r.emoji)}
+                className={cn(
+                  "flex h-6 items-center gap-1 rounded-full border px-1.5 text-xs transition-colors",
+                  mine
+                    ? "border-emerald-500 bg-emerald-600/10"
+                    : "border-border bg-card hover:bg-accent"
+                )}
+              >
+                <span aria-hidden="true">{r.emoji}</span>
+                {r.userIds.length > 1 ? (
+                  <span className="text-[10px] font-medium tabular-nums text-muted-foreground">
+                    {r.userIds.length}
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
       {/* Action row */}
       {actionsOpen && !deleted ? (
         <motion.div
@@ -293,16 +421,43 @@ export function ChatBubble({
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.12 }}
           className={cn(
-            "mt-1 flex items-center gap-0.5 rounded-full border bg-popover px-1 py-0.5 shadow-sm",
+            "mt-1 flex flex-wrap items-center gap-0.5 rounded-full border bg-popover px-1 py-0.5 shadow-sm",
             isRight ? "mr-1" : "ml-1"
           )}
         >
+          {onReact ? (
+            reactOpen ? (
+              REACTION_EMOJIS.map((emoji) => (
+                <button
+                  key={emoji}
+                  type="button"
+                  aria-label={`Reaksi ${emoji}`}
+                  className="flex h-7 w-7 items-center justify-center rounded-full text-base hover:bg-accent"
+                  onClick={() => {
+                    onReact(emoji);
+                    closeActions();
+                  }}
+                >
+                  {emoji}
+                </button>
+              ))
+            ) : (
+              <button
+                type="button"
+                className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
+                onClick={() => setReactOpen(true)}
+              >
+                <SmilePlus className="size-3.5" aria-hidden="true" />
+                Reaksi
+              </button>
+            )
+          ) : null}
           {onReply ? (
             <button
               type="button"
               className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
               onClick={() => {
-                setActionsOpen(false);
+                closeActions();
                 onReply();
               }}
             >
@@ -316,11 +471,50 @@ export function ChatBubble({
               className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
               onClick={() => {
                 handleCopy();
-                setActionsOpen(false);
+                closeActions();
               }}
             >
               <Copy className="size-3.5" aria-hidden="true" />
               {copied ? "Tersalin!" : "Salin"}
+            </button>
+          ) : null}
+          {canEdit && onEdit ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
+              onClick={() => {
+                closeActions();
+                onEdit();
+              }}
+            >
+              <Pencil className="size-3.5" aria-hidden="true" />
+              Edit
+            </button>
+          ) : null}
+          {type === "text" && !deleted && onTranslate ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
+              onClick={() => {
+                closeActions();
+                onTranslate();
+              }}
+            >
+              <Languages className="size-3.5" aria-hidden="true" />
+              {translation ? "Terjemahan" : "Terjemahkan"}
+            </button>
+          ) : null}
+          {canPin && onPin ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
+              onClick={() => {
+                closeActions();
+                onPin();
+              }}
+            >
+              <Pin className="size-3.5" aria-hidden="true" />
+              {pinned ? "Lepas sematan" : "Sematkan"}
             </button>
           ) : null}
           {canDelete ? (
@@ -328,7 +522,7 @@ export function ChatBubble({
               type="button"
               className="flex h-7 items-center gap-1 rounded-full px-2 text-xs text-destructive hover:bg-destructive/10"
               onClick={() => {
-                setActionsOpen(false);
+                closeActions();
                 onDelete();
               }}
             >

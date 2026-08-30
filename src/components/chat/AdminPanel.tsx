@@ -1,17 +1,26 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import QRCode from "qrcode";
 import {
+  Archive,
+  ArchiveRestore,
   ArrowDown,
   ArrowLeft,
   BarChart3,
   Check,
+  Download,
   ImagePlus,
   Lock,
   LogOut,
+  Megaphone,
   MessagesSquare,
   Mic,
+  MoreVertical,
   NotebookPen,
+  Pin,
+  Printer,
+  QrCode,
   Search,
   SendHorizonal,
   Settings,
@@ -19,6 +28,7 @@ import {
   Smile,
   Sparkles,
   Tag,
+  Type,
   X,
 } from "lucide-react";
 import type { Socket } from "socket.io-client";
@@ -61,32 +71,46 @@ import { useVoiceRecorder } from "@/hooks/use-voice-recorder";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { createChatSocket } from "@/lib/chat-socket";
 import { playBlip, setTitleUnread } from "@/lib/chat-notify";
+import { subscribeToPush } from "@/lib/chat-push";
 import {
   ADMIN_ID,
   ADMIN_NAME,
   ADMIN_PASSWORD_HINT,
   MAX_MESSAGE_LENGTH,
+  draftKey,
   type AckOf,
   type AdminAuthAck,
+  type ArchiveUpdatePayload,
+  type BroadcastAck,
   type ChatErrorAck,
   type ChatMessage,
   type ChatStats,
   type ConversationOverview,
+  type ExportAck,
   type HistoryAck,
   type MessageAck,
+  type MessageUpdatePayload,
+  type PinUpdatePayload,
   type ServiceSettings,
   type SettingsAck,
   type SuggestAck,
   type SummaryAck,
+  type TranslateAck,
   type UpdateUserAck,
   type UserLabel,
 } from "@/lib/chat-types";
 import {
   avatarColorClass,
+  canEditMessage,
+  FONT_SCALES,
   formatChatTime,
   formatLastSeen,
   initials,
   messagePreview,
+  readFontScale,
+  saveFontScale,
+  waitingMinutes,
+  type FontScale,
 } from "@/lib/chat-utils";
 import { cn } from "@/lib/utils";
 
@@ -96,7 +120,7 @@ const LABEL_META: Record<UserLabel, { text: string; className: string }> = {
   vip: { text: "VIP", className: "bg-amber-500 text-white" },
 };
 
-type FilterTab = "all" | "unread" | "online";
+type FilterTab = "all" | "unread" | "online" | "archive";
 
 /** Downscale + compress an image file to a JPEG data URL the server accepts. */
 async function fileToDataUrl(file: File): Promise<string> {
@@ -118,6 +142,29 @@ const fmtTimer = (ms: number) => {
   const total = Math.floor(ms / 1000);
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 };
+
+const FONT_SCALE_LABELS: { key: FontScale; label: string }[] = [
+  { key: "sm", label: "Kecil" },
+  { key: "md", label: "Sedang" },
+  { key: "lg", label: "Besar" },
+];
+
+function readDraft(scope: string, id: string): string {
+  try {
+    return window.localStorage.getItem(draftKey(scope, id)) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveDraft(scope: string, id: string, value: string): void {
+  try {
+    if (value) window.localStorage.setItem(draftKey(scope, id), value);
+    else window.localStorage.removeItem(draftKey(scope, id));
+  } catch {
+    /* ignore */
+  }
+}
 
 /**
  * ChatKita AdminPanel — satu tempat untuk membaca & membalas pesan
@@ -162,6 +209,24 @@ export function AdminPanel() {
   const [newCount, setNewCount] = useState(0);
   const [lightbox, setLightbox] = useState<string | null>(null);
 
+  // v5 — font / pinned / edit / translate / SLA / archive / broadcast / QR
+  const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
+  const [pinnedMap, setPinnedMap] = useState<
+    Record<string, { id: number; snippet: string } | null>
+  >({});
+  const [editing, setEditing] = useState<ChatMessage | null>(null);
+  const [translatingId, setTranslatingId] = useState<number | null>(null);
+  const [broadcastOpen, setBroadcastOpen] = useState(false);
+  const [broadcastText, setBroadcastText] = useState("");
+  const [broadcastSending, setBroadcastSending] = useState(false);
+  const [broadcastResult, setBroadcastResult] = useState<string | null>(null);
+  const [qrOpen, setQrOpen] = useState(false);
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [qrUrl, setQrUrl] = useState("");
+  const [tick, setTick] = useState(0);
+  /** v5 — first unread message id → "Pesan baru" divider. */
+  const [unreadDividerId, setUnreadDividerId] = useState<number | null>(null);
+
   const socketRef = useRef<Socket | null>(null);
   const passwordRef = useRef<string | null>(null);
   const activeIdRef = useRef<string | null>(null);
@@ -172,6 +237,9 @@ export function AdminPanel() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const atBottomRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const translatingIdRef = useRef<number | null>(null);
+  const filterInputRef = useRef<HTMLInputElement | null>(null);
+  const alertedRef = useRef<Set<string>>(new Set());
 
   const recorder = useVoiceRecorder();
 
@@ -194,6 +262,10 @@ export function AdminPanel() {
         (res: AckOf<HistoryAck>) => {
           if (res.ok) {
             setMessagesMap((prev) => ({ ...prev, [id]: res.messages }));
+            setPinnedMap((prev) => ({
+              ...prev,
+              [id]: res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null,
+            }));
             socketRef.current?.emit("messages:read", { conversationId: id });
           }
         }
@@ -217,6 +289,17 @@ export function AdminPanel() {
             socketRef.current?.emit("admin:getsettings", {}, (sres: AckOf<SettingsAck>) => {
               if (sres.ok) setSettings(sres.settings);
             });
+            // v5 — opt in to Web Push so customer messages reach us even
+            // when every admin tab is closed.
+            socket.emit(
+              "public:settings",
+              {},
+              (pres: { ok: boolean; publicSettings?: { pushPublicKey: string } }) => {
+                if (pres.ok && pres.publicSettings?.pushPublicKey) {
+                  void subscribeToPush(socket, pres.publicSettings.pushPublicKey);
+                }
+              }
+            );
             if (activeIdRef.current) loadHistory(activeIdRef.current);
           } else {
             // No longer authorized — drop back to the login form.
@@ -251,6 +334,19 @@ export function AdminPanel() {
       setTitleUnread(total);
     });
 
+    // v5 — pinned banner + archive state live updates.
+    socket.on("conversation:update", (p: PinUpdatePayload) => {
+      setPinnedMap((prev) => ({
+        ...prev,
+        [p.conversationId]: p.pinned ? { id: p.pinned.id, snippet: p.pinned.snippet } : null,
+      }));
+    });
+    socket.on("conversation:archive:update", (p: ArchiveUpdatePayload) => {
+      setConversations((prev) =>
+        prev.map((c) => (c.id === p.conversationId ? { ...c, archived: p.archived } : c))
+      );
+    });
+
     // Append messages ONLY here; skip if the last stored message already
     // has the same id (history-replacement vs broadcast race).
     socket.on("message:new", (msg: ChatMessage) => {
@@ -277,35 +373,33 @@ export function AdminPanel() {
       }
     });
 
-    // Delete tombstones + late voice transcripts.
-    socket.on(
-      "message:updated",
-      (u: {
-        id: number;
-        conversationId: string;
-        deletedAt?: string;
-        transcript?: string;
-        content?: string;
-      }) => {
-        setMessagesMap((prev) => {
-          const list = prev[u.conversationId];
-          if (!list) return prev;
-          return {
-            ...prev,
-            [u.conversationId]: list.map((m) =>
-              m.id === u.id
-                ? {
-                    ...m,
-                    content: u.content ?? m.content,
-                    deletedAt: u.deletedAt ?? m.deletedAt,
-                    transcript: u.transcript ?? m.transcript,
-                  }
-                : m
-            ),
-          };
-        });
+    // Delete tombstones + transcripts + edits/translations/reactions.
+    socket.on("message:updated", (u: MessageUpdatePayload) => {
+      setMessagesMap((prev) => {
+        const list = prev[u.conversationId];
+        if (!list) return prev;
+        return {
+          ...prev,
+          [u.conversationId]: list.map((m) =>
+            m.id === u.id
+              ? {
+                  ...m,
+                  content: u.content ?? m.content,
+                  deletedAt: u.deletedAt ?? m.deletedAt,
+                  transcript: u.transcript ?? m.transcript,
+                  editedAt: u.editedAt ?? m.editedAt,
+                  translation: u.translation ?? m.translation,
+                  reactions: u.reactions ?? m.reactions,
+                }
+              : m
+          ),
+        };
+      });
+      if (u.translation && u.id === translatingIdRef.current) {
+        translatingIdRef.current = null;
+        setTranslatingId(null);
       }
-    );
+    });
 
     // Live ✓✓: a user read up to `lastReadMessageId` of the admin's bubbles.
     socket.on(
@@ -391,11 +485,45 @@ export function AdminPanel() {
   const filteredConversations = useMemo(() => {
     const q = filter.trim().toLowerCase();
     let list = conversations;
+    if (filterTab === "archive") list = list.filter((c) => c.archived);
+    else list = list.filter((c) => !c.archived);
     if (filterTab === "unread") list = list.filter((c) => c.unread > 0);
     if (filterTab === "online") list = list.filter((c) => c.partner.online);
     if (!q) return list;
     return list.filter((c) => c.partner.name.toLowerCase().includes(q));
   }, [conversations, filter, filterTab]);
+
+  /* v5 — SLA: user messages waiting longer than the configured minutes. */
+  const slaMinutes = settings?.slaMinutes ?? 10;
+  const waitingMap = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const c of conversations) {
+      if (c.archived || c.unread === 0) continue;
+      const mins = waitingMinutes(c.lastMessage, ADMIN_ID);
+      if (mins != null && mins >= slaMinutes) map.set(c.id, mins);
+    }
+    return map;
+  }, [conversations, slaMinutes, tick]);
+
+  /* One blip per conversation when it first crosses the SLA threshold. */
+  useEffect(() => {
+    for (const id of waitingMap.keys()) {
+      if (!alertedRef.current.has(id)) {
+        alertedRef.current.add(id);
+        playBlip();
+      }
+    }
+    for (const id of [...alertedRef.current]) {
+      if (!waitingMap.has(id)) alertedRef.current.delete(id);
+    }
+  }, [waitingMap]);
+
+  /* SLA clock — recompute every 30s. */
+  useEffect(() => {
+    if (!authed) return;
+    const t = setInterval(() => setTick((v) => v + 1), 30000);
+    return () => clearInterval(t);
+  }, [authed]);
 
   const activeConversation: ConversationOverview | null = activeId
     ? conversations.find((c) => c.id === activeId) ?? null
@@ -471,6 +599,8 @@ export function AdminPanel() {
     setInput("");
     setSendError(false);
     setSettings(null);
+    setEditing(null);
+    setPinnedMap({});
     setTitleUnread(0);
     // Fresh socket ⇒ server cleanly forgets this client's rooms.
     setEpoch((e) => e + 1);
@@ -479,21 +609,45 @@ export function AdminPanel() {
   const handleSelectConversation = (id: string) => {
     const socket = socketRef.current;
     if (!socket) return;
+    // v5 — keep the typed draft per conversation.
+    if (activeIdRef.current) saveDraft("admin", activeIdRef.current, input);
     activeIdRef.current = id;
     setActiveId(id);
     setSendError(false);
+    setEditing(null);
+    const overview = conversations.find((c) => c.id === id);
+    setPinnedMap((prev) => ({
+      ...prev,
+      [id]: overview?.pinned
+        ? { id: overview.pinned.id, snippet: overview.pinned.snippet }
+        : null,
+    }));
+    setInput(readDraft("admin", id));
     socket.emit("messages:history", { conversationId: id }, (res: AckOf<HistoryAck>) => {
       if (res.ok) {
         setMessagesMap((prev) => ({ ...prev, [id]: res.messages }));
+        setPinnedMap((prev) => ({
+          ...prev,
+          [id]: res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null,
+        }));
+        // v5 — where the "new messages" divider goes (first unread partner msg).
+        const firstUnread = res.messages.find(
+          (m) =>
+            m.id > res.lastReadBefore && m.senderId !== ADMIN_ID && m.type !== "system"
+        );
+        setUnreadDividerId(res.lastReadBefore > 0 && firstUnread ? firstUnread.id : null);
         socketRef.current?.emit("messages:read", { conversationId: id });
       }
     });
   };
 
   const handleBackToList = () => {
+    if (activeIdRef.current) saveDraft("admin", activeIdRef.current, input);
     activeIdRef.current = null;
     setActiveId(null);
     setSendError(false);
+    setEditing(null);
+    setUnreadDividerId(null);
   };
 
   const emitMessage = (
@@ -518,15 +672,213 @@ export function AdminPanel() {
       }
     );
     setReplyTo(null);
+    saveDraft("admin", id, "");
+    alertedRef.current.delete(id);
     return true;
   };
 
   const handleSend = () => {
     const content = input.trim();
     if (!content) return;
+    // v5 — edit mode: Enter saves the edited message instead of sending.
+    if (editing) {
+      const target = editing;
+      socketRef.current?.emit(
+        "message:edit",
+        { messageId: target.id, content },
+        (res: AckOf<{ ok: true }>) => {
+          if (!res.ok) setSendError(true);
+        }
+      );
+      setEditing(null);
+      setInput("");
+      return;
+    }
     setInput("");
     setSendError(false);
     if (!emitMessage(content, "text")) setInput(content);
+  };
+
+  /* v5 — reactions / edit / translate / pin on bubbles. */
+  const handleReact = (msg: ChatMessage, emoji: string) => {
+    socketRef.current?.emit("message:react", { messageId: msg.id, emoji });
+  };
+
+  const handleEditStart = (msg: ChatMessage) => {
+    setReplyTo(null);
+    setEditing(msg);
+    setInput(msg.content);
+  };
+
+  const handleEditCancel = () => {
+    setEditing(null);
+    setInput("");
+  };
+
+  const handleTranslate = (msg: ChatMessage) => {
+    if (translatingIdRef.current) return;
+    if (msg.translation) return;
+    translatingIdRef.current = msg.id;
+    setTranslatingId(msg.id);
+    socketRef.current?.emit(
+      "message:translate",
+      { messageId: msg.id },
+      (res: AckOf<TranslateAck>) => {
+        if (!res.ok) {
+          translatingIdRef.current = null;
+          setTranslatingId(null);
+        }
+      }
+    );
+  };
+
+  const togglePin = (msg: ChatMessage) => {
+    const id = activeIdRef.current;
+    if (!id) return;
+    const isPinned = pinnedMap[id]?.id === msg.id;
+    socketRef.current?.emit("conversation:pin", {
+      conversationId: id,
+      messageId: isPinned ? null : msg.id,
+    });
+  };
+
+  const scrollToMessage = (id: number) => {
+    const el = scrollRef.current?.querySelector(`[data-mid="${id}"]`);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
+  /* v5 — archive / restore the active conversation. */
+  const toggleArchive = (conversationId: string, currentlyArchived: boolean) => {
+    socketRef.current?.emit("conversation:archive", {
+      conversationId,
+      archived: !currentlyArchived,
+    });
+  };
+
+  /* v5 — export helpers (CSV + print-to-PDF transcript). */
+  const exportCsv = () => {
+    const id = activeIdRef.current;
+    const socket = socketRef.current;
+    if (!socket || !id) return;
+    socket.emit(
+      "conversation:export",
+      { conversationId: id },
+      (res: AckOf<ExportAck>) => {
+        if (!res.ok) return;
+        const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
+        const rows = res.messages.map((m) => {
+          const time = new Date(m.createdAt).toLocaleString("id-ID");
+          const who = m.senderId === ADMIN_ID ? "Admin" : res.partnerName;
+          const isi = m.deletedAt
+            ? "[dihapus]"
+            : m.type === "image"
+              ? "[Foto]"
+              : m.type === "voice"
+                ? `[Pesan suara${m.transcript ? `: ${m.transcript}` : ""}]`
+                : m.type === "system"
+                  ? `[Sistem] ${m.content}`
+                  : m.type === "broadcast"
+                    ? `[Pengumuman] ${m.content}`
+                    : m.content;
+          return [time, who, isi].map(esc).join(";");
+        });
+        const csv = "\ufeffWaktu;Pengirim;Isi\n" + rows.join("\n");
+        const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `chat-${res.partnerName.replace(/\s+/g, "_")}-${new Date()
+          .toISOString()
+          .slice(0, 10)}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+    );
+  };
+
+  const printTranscript = () => {
+    const id = activeIdRef.current;
+    const socket = socketRef.current;
+    if (!socket || !id) return;
+    socket.emit(
+      "conversation:export",
+      { conversationId: id },
+      (res: AckOf<ExportAck>) => {
+        if (!res.ok) return;
+        const esc = (v: string) =>
+          v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        const body = res.messages
+          .map((m) => {
+            const who = m.senderId === ADMIN_ID ? "Admin" : res.partnerName;
+            const isi = m.deletedAt
+              ? "<i>[pesan dihapus]</i>"
+              : m.type === "image"
+                ? "[Foto]"
+                : m.type === "voice"
+                  ? `[Pesan suara${m.transcript ? `: ${esc(m.transcript)}` : ""}]`
+                  : esc(m.content);
+            return `<div class="row ${m.senderId === ADMIN_ID ? "admin" : "user"}"><span class="when">${new Date(
+              m.createdAt
+            ).toLocaleString("id-ID")}</span><span class="who">${who}</span><span class="what">${isi}</span></div>`;
+          })
+          .join("");
+        const w = window.open("", "_blank", "width=800,height=900");
+        if (!w) return;
+        w.document.write(
+          `<!doctype html><html lang="id"><head><meta charset="utf-8"><title>Chat — ${esc(
+            res.partnerName
+          )}</title><style>body{font-family:system-ui,sans-serif;margin:32px;color:#111}h1{font-size:18px}.row{margin:6px 0;padding:6px 10px;border-radius:8px;background:#f5f5f5;break-inside:avoid}.row.admin{background:#e8f7ef}.who{font-weight:600;margin-right:8px}.when{float:right;color:#777;font-size:11px}.what{white-space:pre-wrap}</style></head><body><h1>Riwayat Chat — ${esc(
+            res.partnerName
+          )}</h1><p>${new Date().toLocaleString(
+            "id-ID"
+          )}</p>${body}<script>window.onload=()=>window.print()</script></body></html>`
+        );
+        w.document.close();
+      }
+    );
+  };
+
+  /* v5 — QR / share dialog. */
+  const openQr = () => {
+    const u = new URL(window.location.href);
+    u.search = "";
+    u.hash = "";
+    const url = u.toString();
+    setQrUrl(url);
+    setQrDataUrl(null);
+    setQrOpen(true);
+    QRCode.toDataURL(url, {
+      width: 320,
+      margin: 2,
+      color: { dark: "#065f46", light: "#ffffff" },
+    })
+      .then((dataUrl) => setQrDataUrl(dataUrl))
+      .catch(() => setQrDataUrl(null));
+  };
+
+  const copyQrUrl = () => {
+    void navigator.clipboard.writeText(qrUrl).catch(() => {});
+  };
+
+  const sendBroadcast = () => {
+    const socket = socketRef.current;
+    const content = broadcastText.trim();
+    if (!socket || !content || broadcastSending) return;
+    setBroadcastSending(true);
+    setBroadcastResult(null);
+    socket.emit("broadcast:send", { content }, (res: AckOf<BroadcastAck>) => {
+      setBroadcastSending(false);
+      if (res.ok) {
+        setBroadcastResult(`✅ Terkirim ke ${res.sent} percakapan`);
+        setBroadcastText("");
+        setTimeout(() => {
+          setBroadcastOpen(false);
+          setBroadcastResult(null);
+        }, 1200);
+      } else {
+        setBroadcastResult("Gagal mengirim, coba lagi.");
+      }
+    });
   };
 
   const handleImagePick = async (file: File | undefined | null) => {
@@ -561,6 +913,7 @@ export function AdminPanel() {
   const handleInputChange = (value: string) => {
     setInput(value);
     setSendError(false);
+    if (activeIdRef.current) saveDraft("admin", activeIdRef.current, value);
     const socket = socketRef.current;
     const id = activeIdRef.current;
     if (!socket || !id || !connected) return;
@@ -570,6 +923,39 @@ export function AdminPanel() {
       socketRef.current?.emit("typing", { conversationId: id, isTyping: false });
     }, 1500);
   };
+
+  /* v5 — keyboard shortcuts: Alt+↑/↓ switch conversations, / focuses search. */
+  useEffect(() => {
+    if (!authed) return;
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const typing =
+        !!target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+      if (e.key === "/" && !typing) {
+        e.preventDefault();
+        filterInputRef.current?.focus();
+        return;
+      }
+      if (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+        e.preventDefault();
+        const list = filteredConversations;
+        if (list.length === 0) return;
+        const idx = activeIdRef.current
+          ? list.findIndex((c) => c.id === activeIdRef.current)
+          : -1;
+        let next: number;
+        if (idx === -1) next = 0;
+        else if (e.key === "ArrowDown") next = Math.min(list.length - 1, idx + 1);
+        else next = Math.max(0, idx - 1);
+        if (list[next]) handleSelectConversation(list[next].id);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [authed, filteredConversations, handleSelectConversation]);
 
   const setLabel = (userId: string, label: UserLabel | null) => {
     socketRef.current?.emit(
@@ -762,6 +1148,30 @@ export function AdminPanel() {
                     variant="ghost"
                     size="icon"
                     className="size-9 text-muted-foreground hover:text-foreground"
+                    aria-label="Broadcast pengumuman"
+                    title="Kirim pengumuman ke semua pelanggan"
+                    onClick={() => {
+                      setBroadcastText("");
+                      setBroadcastResult(null);
+                      setBroadcastOpen(true);
+                    }}
+                  >
+                    <Megaphone className="size-4" aria-hidden="true" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-9 text-muted-foreground hover:text-foreground"
+                    aria-label="Bagikan lewat QR"
+                    title="QR code untuk membuka chat"
+                    onClick={openQr}
+                  >
+                    <QrCode className="size-4" aria-hidden="true" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-9 text-muted-foreground hover:text-foreground"
                     aria-label="Pengaturan layanan"
                     onClick={() => setSettingsOpen(true)}
                   >
@@ -797,8 +1207,9 @@ export function AdminPanel() {
                     aria-hidden="true"
                   />
                   <Input
+                    ref={filterInputRef}
                     value={filter}
-                    placeholder="Cari user…"
+                    placeholder="Cari user… ( / )"
                     aria-label="Cari user"
                     className="h-10 pl-9"
                     onChange={(e) => setFilter(e.target.value)}
@@ -808,8 +1219,15 @@ export function AdminPanel() {
                   {(
                     [
                       { key: "all", label: "Semua" },
-                      { key: "unread", label: `Belum dibaca${unreadCount ? ` (${unreadCount})` : ""}` },
+                      {
+                        key: "unread",
+                        label: `Belum dibaca${unreadCount ? ` (${unreadCount})` : ""}`,
+                      },
                       { key: "online", label: "Online" },
+                      {
+                        key: "archive",
+                        label: `Arsip${conversations.some((c) => c.archived) ? "" : ""}`,
+                      },
                     ] as { key: FilterTab; label: string }[]
                   ).map((t) => (
                     <button
@@ -842,13 +1260,15 @@ export function AdminPanel() {
                   ) : (
                     filteredConversations.map((c) => {
                       const isActive = c.id === activeId;
+                      const waiting = waitingMap.get(c.id);
                       return (
                         <button
                           key={c.id}
                           type="button"
                           className={cn(
                             "flex w-full items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-accent",
-                            isActive && "bg-accent"
+                            isActive && "bg-accent",
+                            waiting && "bg-rose-500/5"
                           )}
                           onClick={() => handleSelectConversation(c.id)}
                         >
@@ -886,6 +1306,13 @@ export function AdminPanel() {
                                   {LABEL_META[c.partner.label as UserLabel].text}
                                 </span>
                               ) : null}
+                              {c.partner.topic ? (
+                                <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[9px] text-muted-foreground">
+                                  {c.partner.topic.length > 14
+                                    ? `${c.partner.topic.slice(0, 14)}…`
+                                    : c.partner.topic}
+                                </span>
+                              ) : null}
                             </span>
                             <span className="block truncate text-xs text-muted-foreground">
                               {typingMap[c.id]
@@ -907,7 +1334,14 @@ export function AdminPanel() {
                                 ? formatChatTime(c.lastMessage.createdAt)
                                 : formatChatTime(c.lastMessageAt)}
                             </span>
-                            {c.unread > 0 ? (
+                            {waiting ? (
+                              <span
+                                className="flex h-5 items-center gap-0.5 rounded-full bg-rose-500 px-1.5 text-[10px] font-semibold text-white"
+                                title={`Menunggu balasan ${waiting} menit (SLA ${slaMinutes} mnt)`}
+                              >
+                                ⏰ {waiting >= 60 ? `${Math.floor(waiting / 60)}j` : `${waiting}m`}
+                              </span>
+                            ) : c.unread > 0 ? (
                               <Badge className="h-5 min-w-5 rounded-full bg-emerald-600 px-1 text-[10px] text-white">
                                 {c.unread > 99 ? "99+" : c.unread}
                               </Badge>
@@ -1051,6 +1485,58 @@ export function AdminPanel() {
                     >
                       <Search className="size-4" aria-hidden="true" />
                     </Button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-9 text-muted-foreground hover:text-foreground"
+                          aria-label="Menu lainnya"
+                        >
+                          <MoreVertical className="size-4" aria-hidden="true" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          onClick={() =>
+                            toggleArchive(activeConversation.id, !!activeConversation.archived)
+                          }
+                        >
+                          {activeConversation.archived ? (
+                            <ArchiveRestore className="mr-2 size-4" aria-hidden="true" />
+                          ) : (
+                            <Archive className="mr-2 size-4" aria-hidden="true" />
+                          )}
+                          {activeConversation.archived
+                            ? "Buka dari arsip"
+                            : "Arsipkan percakapan"}
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={exportCsv}>
+                          <Download className="mr-2 size-4" aria-hidden="true" />
+                          Ekspor CSV
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={printTranscript}>
+                          <Printer className="mr-2 size-4" aria-hidden="true" />
+                          Cetak / simpan PDF
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuLabel>Ukuran huruf</DropdownMenuLabel>
+                        {FONT_SCALE_LABELS.map((o) => (
+                          <DropdownMenuItem
+                            key={o.key}
+                            onClick={() => {
+                              setFontScale(o.key);
+                              saveFontScale(o.key);
+                            }}
+                            className={cn(fontScale === o.key && "bg-accent")}
+                          >
+                            <Type className="mr-2 size-3.5" aria-hidden="true" />
+                            {o.label}
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                 </div>
 
@@ -1068,6 +1554,24 @@ export function AdminPanel() {
                       <X className="size-3.5" />
                     </button>
                   </div>
+                ) : null}
+
+                {/* Pinned message banner (v5) */}
+                {pinnedMap[activeConversation.id] ? (
+                  <button
+                    type="button"
+                    className="flex shrink-0 items-center gap-2 border-b bg-amber-500/5 px-3 py-1.5 text-left text-xs"
+                    onClick={() => scrollToMessage(pinnedMap[activeConversation.id]!.id)}
+                  >
+                    <Pin className="size-3.5 shrink-0 text-amber-600" aria-hidden="true" />
+                    <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                      {pinnedMap[activeConversation.id]!.snippet}
+                    </span>
+                    <X
+                      className="size-3.5 shrink-0 text-muted-foreground"
+                      aria-hidden="true"
+                    />
+                  </button>
                 ) : null}
 
                 {/* Search bar */}
@@ -1117,7 +1621,10 @@ export function AdminPanel() {
                     if (atBottom) setNewCount(0);
                   }}
                 >
-                  <div className="flex w-full flex-col gap-2 p-3 sm:p-4 md:p-6">
+                  <div
+                    className="flex w-full flex-col gap-2 p-3 sm:p-4 md:p-6"
+                    style={{ fontSize: FONT_SCALES[fontScale] }}
+                  >
                     {visibleMessages.length === 0 ? (
                       query ? (
                         <p className="py-10 text-center text-sm text-muted-foreground">
@@ -1130,8 +1637,23 @@ export function AdminPanel() {
                       )
                     ) : (
                       visibleMessages.map((m) => (
-                        <ChatBubble
-                          key={m.id}
+                        <div key={m.id} className="contents">
+                          {m.id === unreadDividerId ? (
+                            <div
+                              className="my-1 flex items-center gap-2"
+                              role="separator"
+                              aria-label="Pesan baru"
+                            >
+                              <span className="h-px flex-1 bg-rose-500/40" aria-hidden="true" />
+                              <span className="rounded-full bg-rose-500/10 px-2 py-0.5 text-[10px] font-semibold text-rose-600 dark:text-rose-400">
+                                Pesan baru
+                              </span>
+                              <span className="h-px flex-1 bg-rose-500/40" aria-hidden="true" />
+                            </div>
+                          ) : null}
+                          <ChatBubble
+                            key={m.id}
+                            messageId={m.id}
                           content={m.content}
                           createdAt={m.createdAt}
                           side={m.senderId === ADMIN_ID ? "right" : "left"}
@@ -1142,10 +1664,27 @@ export function AdminPanel() {
                           replyAuthor={m.replyTo?.senderId === ADMIN_ID ? "Anda" : activeConversation.partner.name}
                           durationMs={m.durationMs}
                           transcript={m.transcript}
+                          reactions={m.reactions}
+                          myUserId={ADMIN_ID}
+                          edited={!!m.editedAt}
+                          translation={m.translation}
+                          translating={translatingId === m.id}
+                          pinned={pinnedMap[activeConversation.id]?.id === m.id}
+                          canEdit={canEditMessage(m, ADMIN_ID)}
+                          canPin
                           onReply={() => setReplyTo(m)}
                           onDelete={() => handleDelete(m)}
                           onImageOpen={setLightbox}
-                        />
+                          onReact={(emoji) => handleReact(m, emoji)}
+                          onEdit={() => handleEditStart(m)}
+                          onTranslate={
+                            m.senderId !== ADMIN_ID && m.type === "text" && !m.deletedAt
+                              ? () => handleTranslate(m)
+                              : undefined
+                          }
+                          onPin={() => togglePin(m)}
+                          />
+                        </div>
                       ))
                     )}
                   </div>
@@ -1240,6 +1779,24 @@ export function AdminPanel() {
                       aria-label="Batal membalas"
                       className="text-muted-foreground hover:text-foreground"
                       onClick={() => setReplyTo(null)}
+                    >
+                      <X className="size-4" />
+                    </button>
+                  </div>
+                ) : null}
+
+                {/* Edit chip (v5) */}
+                {editing ? (
+                  <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border-l-2 border-amber-500 bg-amber-500/10 px-2 py-1.5 text-xs">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-medium text-amber-600">Mengedit pesan</p>
+                      <p className="truncate text-muted-foreground">{editing.content}</p>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="Batal mengedit"
+                      className="text-muted-foreground hover:text-foreground"
+                      onClick={handleEditCancel}
                     >
                       <X className="size-4" />
                     </button>
@@ -1344,8 +1901,8 @@ export function AdminPanel() {
                       <Input
                         value={input}
                         maxLength={MAX_MESSAGE_LENGTH}
-                        placeholder="Tulis balasan…"
-                        aria-label="Tulis balasan"
+                        placeholder={editing ? "Simpan hasil edit…" : "Tulis balasan…"}
+                        aria-label={editing ? "Edit pesan" : "Tulis balasan"}
                         autoComplete="off"
                         disabled={!connected}
                         className="h-11 flex-1"
@@ -1354,6 +1911,10 @@ export function AdminPanel() {
                           if (e.key === "Enter" && !e.shiftKey) {
                             e.preventDefault();
                             handleSend();
+                          }
+                          if (e.key === "Escape" && editing) {
+                            e.preventDefault();
+                            handleEditCancel();
                           }
                         }}
                       />
@@ -1463,6 +2024,93 @@ export function AdminPanel() {
       ) : null}
       {statsOpen ? (
         <AdminStatsDialog open onOpenChange={setStatsOpen} socketRef={socketRef} />
+      ) : null}
+
+      {/* Broadcast dialog (v5) — mounted only while open */}
+      {broadcastOpen ? (
+        <Dialog
+          open
+          onOpenChange={(v) => {
+            setBroadcastOpen(v);
+            if (!v) setBroadcastResult(null);
+          }}
+        >
+          <DialogContent className="max-w-md rounded-2xl">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Megaphone className="size-4 text-emerald-600" aria-hidden="true" />
+                Broadcast Pengumuman
+              </DialogTitle>
+              <DialogDescription>
+                Pesan ini masuk ke chat SEMUA pelanggan sebagai pengumuman (📢).
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3">
+              <Textarea
+                rows={4}
+                value={broadcastText}
+                maxLength={MAX_MESSAGE_LENGTH}
+                placeholder="cth. 🎉 Promo akhir pekan! Diskon 20% untuk semua produk Sabtu–Minggu ini."
+                onChange={(e) => {
+                  setBroadcastText(e.target.value);
+                  setBroadcastResult(null);
+                }}
+              />
+              {broadcastResult ? (
+                <p className="text-sm font-medium text-emerald-600">{broadcastResult}</p>
+              ) : null}
+              <Button
+                className="h-10 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+                disabled={broadcastSending || !broadcastText.trim()}
+                onClick={sendBroadcast}
+              >
+                {broadcastSending
+                  ? "Mengirim…"
+                  : `Kirim ke ${conversations.length} percakapan`}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      ) : null}
+
+      {/* QR / share dialog (v5) */}
+      {qrOpen ? (
+        <Dialog open onOpenChange={setQrOpen}>
+          <DialogContent className="max-w-sm rounded-2xl">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <QrCode className="size-4 text-emerald-600" aria-hidden="true" />
+                Bagikan Chat
+              </DialogTitle>
+              <DialogDescription>
+                Pelanggan memindai QR ini (atau buka tautannya) untuk mulai chat dengan Anda.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex flex-col items-center gap-3">
+              {qrDataUrl ? (
+                <img
+                  src={qrDataUrl}
+                  alt="QR code link chat"
+                  className="h-56 w-56 rounded-xl border"
+                />
+              ) : (
+                <div className="flex h-56 w-56 items-center justify-center rounded-xl border bg-muted/40 text-sm text-muted-foreground">
+                  Membuat QR…
+                </div>
+              )}
+              <p className="w-full truncate rounded-lg bg-muted/60 px-3 py-2 text-center text-xs text-muted-foreground">
+                {qrUrl}
+              </p>
+              <Button
+                variant="outline"
+                className="h-10 w-full"
+                onClick={copyQrUrl}
+              >
+                Salin tautan
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
       ) : null}
 
       {/* Image lightbox */}

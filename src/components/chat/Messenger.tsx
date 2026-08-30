@@ -7,10 +7,13 @@ import {
   LogOut,
   MessageCircleMore,
   Mic,
+  Pin,
   Search,
   SendHorizonal,
   ShieldCheck,
   Smile,
+  Star,
+  Type,
   X,
 } from "lucide-react";
 import type { Socket } from "socket.io-client";
@@ -35,28 +38,58 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useVoiceRecorder } from "@/hooks/use-voice-recorder";
 import { createChatSocket } from "@/lib/chat-socket";
 import { playBlip, setTitleUnread } from "@/lib/chat-notify";
+import { onInstallAvailability, promptInstall, subscribeToPush } from "@/lib/chat-push";
 import {
   ADMIN_ID,
   CHAT_LAST_NAME_KEY,
   CHAT_SESSION_KEY,
   MAX_MESSAGE_LENGTH,
   MAX_NAME_LENGTH,
+  draftKey,
   type AckOf,
   type ChatErrorAck,
   type ChatMessage,
   type ConversationOverview,
   type HistoryAck,
   type MessageAck,
+  type MessageUpdatePayload,
   type PartnerInfo,
+  type PinUpdatePayload,
+  type PublicSettings,
+  type RatingAck,
   type SetPinAck,
+  type TranslateAck,
   type UserAuthAck,
 } from "@/lib/chat-types";
-import { avatarColorClass, formatLastSeen, initials } from "@/lib/chat-utils";
+import {
+  avatarColorClass,
+  canEditMessage,
+  FONT_SCALES,
+  formatLastSeen,
+  initials,
+  readFontScale,
+  saveFontScale,
+  type FontScale,
+} from "@/lib/chat-utils";
 import { cn } from "@/lib/utils";
 
 interface StoredUser {
@@ -106,6 +139,29 @@ function saveLastName(name: string): void {
   }
 }
 
+const FONT_SCALE_LABELS: { key: FontScale; label: string }[] = [
+  { key: "sm", label: "Kecil" },
+  { key: "md", label: "Sedang" },
+  { key: "lg", label: "Besar" },
+];
+
+function readDraft(scope: string, id: string): string {
+  try {
+    return window.localStorage.getItem(draftKey(scope, id)) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveDraft(scope: string, id: string, value: string): void {
+  try {
+    if (value) window.localStorage.setItem(draftKey(scope, id), value);
+    else window.localStorage.removeItem(draftKey(scope, id));
+  } catch {
+    /* ignore */
+  }
+}
+
 /** Downscale + compress an image file to a JPEG data URL the server accepts. */
 async function fileToDataUrl(file: File): Promise<string> {
   if (file.size > 6 * 1024 * 1024) throw new Error("too-large");
@@ -126,6 +182,77 @@ const fmtTimer = (ms: number) => {
   const total = Math.floor(ms / 1000);
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 };
+
+/* ------------------------------------------------------------------ */
+/* Star rating card (v5 — rendered for rating_request system notices)  */
+/* ------------------------------------------------------------------ */
+
+function RatingCard({
+  socketRef,
+  conversationId,
+}: {
+  socketRef: React.RefObject<Socket | null>;
+  conversationId: string;
+}) {
+  const [hover, setHover] = useState(0);
+  const [sending, setSending] = useState(false);
+  const [done, setDone] = useState(false);
+
+  if (done) {
+    return (
+      <div className="flex justify-center">
+        <p className="rounded-full bg-emerald-600/10 px-4 py-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-400">
+          ⭐ Terima kasih, penilaian Anda tercatat!
+        </p>
+      </div>
+    );
+  }
+
+  const submit = (stars: number) => {
+    const socket = socketRef.current;
+    if (!socket || sending) return;
+    setSending(true);
+    socket.emit(
+      "rating:submit",
+      { conversationId, stars },
+      (res: AckOf<RatingAck>) => {
+        setSending(false);
+        if (res.ok) setDone(true);
+      }
+    );
+  };
+
+  return (
+    <div className="flex justify-center">
+      <div className="rounded-xl border bg-card px-4 py-3 text-center shadow-sm">
+        <p className="text-sm font-medium">Bagaimana layanan kami?</p>
+        <p className="mb-2 text-xs text-muted-foreground">Ketuk bintang untuk menilai</p>
+        <div className="flex justify-center gap-1" role="group" aria-label="Beri penilaian bintang">
+          {[1, 2, 3, 4, 5].map((n) => (
+            <button
+              key={n}
+              type="button"
+              disabled={sending}
+              aria-label={`Beri ${n} bintang`}
+              className="rounded-full p-1 transition-transform hover:scale-110 disabled:opacity-50"
+              onMouseEnter={() => setHover(n)}
+              onMouseLeave={() => setHover(0)}
+              onClick={() => submit(n)}
+            >
+              <Star
+                className={cn(
+                  "size-7",
+                  (hover || 5) >= n ? "fill-amber-400 text-amber-400" : "text-muted-foreground/40"
+                )}
+                aria-hidden="true"
+              />
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* PIN dialog (protect this account with a 4–8 digit code)             */
@@ -269,6 +396,8 @@ export function Messenger() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [sendError, setSendError] = useState(false);
+  // v5 — pre-login public config (pre-chat topics come from the server).
+  const [loginTopics, setLoginTopics] = useState<string[]>([]);
 
   const [adminReadId, setAdminReadId] = useState(0);
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
@@ -280,6 +409,16 @@ export function Messenger() {
   const [showJump, setShowJump] = useState(false);
   const [newCount, setNewCount] = useState(0);
   const [lightbox, setLightbox] = useState<string | null>(null);
+
+  // v5 — menu chips / pre-chat topic / pinned banner / edit / font / push
+  const [publicSettings, setPublicSettings] = useState<PublicSettings | null>(null);
+  const [menuChipsOpen, setMenuChipsOpen] = useState(true);
+  const [pinnedMsg, setPinnedMsg] = useState<{ id: number; snippet: string } | null>(null);
+  const [editing, setEditing] = useState<ChatMessage | null>(null);
+  const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
+  const [topic, setTopic] = useState("");
+  const [installAvailable, setInstallAvailable] = useState(false);
+  const [translatingId, setTranslatingId] = useState<number | null>(null);
 
   /** Bumped on logout to tear down + recreate the socket (fresh rooms). */
   const [epoch, setEpoch] = useState(0);
@@ -293,6 +432,7 @@ export function Messenger() {
   const atBottomRef = useRef(true);
   const hiddenUnreadRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const translatingIdRef = useRef<number | null>(null);
 
   const recorder = useVoiceRecorder();
 
@@ -321,6 +461,7 @@ export function Messenger() {
             setPartner(res.partner);
             setMessages(res.messages);
             setAdminReadId(res.partnerLastReadId);
+            setPinnedMsg(res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null);
             socketRef.current?.emit("messages:read", { conversationId: id });
           }
         }
@@ -329,6 +470,12 @@ export function Messenger() {
 
     socket.on("connect", () => {
       setConnected(true);
+      // v5 — pre-login config (pre-chat topics for the login card).
+      if (!meRef.current) {
+        socket.emit("public:settings", {}, (res: { ok: boolean; publicSettings?: PublicSettings }) => {
+          if (res.ok && res.publicSettings) setLoginTopics(res.publicSettings.preChatTopics);
+        });
+      }
       const current = meRef.current;
       if (!current) return;
       // Re-auth on EVERY connect to (re)join the personal room and get
@@ -352,6 +499,14 @@ export function Messenger() {
             setPartner(res.partner);
             setMessages(res.messages);
             setAdminReadId(res.partnerLastReadId);
+            // v5 — public config, pinned banner, draft, push opt-in.
+            setPublicSettings(res.publicSettings);
+            setPinnedMsg(
+              res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null
+            );
+            setInput(readDraft("user", res.user.id));
+            setMenuChipsOpen(true);
+            void subscribeToPush(socket, res.publicSettings.pushPublicKey);
           } else {
             // Stored login no longer valid — drop it, back to the form.
             window.localStorage.removeItem(CHAT_SESSION_KEY);
@@ -387,6 +542,18 @@ export function Messenger() {
       }
     });
 
+    // v5 — pinned-message banner updates (admin pins/unpins).
+    socket.on("conversation:update", (p: PinUpdatePayload) => {
+      if (p.conversationId !== conversationIdRef.current) return;
+      setPinnedMsg(p.pinned ? { id: p.pinned.id, snippet: p.pinned.snippet } : null);
+    });
+
+    // v5 — live public config (admin enabled the chatbot menu etc.).
+    socket.on("public:settings:update", (s: PublicSettings) => {
+      setPublicSettings(s);
+      setLoginTopics(s.preChatTopics);
+    });
+
     // Append messages ONLY here; skip if the last stored message already
     // has the same id (history-replacement vs broadcast race).
     socket.on("message:new", (msg: ChatMessage) => {
@@ -410,30 +577,28 @@ export function Messenger() {
       }
     });
 
-    // Delete tombstones + late voice transcripts.
-    socket.on(
-      "message:updated",
-      (u: {
-        id: number;
-        conversationId: string;
-        deletedAt?: string;
-        transcript?: string;
-        content?: string;
-      }) => {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === u.id
-              ? {
-                  ...m,
-                  content: u.content ?? m.content,
-                  deletedAt: u.deletedAt ?? m.deletedAt,
-                  transcript: u.transcript ?? m.transcript,
-                }
-              : m
-          )
-        );
+    // Delete tombstones + late voice transcripts + edits/translations/reactions.
+    socket.on("message:updated", (u: MessageUpdatePayload) => {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === u.id
+            ? {
+                ...m,
+                content: u.content ?? m.content,
+                deletedAt: u.deletedAt ?? m.deletedAt,
+                transcript: u.transcript ?? m.transcript,
+                editedAt: u.editedAt ?? m.editedAt,
+                translation: u.translation ?? m.translation,
+                reactions: u.reactions ?? m.reactions,
+              }
+            : m
+        )
+      );
+      if (u.translation && u.id === translatingIdRef.current) {
+        translatingIdRef.current = null;
+        setTranslatingId(null);
       }
-    );
+    });
 
     // Live ✓✓: the admin read up to `lastReadMessageId`.
     socket.on(
@@ -491,8 +656,12 @@ export function Messenger() {
     };
     document.addEventListener("visibilitychange", onVisible);
 
+    // v5 — PWA install prompt availability.
+    const offInstall = onInstallAvailability(setInstallAvailable);
+
     return () => {
       document.removeEventListener("visibilitychange", onVisible);
+      offInstall();
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
       if (partnerTypingTimerRef.current)
         clearTimeout(partnerTypingTimerRef.current);
@@ -526,7 +695,12 @@ export function Messenger() {
     setAuthError(null);
     socket.emit(
       "user:auth",
-      { name: trimmed, pin: needsPin && pinEntry ? pinEntry : undefined },
+      {
+        name: trimmed,
+        pin: needsPin && pinEntry ? pinEntry : undefined,
+        // v5 — optional pre-chat topic (first login only).
+        topic: topic || undefined,
+      },
       (res: AckOf<UserAuthAck>) => {
         if (res.ok) {
           const next = { userId: res.user.id, name: res.user.name };
@@ -543,6 +717,12 @@ export function Messenger() {
           setPartner(res.partner);
           setMessages(res.messages);
           setAdminReadId(res.partnerLastReadId);
+          setPublicSettings(res.publicSettings);
+          setPinnedMsg(res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null);
+          setInput(readDraft("user", res.user.id));
+          setMenuChipsOpen(true);
+          setTopic("");
+          void subscribeToPush(socket, res.publicSettings.pushPublicKey);
         } else {
           if (res.error === "PIN_REQUIRED" || res.error === "INVALID_PIN") {
             setNeedsPin(true);
@@ -566,6 +746,8 @@ export function Messenger() {
   };
 
   const handleLogout = () => {
+    // Keep the typed draft so it survives logout → login.
+    if (meRef.current) saveDraft("user", meRef.current.userId, input);
     window.localStorage.removeItem(CHAT_SESSION_KEY);
     meRef.current = null;
     conversationIdRef.current = null;
@@ -579,6 +761,9 @@ export function Messenger() {
     setInput("");
     setSendError(false);
     setReplyTo(null);
+    setEditing(null);
+    setPinnedMsg(null);
+    setPublicSettings(null);
     setPendingImage(null);
     setSearchOpen(false);
     setSearchQuery("");
@@ -614,15 +799,68 @@ export function Messenger() {
       }
     );
     setReplyTo(null);
+    if (meRef.current) saveDraft("user", meRef.current.userId, "");
     return true;
   };
 
   const handleSend = () => {
     const content = input.trim();
     if (!content) return;
+    // v5 — edit mode: Enter saves the edited message instead of sending.
+    if (editing) {
+      const target = editing;
+      socketRef.current?.emit(
+        "message:edit",
+        { messageId: target.id, content },
+        (res: AckOf<{ ok: true }>) => {
+          if (!res.ok) setSendError(true);
+        }
+      );
+      setEditing(null);
+      setInput("");
+      return;
+    }
     setInput("");
     setSendError(false);
     if (!emitMessage(content, "text")) setInput(content);
+  };
+
+  /* v5 — reactions / edit / translate on bubbles. */
+  const handleReact = (msg: ChatMessage, emoji: string) => {
+    socketRef.current?.emit("message:react", { messageId: msg.id, emoji });
+  };
+
+  const handleEditStart = (msg: ChatMessage) => {
+    setReplyTo(null);
+    setEditing(msg);
+    setInput(msg.content);
+  };
+
+  const handleEditCancel = () => {
+    setEditing(null);
+    setInput("");
+  };
+
+  const handleTranslate = (msg: ChatMessage) => {
+    if (translatingIdRef.current) return;
+    if (msg.translation) return;
+    translatingIdRef.current = msg.id;
+    setTranslatingId(msg.id);
+    socketRef.current?.emit(
+      "message:translate",
+      { messageId: msg.id },
+      (res: AckOf<TranslateAck>) => {
+        if (!res.ok) {
+          translatingIdRef.current = null;
+          setTranslatingId(null);
+        }
+      }
+    );
+  };
+
+  const scrollToMessage = (id: number) => {
+    const el = scrollRef.current?.querySelector(`[data-mid="${id}"]`);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
 
   const handleImagePick = async (file: File | undefined | null) => {
@@ -657,6 +895,7 @@ export function Messenger() {
   const handleInputChange = (value: string) => {
     setInput(value);
     setSendError(false);
+    if (meRef.current) saveDraft("user", meRef.current.userId, value);
     const socket = socketRef.current;
     const id = conversationIdRef.current;
     if (!socket || !id || !connected) return;
@@ -731,6 +970,23 @@ export function Messenger() {
                   />
                 </div>
               ) : null}
+              {!lastName && loginTopics.length > 0 ? (
+                <div className="space-y-2">
+                  <Label htmlFor="messenger-topic">Topik (opsional)</Label>
+                  <Select value={topic} onValueChange={setTopic}>
+                    <SelectTrigger id="messenger-topic" className="h-11 w-full">
+                      <SelectValue placeholder="Pilih kebutuhan Anda…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {loginTopics.map((t) => (
+                        <SelectItem key={t} value={t}>
+                          {t}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
               {authError ? <p className="text-sm text-destructive">{authError}</p> : null}
               <Button
                 type="submit"
@@ -748,6 +1004,16 @@ export function Messenger() {
                   ? `Lanjutkan chat sebelumnya sebagai “${lastName}” — riwayat pesan Anda tetap ada`
                   : "Nama yang sama = akun yang sama, jadi Anda bisa lanjut chat kapan saja"}
               </p>
+              {installAvailable ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-10 w-full"
+                  onClick={() => promptInstall()}
+                >
+                  📲 Install aplikasi di perangkat ini
+                </Button>
+              ) : null}
             </form>
           </CardContent>
         </Card>
@@ -830,6 +1096,35 @@ export function Messenger() {
             >
               <Search className="size-4" aria-hidden="true" />
             </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-9 text-muted-foreground hover:text-foreground"
+                  aria-label="Ukuran huruf"
+                >
+                  <Type className="size-4" aria-hidden="true" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuLabel>Ukuran huruf</DropdownMenuLabel>
+                {(
+                  FONT_SCALE_LABELS
+                ).map((o) => (
+                  <DropdownMenuItem
+                    key={o.key}
+                    onClick={() => {
+                      setFontScale(o.key);
+                      saveFontScale(o.key);
+                    }}
+                    className={cn(fontScale === o.key && "bg-accent")}
+                  >
+                    {o.label}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
             <Button
               variant="ghost"
               size="icon"
@@ -890,6 +1185,20 @@ export function Messenger() {
           </div>
         ) : null}
 
+        {/* Pinned message banner (v5) */}
+        {pinnedMsg ? (
+          <button
+            type="button"
+            className="flex shrink-0 items-center gap-2 border-b bg-amber-500/5 px-3 py-1.5 text-left text-xs"
+            onClick={() => scrollToMessage(pinnedMsg.id)}
+          >
+            <Pin className="size-3.5 shrink-0 text-amber-600" aria-hidden="true" />
+            <span className="min-w-0 flex-1 truncate text-muted-foreground">
+              {pinnedMsg.snippet}
+            </span>
+          </button>
+        ) : null}
+
         {/* Messages */}
         <div
           ref={scrollRef}
@@ -902,7 +1211,10 @@ export function Messenger() {
             if (atBottom) setNewCount(0);
           }}
         >
-          <div className="flex w-full flex-col gap-2 p-3 sm:p-4 md:p-6">
+          <div
+            className="flex w-full flex-col gap-2 p-3 sm:p-4 md:p-6"
+            style={{ fontSize: FONT_SCALES[fontScale] }}
+          >
             {visibleMessages.length === 0 ? (
               query ? (
                 <p className="py-10 text-center text-sm text-muted-foreground">
@@ -914,24 +1226,43 @@ export function Messenger() {
                 </p>
               )
             ) : (
-              visibleMessages.map((m) => (
-                <ChatBubble
-                  key={m.id}
-                  content={m.content}
-                  createdAt={m.createdAt}
-                  side={m.senderId === me.userId ? "right" : "left"}
-                  type={m.type}
-                  deleted={!!m.deletedAt}
-                  read={m.senderId === me.userId && m.id <= adminReadId}
-                  replyTo={m.replyTo}
-                  replyAuthor={m.replyTo?.senderId === me.userId ? "Anda" : partner?.name}
-                  durationMs={m.durationMs}
-                  transcript={m.transcript}
-                  onReply={() => setReplyTo(m)}
-                  onDelete={() => handleDelete(m)}
-                  onImageOpen={setLightbox}
-                />
-              ))
+              visibleMessages.map((m) =>
+                m.type === "system" && m.kind === "rating_request" ? (
+                  <RatingCard key={m.id} socketRef={socketRef} conversationId={m.conversationId} />
+                ) : (
+                  <ChatBubble
+                    key={m.id}
+                    messageId={m.id}
+                    content={m.content}
+                    createdAt={m.createdAt}
+                    side={m.senderId === me.userId ? "right" : "left"}
+                    type={m.type}
+                    deleted={!!m.deletedAt}
+                    read={m.senderId === me.userId && m.id <= adminReadId}
+                    replyTo={m.replyTo}
+                    replyAuthor={m.replyTo?.senderId === me.userId ? "Anda" : partner?.name}
+                    durationMs={m.durationMs}
+                    transcript={m.transcript}
+                    reactions={m.reactions}
+                    myUserId={me.userId}
+                    edited={!!m.editedAt}
+                    translation={m.translation}
+                    translating={translatingId === m.id}
+                    pinned={pinnedMsg?.id === m.id}
+                    canEdit={canEditMessage(m, me.userId)}
+                    onReply={() => setReplyTo(m)}
+                    onDelete={() => handleDelete(m)}
+                    onImageOpen={setLightbox}
+                    onReact={(emoji) => handleReact(m, emoji)}
+                    onEdit={() => handleEditStart(m)}
+                    onTranslate={
+                      m.senderId !== me.userId && m.type === "text" && !m.deletedAt
+                        ? () => handleTranslate(m)
+                        : undefined
+                    }
+                  />
+                )
+              )
             )}
           </div>
 
@@ -970,6 +1301,35 @@ export function Messenger() {
           </p>
         ) : null}
 
+        {/* Chatbot menu chips (v5) — instant self-service answers */}
+        {!editing && menuChipsOpen &&
+        publicSettings?.chatMenuEnabled &&
+        (publicSettings.chatMenuItems?.length ?? 0) > 0 ? (
+          <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto px-3 pb-1.5 chat-scroll">
+            <span className="shrink-0 text-xs text-muted-foreground">📋 Menu:</span>
+            {publicSettings.chatMenuItems.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                className="shrink-0 rounded-full border border-emerald-600/40 bg-emerald-600/5 px-3 py-1 text-xs text-emerald-700 hover:bg-emerald-600/10 dark:text-emerald-400"
+                onClick={() => {
+                  if (emitMessage(item.label, "text")) setInput("");
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+            <button
+              type="button"
+              aria-label="Sembunyikan menu"
+              className="shrink-0 text-muted-foreground hover:text-foreground"
+              onClick={() => setMenuChipsOpen(false)}
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+        ) : null}
+
         {/* Reply chip */}
         {replyTo ? (
           <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border-l-2 border-emerald-500 bg-muted/60 px-2 py-1.5 text-xs">
@@ -992,6 +1352,24 @@ export function Messenger() {
               aria-label="Batal membalas"
               className="text-muted-foreground hover:text-foreground"
               onClick={() => setReplyTo(null)}
+            >
+              <X className="size-4" />
+            </button>
+          </div>
+        ) : null}
+
+        {/* Edit chip (v5) */}
+        {editing ? (
+          <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border-l-2 border-amber-500 bg-amber-500/10 px-2 py-1.5 text-xs">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium text-amber-600">Mengedit pesan</p>
+              <p className="truncate text-muted-foreground">{editing.content}</p>
+            </div>
+            <button
+              type="button"
+              aria-label="Batal mengedit"
+              className="text-muted-foreground hover:text-foreground"
+              onClick={handleEditCancel}
             >
               <X className="size-4" />
             </button>
@@ -1096,8 +1474,8 @@ export function Messenger() {
               <Input
                 value={input}
                 maxLength={MAX_MESSAGE_LENGTH}
-                placeholder="Tulis pesan…"
-                aria-label="Tulis pesan"
+                placeholder={editing ? "Simpan hasil edit…" : "Tulis pesan…"}
+                aria-label={editing ? "Edit pesan" : "Tulis pesan"}
                 autoComplete="off"
                 disabled={!connected}
                 className="h-11 flex-1"
@@ -1106,6 +1484,10 @@ export function Messenger() {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     handleSend();
+                  }
+                  if (e.key === "Escape" && editing) {
+                    e.preventDefault();
+                    handleEditCancel();
                   }
                 }}
               />

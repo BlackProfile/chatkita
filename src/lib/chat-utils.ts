@@ -1,7 +1,42 @@
 /**
- * Small presentation helpers shared by the ChatKita chat UI.
- * Pure functions only — safe to import from client components.
+ * Pure helpers shared by the ChatKita chat UI (client-side only usage).
  */
+
+import { CHAT_FONT_KEY, type ChatMessage } from "./chat-types";
+
+/* ------------------------------ font size ------------------------------ */
+
+export const FONT_SCALES = { sm: 13, md: 15, lg: 17 } as const;
+export type FontScale = keyof typeof FONT_SCALES;
+
+export function readFontScale(): FontScale {
+  try {
+    const v = window.localStorage.getItem(CHAT_FONT_KEY);
+    if (v === "sm" || v === "md" || v === "lg") return v;
+  } catch {
+    /* ignore */
+  }
+  return "md";
+}
+
+export function saveFontScale(scale: FontScale): void {
+  try {
+    window.localStorage.setItem(CHAT_FONT_KEY, scale);
+  } catch {
+    /* ignore */
+  }
+}
+
+/* ------------------------------ edit window ------------------------------ */
+
+/** Own text messages are editable for 15 minutes (mirrors the server). */
+export const EDIT_WINDOW_MS = 15 * 60_000;
+
+export function canEditMessage(m: ChatMessage, myId: string): boolean {
+  return m.senderId === myId && m.type === "text" && !m.deletedAt
+    ? Date.now() - Date.parse(m.createdAt) < EDIT_WINDOW_MS
+    : false;
+}
 
 /** Format an ISO 8601 timestamp as HH:MM in Indonesian locale. */
 export function formatChatTime(iso: string): string {
@@ -78,6 +113,23 @@ export function messagePreview(
   if (deleted) return "🚫 Pesan ini dihapus";
   if (type === "image") return "📷 Foto";
   if (type === "voice") return "🎤 Pesan suara";
+  if (type === "broadcast") return `📢 ${content}`;
   if (type === "system") return content;
   return content;
+}
+
+/**
+ * SLA (v5): human minutes a user message has been waiting for an admin
+ * reply, or null when the last message does not need one.
+ */
+export function waitingMinutes(
+  lastMessage: { senderId: string; type: string; createdAt: string } | null | undefined,
+  adminId: string
+): number | null {
+  if (!lastMessage) return null;
+  if (lastMessage.senderId === adminId) return null;
+  if (lastMessage.type === "system" || lastMessage.type === "broadcast") return null;
+  const ts = Date.parse(lastMessage.createdAt);
+  if (Number.isNaN(ts)) return null;
+  return Math.max(0, Math.floor((Date.now() - ts) / 60000));
 }

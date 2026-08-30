@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -21,7 +21,14 @@ export const metadata: Metadata = {
   keywords: ["ChatKita", "chat", "real-time", "1-on-1", "Indonesia"],
   authors: [{ name: "ChatKita" }],
   icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+    icon: "/icon-192.png",
+    apple: "/apple-touch-icon.png",
+  },
+  manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "default",
+    title: "ChatKita",
   },
   openGraph: {
     title: "ChatKita — Chat Sederhana",
@@ -30,6 +37,11 @@ export const metadata: Metadata = {
     siteName: "ChatKita",
     type: "website",
   },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#059669",
+  viewportFit: "cover",
 };
 
 export default function RootLayout({

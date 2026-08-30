@@ -245,6 +245,120 @@ export function AdminSettingsDialog({
               ) : null}
             </section>
 
+            {/* SLA alert (v5) */}
+            <section className="space-y-2">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">⏰ Batas tunggu (SLA)</p>
+                  <p className="text-xs text-muted-foreground">
+                    Alarm + badge merah jika pelanggan menunggu lebih dari X menit.
+                  </p>
+                </div>
+                <Input
+                  type="number"
+                  min={1}
+                  max={240}
+                  value={draft.slaMinutes}
+                  aria-label="Batas tunggu dalam menit"
+                  className="h-9 w-24"
+                  onChange={(e) =>
+                    patch({ slaMinutes: Math.min(240, Math.max(1, Number(e.target.value) || 1)) })
+                  }
+                />
+              </div>
+            </section>
+
+            {/* Chatbot menu (v5) */}
+            <section className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">📋 Menu chatbot</p>
+                  <p className="text-xs text-muted-foreground">
+                    Tombol jawaban instan di chat pelanggan — aktif bahkan saat Anda online.
+                  </p>
+                </div>
+                <Switch
+                  checked={draft.chatMenuEnabled}
+                  onCheckedChange={(v) => patch({ chatMenuEnabled: v })}
+                  aria-label="Aktifkan menu chatbot"
+                />
+              </div>
+              {draft.chatMenuEnabled ? (
+                <div className="space-y-2">
+                  {draft.chatMenuItems.map((item, idx) => (
+                    <div key={idx} className="flex items-center gap-2">
+                      <Input
+                        value={item.label}
+                        aria-label={`Label menu ${idx + 1}`}
+                        className="h-9 w-32 shrink-0"
+                        maxLength={60}
+                        placeholder="Label tombol"
+                        onChange={(e) => {
+                          const next = [...draft.chatMenuItems];
+                          next[idx] = { ...next[idx], label: e.target.value };
+                          patch({ chatMenuItems: next });
+                        }}
+                      />
+                      <Input
+                        value={item.answer}
+                        aria-label={`Jawaban menu ${idx + 1}`}
+                        className="h-9 flex-1"
+                        maxLength={500}
+                        placeholder="Jawaban otomatis"
+                        onChange={(e) => {
+                          const next = [...draft.chatMenuItems];
+                          next[idx] = { ...next[idx], answer: e.target.value };
+                          patch({ chatMenuItems: next });
+                        }}
+                      />
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-9 shrink-0 text-muted-foreground hover:text-destructive"
+                        aria-label={`Hapus menu ${idx + 1}`}
+                        onClick={() =>
+                          patch({
+                            chatMenuItems: draft.chatMenuItems.filter((_, i) => i !== idx),
+                          })
+                        }
+                      >
+                        <X className="size-4" />
+                      </Button>
+                    </div>
+                  ))}
+                  {draft.chatMenuItems.length < 12 ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8"
+                      onClick={() =>
+                        patch({
+                          chatMenuItems: [...draft.chatMenuItems, { label: "", answer: "" }],
+                        })
+                      }
+                    >
+                      <Plus className="mr-1 size-3.5" aria-hidden="true" />
+                      Tambah item menu
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
+            </section>
+
+            {/* Pre-chat topics (v5) */}
+            <section className="space-y-1.5">
+              <Label htmlFor="pre-chat-topics">Topik form login (opsional)</Label>
+              <Input
+                id="pre-chat-topics"
+                value={draft.preChatTopics}
+                placeholder="cth. Tanya produk, Komplain, Lainnya — pisahkan dengan koma"
+                onChange={(e) => patch({ preChatTopics: e.target.value })}
+              />
+              <p className="text-xs text-muted-foreground">
+                Kosongkan untuk menyembunyikan pilihan topik di layar masuk pelanggan.
+              </p>
+            </section>
+
             {/* Sound */}
             <section className="flex items-center justify-between">
               <div>
