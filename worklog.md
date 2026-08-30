@@ -251,3 +251,18 @@ Work Log:
 Stage Summary:
 - Public app is now: open → type name → chat. Zero marketing surface, zero admin exposure (URL-hidden only). Files: src/app/page.tsx (rewritten), src/app/layout.tsx (metadata), one-off /tmp/cleanup-test-users.ts (not part of repo)
 - Admin access to tell the OWNER (not public): add /?admin or /#admin to the app URL, password admin123
+
+---
+Task ID: 11
+Agent: main (Z.ai Code)
+Task: "hapus header chat kita, pindahkan setting gelap terangnya gabungkan dengan header dibawahnya" — remove the global ChatKita bar; move the theme toggle into the in-app headers
+
+Work Log:
+- page.tsx: deleted the whole global <header> (logo + "Chat 1-on-1" badge + theme toggle) — root is now just h-dvh shell + <main>; removed unused imports (MessageCircleMore, Badge, ThemeToggle). Brand remains only in the browser tab (metadata)
+- Messenger.tsx: ThemeToggle added to the chat header (in a shrink-0 group with the Keluar button); login view got a floating toggle (absolute right-2 top-2, container made relative) since the login screen has no header
+- AdminPanel.tsx: ThemeToggle merged into the sidebar profile row (Admin · Panel Admin · Online) next to Keluar; admin login view got the same floating toggle
+- Verified via browser: login screens show floating toggle top-right (light+dark); user chat header = [avatar Admin/status | toggle | logout] starting at the very top of the viewport; admin sidebar profile row = [avatar/name | toggle | logout]; clicking toggle flips dark<->light (isDark verified via documentElement.classList); admin inbox intact; mobile 375×700: composer visible, toggle present in header, no overflow-x; lint clean
+- localStorage lesson refined: agent-browser profile persists across sessions AND auto re-auth re-creates users BY NAME from stale stored sessions after a db cleanup (Penguat reappeared post-cleanup). Fix order: localStorage.clear() in the browser FIRST, close it, THEN delete the user rows. Remaining users: Admin + iji (real owner traffic — iji got an admin reply "pa" during this task, owner is actively testing)
+
+Stage Summary:
+- No global app bar anymore: each surface owns its header, theme toggle lives inside it (chat header / admin profile row / floating on login screens). Files: src/app/page.tsx, src/components/chat/Messenger.tsx, src/components/chat/AdminPanel.tsx

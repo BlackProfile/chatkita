@@ -27,6 +27,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { createChatSocket } from "@/lib/chat-socket";
 import {
   ADMIN_ID,
@@ -345,7 +346,11 @@ export function AdminPanel() {
   /* ---------------------------------------------------------------- */
   if (!authed) {
     return (
-      <div className="flex min-h-0 w-full flex-1 items-center justify-center px-4 pb-6">
+      <div className="relative flex min-h-0 w-full flex-1 items-center justify-center px-4 pb-6">
+        {/* Toggle tema mengambang — layar login tidak punya header */}
+        <div className="absolute right-2 top-2">
+          <ThemeToggle />
+        </div>
         <Card className="w-full max-w-md rounded-2xl">
           <CardHeader>
             <span
@@ -451,15 +456,18 @@ export function AdminPanel() {
                     Panel Admin · {connected ? "Online" : "Menghubungkan…"}
                   </p>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="size-11 shrink-0 text-muted-foreground hover:text-destructive"
-                  aria-label="Keluar"
-                  onClick={handleLogout}
-                >
-                  <LogOut className="size-4" aria-hidden="true" />
-                </Button>
+                <div className="flex shrink-0 items-center gap-1">
+                  <ThemeToggle />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-11 shrink-0 text-muted-foreground hover:text-destructive"
+                    aria-label="Keluar"
+                    onClick={handleLogout}
+                  >
+                    <LogOut className="size-4" aria-hidden="true" />
+                  </Button>
+                </div>
               </div>
 
               {/* Filter */}
