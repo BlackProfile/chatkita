@@ -17,7 +17,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "ChatKita — Chat Sederhana",
   description:
-    "Aplikasi chat sederhana real-time: ngobrol privat 1-on-1 dengan Admin, lengkap dengan panel admin untuk membaca & membalas pesan semua user.",
+    "Aplikasi chat sederhana real-time: cukup masukkan nama Anda untuk ngobrol privat 1-on-1, langsung terhubung.",
   keywords: ["ChatKita", "chat", "real-time", "1-on-1", "Indonesia"],
   authors: [{ name: "ChatKita" }],
   icons: {
@@ -26,7 +26,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "ChatKita — Chat Sederhana",
     description:
-      "Chat privat 1-on-1 dengan Admin — real-time, simpel, seperti aplikasi chat biasa.",
+      "Chat privat 1-on-1 — real-time, simpel, seperti aplikasi chat biasa.",
     siteName: "ChatKita",
     type: "website",
   },

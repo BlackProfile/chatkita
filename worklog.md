@@ -232,3 +232,22 @@ Work Log:
 Stage Summary:
 - Chat layout is now structurally guaranteed: composer always visible (shrink-0), message list is the ONLY flexible scroll region (plain overflow div), safe-area aware — fixed the user's missing-input-box issue and hardened admin panel identically
 - Files: src/components/chat/Messenger.tsx, src/components/chat/AdminPanel.tsx, src/app/globals.css
+
+---
+Task ID: 10
+Agent: main (Z.ai Code)
+Task: "hapus ini dari halaman user, jadi langsung masukan nama aja, hapus juga link admin dari publik, buat jadi yang lain" — kill the landing page (direct name entry), remove public admin link, hidden admin access
+
+Work Log:
+- page.tsx REWRITTEN (shrunk from 208 lines to ~75): removed hero, "Masuk Chat" CTA card, 3-step list, feature row, "Masuk Admin" button + owner hint, footer, AnimatePresence/framer-motion, and the "← Beranda" header button (no home view exists anymore)
+- New model: "/" = DIRECT name-entry (Messenger's built-in login card is now the landing) → chat; admin view chosen by URL — `/?admin` (query) or `/#admin` (hash) — NOT linked anywhere in the public UI. Single-route compliant (sandbox rule: only /)
+- View detection via useSyncExternalStore(emptySubscribe, getClientView, getServerView) — first attempt used setState-in-useEffect and the react-hooks/set-state-in-effect lint rule rejected it; useSyncExternalStore is the sanctioned client-only-value pattern (server snapshot "loading", client snapshot chat|admin, no hydration mismatch)
+- layout.tsx: metadata de-scoped — description no longer mentions the admin panel (public surface reveals nothing about admin)
+- Verified E2E: "/" shows name form instantly (a11y snapshot: only Ganti tema + form; programmatic scan hasAdminLink:false, public buttons = Ganti tema|Keluar|Kirim); login "Ani" → chat; hidden /?admin → password form → admin123 → inbox lists Ani; admin replied → Ani received live; Ani replied → admin sees it + Online dot; /#admin also opens admin; Keluar (user) → back to name form; mobile 375×700: clean login card, composer visible, no overflow-x; lint clean
+- DB hygiene WITHOUT nuking real data: discovered a REAL user ("iji", message "halo") had used the app between tasks — so no db wipe this time. Surgical cleanup via one-off bun:sqlite script (deleted Ani/Repro631/MobileUser + their conversations/messages/reads), remaining users = Admin + iji
+- DISCOVERY: agent-browser sessions SHARE localStorage (one browser profile) — a "fresh" session auto-logged-in as a previously stored user. Also explains auto-recreated rows: re-auth with a stored userId missing from a wiped DB falls back to find-or-create BY NAME → old test users reappear if their session is still in localStorage. Cleaned the storage side by deleting the users; sessions will just re-create empty accounts if some stale tab remains (harmless)
+- Watchdog proved itself in the wild again: 02:12 log "Next.js RSS 1840528KB > 1750000KB → preemptive restart" — recovered to 200s without any manual action
+
+Stage Summary:
+- Public app is now: open → type name → chat. Zero marketing surface, zero admin exposure (URL-hidden only). Files: src/app/page.tsx (rewritten), src/app/layout.tsx (metadata), one-off /tmp/cleanup-test-users.ts (not part of repo)
+- Admin access to tell the OWNER (not public): add /?admin or /#admin to the app URL, password admin123
