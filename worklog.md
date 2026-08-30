@@ -316,3 +316,36 @@ Work Log:
 Stage Summary:
 - Returning-user flow is now: logout → login card prefilled with their name → tap "Lanjut Chat" → full history back. Reload/session-restore path unchanged (already worked). Files: src/lib/chat-types.ts, src/components/chat/Messenger.tsx
 - History durability rests on server-side name→account matching (unchanged); the client change only removes the typo/new-empty-account trap
+
+---
+Task ID: 14
+Agent: main (Z.ai Code)
+Task: "tambahkan semuanya, buat yang terbaik" — implement ALL 19 proposed features (media, reply, delete, ✓✓, last-seen, notify, search, emoji, PIN, labels/notes, filters, quick replies, hours, stats, AI auto-reply/suggest/summary, voice transcription)
+
+Work Log:
+- NO SUBAGENTS used: every feature collides on 3 hotspot files (chat-service/index.ts, Messenger.tsx, AdminPanel.tsx) + one shared schema — parallel agents would have overwritten each other; sequential implementation chosen deliberately
+- Read LLM + ASR skill docs first; installed z-ai-web-dev-sdk@0.0.18 into mini-services/chat-service (+ copied .env); smoke-tested LLM (answered) and ASR (accepted base64 WAV) under bun BEFORE building on it
+- Server v4 (full rewrite of index.ts, ~1450 lines): idempotent ALTER migrations (messages: type/reply_to_id/duration_ms/transcript/deleted_at; users: pin_hash/label/note; settings table) — verified 8 migrations applied live WITHOUT harming real traffic (iji/hanapi/rvg were mid-chat)
+  - insertAndFanOut shared by human send / AI replies / system notices; reply quotes resolved server-side as snapshots; delete = soft-delete + content/transcript REDACTION; read:update broadcasts power ✓✓; voice → async ASR → message:updated transcript
+  - PIN: SHA-256(userId:pin); fresh name-logins require PIN (PIN_REQUIRED/INVALID_PIN), stored-session re-auth with matching name stays frictionless
+  - settings cache (hours Asia/Bangkok +07 fixed-offset calc, aiEnabled, aiKb, outsideMsg, quickReplies) persisted in settings table
+  - stats SQL incl. avg admin response (user msg → next admin msg, 7d, <24h window)
+  - AI: auto-reply while admin offline (+typing indicator relayed), ai:suggest, ai:summary, KB-grounded system prompt; aiBusy per-conversation guard; once-per-6h outside-hours notice
+- CLIENT: chat-types.ts v4 contract; chat-notify.ts (WebAudio two-tone blip + (n) tab title, mute in localStorage); formatLastSeen/messagePreview utils; useVoiceRecorder hook (MediaRecorder mime negotiation, teardown-safe); EmojiPicker (152 curated, 6 categories, click-outside/Escape)
+- ChatBubble v2: text/image/voice/system, reply quote, ✓/✓✓, click action bar (Balas/Salin/Hapus), in-bubble voice player (play/seek/duration), deleted tombstones, lightbox via parent
+- Messenger v2: search bar, scroll-to-bottom + new-count pill (auto-scroll only when at bottom), reply chip, image pipeline (createImageBitmap → canvas → JPEG 0.82 ≤1280px), voice recording bar, emoji, PIN dialog, last-seen header, hidden-tab blip+title, PIN-aware login (PIN_REQUIRED reveals PIN field)
+- AdminPanel v2: filter tabs (Semua/Belum dibaca n/Online), label badges (Baru/Prioritas/VIP) + DropdownMenu, internal note dialog, quick-replies chips, AI suggest chips (fill input), AI summary strip, settings dialog (hours/time/days/AI/KB/outsideMsg/quick-reply editor/sound switch), stats dialog, same media/reply/search/voice/scroll parity as user side
+- BUGS FOUND & FIXED during E2E (all verified fixed):
+  1. useVoiceRecorder returned undefined `error` shorthand → ReferenceError crashed whole app (TS/ESLint did NOT catch it — lesson: lint-clean ≠ runtime-safe)
+  2. AdminPanel missing useCallback import
+  3. SQL: SELECT-list alias `partner_id` referenced inside sibling subquery → "no such column" (rewrote as full CASE)
+  4. SQL: recentTranscript outer ORDER BY id but inner projection lacked id
+  5. ai:suggest prompt used <saran> placeholder → LLM echoed it literally (rewrote with concrete examples)
+  6. react-hooks/set-state-in-effect lint errors ×5 → conditional-mount dialogs (state resets via remount), rAF-wrapped reset batch
+- E2E VERIFIED via port 81 (browser): login→text→AI auto-reply WITH correct KB answer ("Jam buka kami 09.00–17.00…") + 🌙 outside-hours system notice (Sunday out-of-hours, live); reply-quote; copy; delete→tombstone; image send (synthetic File+DataTransfer → canvas JPEG → rendered bubble → lightbox); emoji insert; search (native-setter caveat!); PIN set→logout→PIN_REQUIRED→wrong PIN rejected→correct PIN in; voice player+transcript (injected WAV); admin: ✓✓ receipts live, quick chips, suggestions (natural replies), summary strip (accurate), VIP badge ×2, note save, stats (4 users/70 msgs today), settings save + persistence across restart; mobile 375×700 composer fits, last-seen header, all bubbles render
+- ENV LESSONS: bun --hot does NOT reliably pick up file changes here — ALWAYS manually restart chat-service after index.ts edits (this caused 2 false "AI broken" diagnoses); agent-browser fill on React controlled inputs needs native-setter eval in some fields; synthetic clicks don't open Radix DropdownMenu — use real CDP clicks
+- Ops: watchdog was DOWN (stale pidfile made restarts exit) → restarted, now PID alive (OOM protection restored); test user DemoFitur + injected voice msg deleted surgically; remaining users = Admin + REAL users (iji, rvg, hanapi — hanapi's 26 msgs were answered by the AI live during dev)
+
+Stage Summary:
+- All 19 features shipped and browser-verified. Files: mini-services/chat-service/index.ts (v4), src/lib/chat-types.ts, src/lib/chat-notify.ts, src/lib/chat-utils.ts, src/hooks/use-voice-recorder.ts, src/components/chat/{ChatBubble,Messenger,AdminPanel,emoji-picker,admin-settings-dialog,admin-stats-dialog}.tsx
+- AI assistant defaults ON with a generic KB — OWNER should edit it in ⚙️ Pengaturan (knowledge base) for business-specific answers; admin credentials unchanged (/?admin, admin123)

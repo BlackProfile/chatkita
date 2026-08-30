@@ -6,7 +6,8 @@
     "dev": "bun --hot index.ts"
   },
   "dependencies": {
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.3",
+    "z-ai-web-dev-sdk": "0.0.18"
   },
   "devDependencies": {
     "@types/bun": "^1.4.0",

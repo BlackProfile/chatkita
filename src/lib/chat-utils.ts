@@ -44,3 +44,40 @@ export function avatarColorClass(name: string): string {
   const index = Math.abs(hash) % AVATAR_COLOR_CLASSES.length;
   return AVATAR_COLOR_CLASSES[index];
 }
+
+/**
+ * Human "last seen" in Indonesian, e.g. "baru saja", "5 menit lalu",
+ * "2 jam lalu", "kemarin 20.31", "20.31, 12/08".
+ */
+export function formatLastSeen(iso: string | null | undefined): string {
+  if (!iso) return "offline";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "offline";
+  const diffMin = Math.floor((Date.now() - date.getTime()) / 60000);
+  if (diffMin < 1) return "terakhir dilihat baru saja";
+  if (diffMin < 60) return `terakhir dilihat ${diffMin} menit lalu`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `terakhir dilihat ${diffHour} jam lalu`;
+  const yesterday = new Date(Date.now() - 86400_000);
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+  const time = date.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+  if (sameDay(date, yesterday)) return `terakhir dilihat kemarin ${time}`;
+  const dayMonth = date.toLocaleDateString("id-ID", { day: "2-digit", month: "2-digit" });
+  return `terakhir dilihat ${time}, ${dayMonth}`;
+}
+
+/** Sidebar/quote one-liner for a message of any type. */
+export function messagePreview(
+  type: string,
+  content: string,
+  deleted: boolean
+): string {
+  if (deleted) return "🚫 Pesan ini dihapus";
+  if (type === "image") return "📷 Foto";
+  if (type === "voice") return "🎤 Pesan suara";
+  if (type === "system") return content;
+  return content;
+}
