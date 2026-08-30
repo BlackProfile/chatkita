@@ -298,3 +298,21 @@ Work Log:
 Stage Summary:
 - Task 12 fix CONFIRMED LIVE in browser on both user chat and admin pane. User just needs a reload (their screenshots predate the fix)
 - Environment fact for all future agents: browser E2E via localhost:81 (gateway), never localhost:3000 (no socket proxy there)
+
+---
+Task ID: 13
+Agent: main (Z.ai Code)
+Task: "buat user yang dah pernah login, buat jadi lanjutkan pesan, dan ketika logout dari halaman chat juga" — returning users must continue their previous conversation, including after logout
+
+Work Log:
+- Audited server (chat-service/index.ts): persistence was ALREADY correct — user:auth does case-insensitive find-by-name → reuses the same account + conversation via ensureConversationWithAdmin → returns FULL history in the auth ack. Verified live E2E: reload → auto-login + history; logout → re-login same name → "pesan pertama" restored, new messages append to the same conversation
+- THE REAL GAP was UX: after logout the name field was EMPTY. A returning user had to remember + retype the exact name; any typo silently created a NEW empty account (= "history lost"). Fixed with a last-used-name memory:
+  - chat-types.ts: new CHAT_LAST_NAME_KEY ("chatkita:last-name") — survives logout (session key deliberately does not)
+  - Messenger.tsx: readLastName/saveLastName helpers; `name` + `lastName` state lazily initialized from it (safe — Messenger mounts client-only behind the hydration gate); lastName saved on BOTH auth paths (manual login + auto re-auth on connect); handleLogout re-prefills name from lastName
+  - Login card: when lastName exists → hint "Lanjutkan chat sebelumnya sebagai "X" — riwayat pesan Anda tetap ada" + button becomes "Lanjut Chat" (only when the field still matches lastName; editing the name falls back to "Masuk"); fresh visitors keep the old generic hint + "Masuk"
+- Verified E2E via gateway (port 81 — lesson from Task 12 holds): logout → field prefilled "TestLanjut", hint + "Lanjut Chat" shown, session cleared but lastName kept; one tap → both messages restored; storage.clear() + reload → empty field, generic hint, "Masuk"; lint clean
+- Cleanup: browser storage cleared BEFORE deleting rows, then surgical bun:sqlite delete of TestLanjut (user/conv/messages/reads). Remaining: Admin + iji
+
+Stage Summary:
+- Returning-user flow is now: logout → login card prefilled with their name → tap "Lanjut Chat" → full history back. Reload/session-restore path unchanged (already worked). Files: src/lib/chat-types.ts, src/components/chat/Messenger.tsx
+- History durability rests on server-side name→account matching (unchanged); the client change only removes the typo/new-empty-account trap

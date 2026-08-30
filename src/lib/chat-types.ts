@@ -17,6 +17,13 @@ export const ADMIN_NAME = "Admin";
 /** Persisted user login ({ userId, name }) — Telegram-style, no password. */
 export const CHAT_SESSION_KEY = "chatkita:user";
 
+/**
+ * Last account name that logged in from this browser. Unlike the session
+ * key it SURVIVES logout, so the login card can prefill it and offer a
+ * one-tap "continue previous conversation" entry.
+ */
+export const CHAT_LAST_NAME_KEY = "chatkita:last-name";
+
 /** Demo hint rendered on the admin login form (server default password). */
 export const ADMIN_PASSWORD_HINT = "admin123";
 

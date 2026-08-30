@@ -21,6 +21,7 @@ import { Label } from "@/components/ui/label";
 import { createChatSocket } from "@/lib/chat-socket";
 import {
   ADMIN_ID,
+  CHAT_LAST_NAME_KEY,
   CHAT_SESSION_KEY,
   MAX_MESSAGE_LENGTH,
   MAX_NAME_LENGTH,
@@ -62,6 +63,27 @@ function readStoredUser(): StoredUser | null {
 }
 
 /**
+ * Name this browser previously logged in with. Unlike the session it
+ * survives logout, so returning users can continue their conversation
+ * without retyping (or mistyping) their name.
+ */
+function readLastName(): string {
+  try {
+    return window.localStorage.getItem(CHAT_LAST_NAME_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveLastName(name: string): void {
+  try {
+    window.localStorage.setItem(CHAT_LAST_NAME_KEY, name);
+  } catch {
+    /* storage unavailable — the hint simply stays empty */
+  }
+}
+
+/**
  * ChatKita Messenger (sisi user) — chat 1-on-1 dengan Admin, seperti
  * aplikasi pesan biasa: cukup nama untuk masuk, langsung terhubung.
  * User lain tidak pernah terlihat di sini (isolasi dijamin server).
@@ -74,7 +96,11 @@ export function Messenger() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [partnerTyping, setPartnerTyping] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [name, setName] = useState("");
+  // Prefilled with the last used name so a returning user only taps Masuk.
+  // Messenger mounts client-only (the page gates it behind hydration),
+  // so reading localStorage in the initializer is safe.
+  const [name, setName] = useState(() => readLastName());
+  const [lastName, setLastName] = useState(() => readLastName());
   const [authError, setAuthError] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [sendError, setSendError] = useState(false);
@@ -128,6 +154,8 @@ export function Messenger() {
           if (res.ok) {
             const next = { userId: res.user.id, name: res.user.name };
             window.localStorage.setItem(CHAT_SESSION_KEY, JSON.stringify(next));
+            saveLastName(res.user.name);
+            setLastName(res.user.name);
             meRef.current = next;
             conversationIdRef.current = res.conversationId;
             setMe(next);
@@ -250,6 +278,8 @@ export function Messenger() {
       if (res.ok) {
         const next = { userId: res.user.id, name: res.user.name };
         window.localStorage.setItem(CHAT_SESSION_KEY, JSON.stringify(next));
+        saveLastName(res.user.name);
+        setLastName(res.user.name);
         meRef.current = next;
         conversationIdRef.current = res.conversationId;
         setMe(next);
@@ -280,6 +310,10 @@ export function Messenger() {
     setAuthError(null);
     setInput("");
     setSendError(false);
+    // Login card comes back prefilled with the last used name — one tap
+    // on "Lanjut Chat" resumes the previous conversation (server matches
+    // the account by case-insensitive name and returns the full history).
+    setName(readLastName());
     // Fresh socket ⇒ server cleanly forgets this client's rooms.
     setEpoch((e) => e + 1);
   };
@@ -368,10 +402,17 @@ export function Messenger() {
                 className="h-11 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
                 disabled={!connected || !name.trim()}
               >
-                {connected ? "Masuk" : "Menghubungkan…"}
+                {connected
+                  ? lastName &&
+                    name.trim().toLowerCase() === lastName.toLowerCase()
+                    ? "Lanjut Chat"
+                    : "Masuk"
+                  : "Menghubungkan…"}
               </Button>
               <p className="text-center text-xs text-muted-foreground">
-                Nama yang sama = akun yang sama, jadi Anda bisa lanjut chat kapan saja
+                {lastName
+                  ? `Lanjutkan chat sebelumnya sebagai “${lastName}” — riwayat pesan Anda tetap ada`
+                  : "Nama yang sama = akun yang sama, jadi Anda bisa lanjut chat kapan saja"}
               </p>
             </form>
           </CardContent>
