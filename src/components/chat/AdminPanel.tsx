@@ -26,7 +26,6 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { createChatSocket } from "@/lib/chat-socket";
 import {
@@ -239,15 +238,11 @@ export function AdminPanel() {
   const activeTyping = activeId ? typingMap[activeId] === true : false;
 
   /* ---------------------------------------------------------------- */
-  /* Auto-scroll to latest message (scroll the viewport, never the page) */
+  /* Auto-scroll to latest message (the container itself scrolls)      */
   /* ---------------------------------------------------------------- */
   useEffect(() => {
-    const root = scrollRef.current;
-    if (!root) return;
-    const viewport = root.querySelector<HTMLDivElement>(
-      "[data-radix-scroll-area-viewport]"
-    );
-    if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [activeId, activeMessages, activeTyping]);
 
   /* ---------------------------------------------------------------- */
@@ -485,9 +480,8 @@ export function AdminPanel() {
               </div>
 
               {/* Conversation list — every user, newest activity first */}
-              <div className="chat-scroll min-h-0 flex-1">
-                <ScrollArea className="h-full">
-                  <div className="flex flex-col gap-1 p-2">
+              <div className="chat-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain">
+                <div className="flex flex-col gap-1 p-2">
                     {filteredConversations.length === 0 ? (
                       <p className="px-3 py-8 text-center text-sm text-muted-foreground">
                         {conversations.length === 0
@@ -550,8 +544,7 @@ export function AdminPanel() {
                         </button>
                       ))
                     )}
-                  </div>
-                </ScrollArea>
+                </div>
               </div>
             </aside>
           ) : null}
@@ -611,9 +604,11 @@ export function AdminPanel() {
                 </div>
 
                 {/* Messages */}
-                <div ref={scrollRef} className="chat-scroll min-h-0 flex-1">
-                  <ScrollArea className="h-full">
-                    <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 p-4 md:p-6">
+                <div
+                  ref={scrollRef}
+                  className="chat-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain"
+                >
+                  <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 p-4 md:p-6">
                       {activeMessages.length === 0 ? (
                         <p className="py-10 text-center text-sm text-muted-foreground">
                           Belum ada pesan dari {activeConversation.partner.name}.
@@ -628,8 +623,7 @@ export function AdminPanel() {
                           />
                         ))
                       )}
-                    </div>
-                  </ScrollArea>
+                  </div>
                 </div>
 
                 {/* Typing indicator */}

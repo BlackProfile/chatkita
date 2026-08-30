@@ -207,3 +207,28 @@ Work Log:
 Stage Summary:
 - Root cause of recurring "app won't open": Next.js dev server repeatedly OOMs (4GB box, heap ballooning to ~1.9GB). Fixed PERMANENTLY with a self-healing watchdog (auto-restart on death + preemptive restart on memory bloat), verified by kill-tests for BOTH services
 - Ops note for future sessions: if services ever look dead, check .zscripts/watchdog.log first; watchdog pidfile at .zscripts/watchdog.pid; restart watchdog with `(setsid nohup bash .zscripts/dev-watchdog.sh > /dev/null 2>&1 < /dev/null &)` from /home/z/my-project
+
+---
+Task ID: 9
+Agent: main (Z.ai Code)
+Task: "sesuaikan chatnya" (fix the chat layout) — user screenshot (1533×631, dark) showed the message composer missing below the fold
+
+Work Log:
+- Diagnosis: layout flex chain in code looked correct and did NOT reproduce at 1533×631 in a fresh browser — prime suspect is the Radix ScrollArea height computation inside the flex column (fragile: `h-full` inside flex-1 min-h-0 + the global `display: table` content wrapper + transform interplay with AnimatePresence), possibly compounded by a stale bundle on the user's side. This project already had a documented Radix quirk (globals.css comment about display:table inflating min-content)
+- HARDENING (both Messenger.tsx and AdminPanel.tsx, consistent):
+  - Replaced Radix <ScrollArea> with plain `overflow-y-auto overscroll-contain` divs in all 3 chat scroll containers (user messages, admin messages, admin conversation list) — native scrollTop math, no wrapper height computation
+  - Auto-scroll effects now set scrollRef.current.scrollTop directly (no more [data-radix-scroll-area-viewport] query)
+  - Chat header + composer rows got `shrink-0` so they can never be squeezed out; composer adds `pb-[max(0.75rem,env(safe-area-inset-bottom))]` for mobile safe areas
+  - globals.css: .chat-scroll rules rewritten for plain divs (thin native scrollbar, overscroll); all Radix-specific selectors removed
+- MultiEdit bit again (edit #5 of 6 failed on whitespace mismatch, earlier edits remained): fixed by re-reading + targeted single Edits. Also initially forgot the ScrollArea import removal — caught by grep before lint
+- Verified via agent-browser (dark mode unless noted):
+  - 1533×631 user chat: message sent + composer visible (the exact user scenario) ✓
+  - EXTREME height 1533×380 (user + admin): composer pinned (getBoundingClientRect bottom <= innerHeight), msg area shrinks, sidebar scrolls, no overflow-x ✓
+  - Mobile 375×700 user chat (auto-login from localStorage after resize reload) ✓
+  - Admin inbox: conversation list + chat + composer all correct at 1533×380 ✓
+  - lint clean; chat-service DB wiped (test users UjiLayout/Repro631/MobileCek removed), watchdog auto-restored it (Admin seeded)
+- agent-browser lessons: `set viewport <w> <h>` is the real command (bare `viewport` is Unknown and the `||` fallback masked which one worked); viewport change reloads the page → in-memory view state resets to home (localStorage login persists); use IIFE in eval to avoid const redeclaration across calls
+
+Stage Summary:
+- Chat layout is now structurally guaranteed: composer always visible (shrink-0), message list is the ONLY flexible scroll region (plain overflow div), safe-area aware — fixed the user's missing-input-box issue and hardened admin panel identically
+- Files: src/components/chat/Messenger.tsx, src/components/chat/AdminPanel.tsx, src/app/globals.css

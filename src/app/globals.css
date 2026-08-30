@@ -151,35 +151,21 @@
   }
 }
 
-/* Thin custom scrollbar for chat message areas (scoped via .chat-scroll).
-   Radix ScrollArea hides the native scrollbar globally; re-enable a thin,
-   border-colored one inside chat containers and hide Radix's own overlay
-   scrollbar there to avoid double bars. */
-.chat-scroll [data-radix-scroll-area-viewport] {
+/* Thin custom scrollbar for chat scroll containers (scoped via .chat-scroll).
+   These are plain overflow-y-auto divs (Radix ScrollArea removed for robust
+   height behavior inside flex layouts). */
+.chat-scroll {
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
 }
-.chat-scroll [data-radix-scroll-area-viewport]::-webkit-scrollbar {
-  display: block; /* re-enable (Radix hides it) */
+.chat-scroll::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
-.chat-scroll [data-radix-scroll-area-viewport]::-webkit-scrollbar-track {
+.chat-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
-.chat-scroll [data-radix-scroll-area-viewport]::-webkit-scrollbar-thumb {
+.chat-scroll::-webkit-scrollbar-thumb {
   background-color: var(--border);
   border-radius: 9999px;
-}
-.chat-scroll [data-slot="scroll-area-scrollbar"] {
-  display: none;
-}
-/* Radix renders the ScrollArea content wrapper as `display: table`, whose
-   intrinsic width is driven by `truncate` (nowrap) text. That inflates the
-   min-content of the whole sidebar on mobile and breaks ellipsis. Force a
-   block-level, full-width wrapper so long text shrinks + truncates. */
-.chat-scroll [data-radix-scroll-area-viewport] > div {
-  display: block !important;
-  min-width: 0 !important;
-  width: 100% !important;
 }

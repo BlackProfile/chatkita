@@ -17,7 +17,6 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { createChatSocket } from "@/lib/chat-socket";
 import {
   ADMIN_ID,
@@ -231,15 +230,11 @@ export function Messenger() {
   }, [epoch]);
 
   /* ---------------------------------------------------------------- */
-  /* Auto-scroll to latest message (scroll the viewport, never the page) */
+  /* Auto-scroll to latest message (the container itself scrolls)      */
   /* ---------------------------------------------------------------- */
   useEffect(() => {
-    const root = scrollRef.current;
-    if (!root) return;
-    const viewport = root.querySelector<HTMLDivElement>(
-      "[data-radix-scroll-area-viewport]"
-    );
-    if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [conversationId, messages, partnerTyping]);
 
   /* ---------------------------------------------------------------- */
@@ -400,7 +395,7 @@ export function Messenger() {
         ) : null}
 
         {/* Chat header */}
-        <div className="flex items-center gap-3 border-b p-3">
+        <div className="flex shrink-0 items-center gap-3 border-b p-3">
           <span className="relative shrink-0">
             <Avatar className="size-10">
               <AvatarFallback
@@ -447,9 +442,11 @@ export function Messenger() {
         </div>
 
         {/* Messages */}
-        <div ref={scrollRef} className="chat-scroll min-h-0 flex-1">
-          <ScrollArea className="h-full">
-            <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 p-4 md:p-6">
+        <div
+          ref={scrollRef}
+          className="chat-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        >
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 p-4 md:p-6">
               {messages.length === 0 ? (
                 <p className="py-10 text-center text-sm text-muted-foreground">
                   Belum ada pesan. Sapa {partner?.name ?? "Admin"}!
@@ -464,8 +461,7 @@ export function Messenger() {
                   />
                 ))
               )}
-            </div>
-          </ScrollArea>
+          </div>
         </div>
 
         {/* Typing indicator */}
@@ -483,7 +479,7 @@ export function Messenger() {
         ) : null}
 
         {/* Input row */}
-        <div className="flex items-center gap-2 border-t p-3">
+        <div className="flex shrink-0 items-center gap-2 border-t p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
           <Input
             value={input}
             maxLength={MAX_MESSAGE_LENGTH}
