@@ -454,7 +454,7 @@ export function Messenger() {
           ref={scrollRef}
           className="chat-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain"
         >
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 p-4 md:p-6">
+          <div className="flex w-full flex-col gap-2 p-3 sm:p-4 md:p-6">
               {messages.length === 0 ? (
                 <p className="py-10 text-center text-sm text-muted-foreground">
                   Belum ada pesan. Sapa {partner?.name ?? "Admin"}!

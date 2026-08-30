@@ -29,7 +29,7 @@ export function ChatBubble({ content, createdAt, side }: ChatBubbleProps) {
     >
       <div
         className={cn(
-          "max-w-[85%] sm:max-w-[75%] md:max-w-[560px] rounded-2xl px-3.5 py-2",
+          "max-w-[85%] sm:max-w-[75%] md:max-w-[65%] rounded-2xl px-3.5 py-2",
           isRight
             ? "rounded-br-md bg-emerald-600 text-white"
             : "rounded-bl-md border bg-card text-foreground shadow-sm"

@@ -266,3 +266,18 @@ Work Log:
 
 Stage Summary:
 - No global app bar anymore: each surface owns its header, theme toggle lives inside it (chat header / admin profile row / floating on login screens). Files: src/app/page.tsx, src/components/chat/Messenger.tsx, src/components/chat/AdminPanel.tsx
+
+---
+Task ID: 12
+Agent: main (Z.ai Code)
+Task: "ini kenapa chatnya ga rata kanan kiri?" — bubbles floated inside a centered 768px column (Telegram-Web style); user wants messages flush to the pane edges
+
+Work Log:
+- Root cause: message column was `mx-auto max-w-3xl` (768px centered) in BOTH user chat and admin chat pane — on wide screens short bubbles hugged the column edges far from the screen edges, looking misaligned
+- Fix: dropped the centered column — messages container is now full-width (`flex w-full flex-col gap-2 p-3 sm:p-4 md:p-6`) in Messenger.tsx and AdminPanel.tsx; left bubbles pin to the pane's left edge, right bubbles to the right edge
+- ChatBubble.tsx: replaced the fixed `md:max-w-[560px]` bubble cap with proportional `max-w-[85%] sm:max-w-[75%] md:max-w-[65%]` so long messages scale with pane width while short ones hug their side
+- Verified at 1280px (light) user + admin: own bubbles end at viewport-24px, partner bubbles start at 24px; lint clean
+- Data hygiene for real user iji: deleted ONLY my test "halo" message (newest row) — had to DELETE the reads row pointing at it (last_read_message_id is NOT NULL, can't null it); history back to authentic [halo, pa]. Repro631 auto-recreated again via stale localStorage before I cleared it — cleanup order matters: localStorage.clear() in browser FIRST, close, THEN delete rows. Remaining: Admin + iji. One SQL gotcha: JOIN ON with OR + unqualified id → "ambiguous column name" — alias and select explicitly
+
+Stage Summary:
+- Chat is now edge-to-edge: kiri nempel kiri, kanan nempel kanan at any window width (mobile unchanged — it already filled the width). Files: src/components/chat/Messenger.tsx, src/components/chat/AdminPanel.tsx, src/components/chat/ChatBubble.tsx
