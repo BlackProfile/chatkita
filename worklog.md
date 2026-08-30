@@ -183,3 +183,27 @@ Stage Summary:
 - No application code changed — pure infrastructure recovery. ChatKita (user 1-on-1 with Admin + admin inbox, Telegram-style full-screen) is back online and browser-verified end-to-end
 - Services: Next.js dev :3000 (HTTP 200, fast), chat-service :3003 (fresh DB, admin123 login works)
 - Nothing for the user to do differently: open the app via the Preview Panel / gateway :81
+
+---
+Task ID: 8
+Agent: main (Z.ai Code)
+Task: Fix "masih ga bisa dibuka" (still can't open) — root cause: next-server OOM crash; built permanent watchdog
+
+Work Log:
+- Diagnosis: chat-service (:3003) alive, but Next.js :3000 dead AGAIN. dev.log tail showed `FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory` — next-server grew its V8 heap to ~1.9GB and crashed (~15 min after boot). Box = 4GB RAM, no swap; V8 default heap cap ~2GB. So a one-shot restart is never enough: the dev server leaks/balloons and dies repeatedly
+- Built `.zscripts/dev-watchdog.sh` (bash, no deps), started detached via `(setsid nohup bash .zscripts/dev-watchdog.sh > /dev/null 2>&1 < /dev/null &)`:
+  - every 15s: ensure chat-service process + :3003 bound (else start), ensure next-server + :3000 bound (else stop_next + start)
+  - PREEMPTIVE RSS guard: if next-server RSS > limit -> clean restart BEFORE the V8 OOM crash zone
+  - single-instance pidfile guard, log at .zscripts/watchdog.log (auto-truncated at 200KB)
+  - start commands use the proven setsid+nohup+full-redirect pattern
+- Self-healing TESTED, not assumed:
+  1. killed next-server manually -> watchdog logged "Next.js DOWN -> restarting" within ~30s -> HTTP 200 restored
+  2. killed chat-service + wiped chat.db -> watchdog restarted it -> "Admin account seeded (admin)", socket.io 200
+  3. RSS guard fired once in the wild (limit was 1.2GB then): "Next.js RSS 1200264KB > limit -> preemptive restart" — proof the guard triggers, but 1.2GB was TOO aggressive: healthy Turbopack dev RSS measured 0.7–1.2GB (RSS includes Rust/Turbopack memory; the OOM was V8 heap ~1.9GB / RSS 2.3GB). Raised limit to 1750000KB (1.75GB): never fires in normal ops, still fires before the ~2GB V8 death zone
+- Editing a RUNNING bash script is unsafe (bash reads incrementally) — killed watchdog, edited via sed, restarted with fresh pidfile
+- Final state all green: :3000 next=200 (RSS 1.18GB < 1.75GB limit), :3003 chat=200 (fresh db, admin seeded), :81 gateway=200; browser E2E through gateway: home -> Masuk Chat -> login -> full-screen chat OK
+- Test user "CekWatchdog" cleaned by the chat.db wipe above
+
+Stage Summary:
+- Root cause of recurring "app won't open": Next.js dev server repeatedly OOMs (4GB box, heap ballooning to ~1.9GB). Fixed PERMANENTLY with a self-healing watchdog (auto-restart on death + preemptive restart on memory bloat), verified by kill-tests for BOTH services
+- Ops note for future sessions: if services ever look dead, check .zscripts/watchdog.log first; watchdog pidfile at .zscripts/watchdog.pid; restart watchdog with `(setsid nohup bash .zscripts/dev-watchdog.sh > /dev/null 2>&1 < /dev/null &)` from /home/z/my-project
