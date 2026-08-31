@@ -1,10 +1,12 @@
 /**
  * ChatKita chat-service — socket.io mini service (port 3003)
  *
- * Model (v6 — pure private messenger, like WhatsApp/Telegram):
+ * Model (v7 — pure private messenger, like WhatsApp/Telegram):
  *   users(role, pin_hash) ──< conversations ──< messages
- *     messages: type text|image|voice|system, reply_to_id, duration_ms,
- *               transcript (AI speech-to-text), deleted_at (soft delete)
+ *     messages: type text|image|voice|file|system, reply_to_id, duration_ms,
+ *               transcript (AI speech-to-text), deleted_at (soft delete),
+ *               edited_at/translation, file_name/file_size/mime_type
+ *               (file messages only)
  *   + per-user read state (reads) → ✓✓ receipts broadcast live
  *   + settings table (only Web Push VAPID keys are stored server-side)
  *
@@ -12,8 +14,21 @@
  * 1-on-1 chat with the Admin account (the app owner), like messaging any
  * contact. The Admin sees ALL conversations in one list, like WhatsApp Web.
  *
- * v6 (pure messenger) feature set:
- *   - Text | image | voice messages (+ replies, media size caps)
+ * v7 — file sharing (documents, video, audio, archives, …):
+ *   Large files are uploaded OUT-OF-BAND. The bytes never touch this
+ *   service: the client POSTs them to the Next.js HTTP route POST /api/upload
+ *   (stored on disk under db/media/<random-name>), which returns the public
+ *   URL path "/api/media/<storedName>". The chat message then carries
+ *   type 'file' with that path as `content` plus the metadata
+ *   fileName/fileSize/mimeType, which this service validates (path-only
+ *   URL matching /api/media/<name>, name 1–255 chars, type/subtype mime,
+ *   size ≤ 25 MiB) and stores in messages.file_name/file_size/mime_type.
+ *   GET /api/media/<name> (Next.js route) streams the bytes back for
+ *   preview/download. Web Push bodies for file messages render as
+ *   "📎 <fileName>" via snippetOf.
+ *
+ * Feature set (pure messenger):
+ *   - Text | image | voice | file messages (+ replies, media size caps)
  *   - Emoji reactions (message_reactions, one per user per message)
  *   - Edit own text messages (15-min window, edited_at marker)
  *   - Delete for everyone (soft delete + content redaction)
@@ -61,6 +76,16 @@ const MAX_MESSAGE_LENGTH = 1000
 const HISTORY_LIMIT = 500
 /** Max data-URL payload for image/voice messages (base64 chars). */
 const MAX_MEDIA_LENGTH = 2_500_000
+/** v7 — max size of out-of-band file messages in bytes (25 MiB). The
+ * /api/upload route enforces the same cap; this is the message-side check. */
+const MAX_FILE_BYTES = 26_214_400
+/** v7 — file messages: `content` must be the bare /api/media/<name> URL
+ * path returned by POST /api/upload (no protocol/host, no whitespace). */
+const FILE_URL_PATTERN = /^\/api\/media\/[A-Za-z0-9._-]{1,120}$/
+/** v7 — file messages: mimeType must be a bare type/subtype token (≤ 100). */
+const MIME_TYPE_PATTERN = /^[\w.+-]+\/[\w.+-]+$/
+/** v7 — file messages: display-name limit (characters). */
+const MAX_FILE_NAME_LENGTH = 255
 /** Fixed reaction palette (v5). */
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const
 /** Window in which a sender may edit their own text message. */
@@ -146,6 +171,10 @@ addColumn('conversations', 'pinned_message_id', 'INTEGER')
 /* v6 — the CRM columns (users.label/note/topic) and the rating-marker
  * column (messages.kind) are no longer added, read, nor written. Existing
  * databases keep the dormant columns; they are never dropped. */
+/* v7 migrations — file sharing (out-of-band via /api/upload + /api/media) */
+addColumn('messages', 'file_name', 'TEXT')
+addColumn('messages', 'file_size', 'INTEGER')
+addColumn('messages', 'mime_type', 'TEXT')
 
 db.run(`
   CREATE TABLE IF NOT EXISTS message_reactions (
@@ -200,6 +229,10 @@ interface MessageRow {
   deleted_at?: number | null
   edited_at?: number | null
   translation?: string | null
+  /* v7 — file-message metadata (type 'file' only; redacted on delete). */
+  file_name?: string | null
+  file_size?: number | null
+  mime_type?: string | null
 }
 
 /* ------------------------------ API types ------------------------------ */
@@ -210,7 +243,7 @@ interface ChatMessageApi {
   senderId: string
   content: string
   createdAt: string
-  type: 'text' | 'image' | 'voice' | 'system'
+  type: 'text' | 'image' | 'voice' | 'file' | 'system'
   replyToId?: number
   replyTo?: { id: number; senderId: string; snippet: string; type: string }
   durationMs?: number
@@ -218,6 +251,12 @@ interface ChatMessageApi {
   deletedAt?: string
   editedAt?: string
   translation?: string
+  /** file messages: original file name (display only). */
+  fileName?: string
+  /** file messages: size in bytes. */
+  fileSize?: number
+  /** file messages: MIME type (e.g. application/pdf, video/mp4). */
+  mimeType?: string
   /** Emoji reactions grouped by emoji with the reacting user ids. */
   reactions?: { emoji: string; userIds: string[] }[]
 }
@@ -343,14 +382,19 @@ const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   ...(row.deleted_at ? { deletedAt: new Date(row.deleted_at).toISOString() } : {}),
   ...(row.edited_at ? { editedAt: new Date(row.edited_at).toISOString() } : {}),
   ...(row.translation && !row.deleted_at ? { translation: row.translation } : {}),
+  // v7 — file metadata; like content, it is NEVER emitted once deleted.
+  ...(row.file_name && !row.deleted_at ? { fileName: row.file_name } : {}),
+  ...(typeof row.file_size === 'number' && !row.deleted_at ? { fileSize: row.file_size } : {}),
+  ...(row.mime_type && !row.deleted_at ? { mimeType: row.mime_type } : {}),
 })
 
 /** Human-readable one-liner for previews and reply quotes. */
-const snippetOf = (row: Pick<MessageRow, 'type' | 'content' | 'deleted_at'>): string => {
+const snippetOf = (row: Pick<MessageRow, 'type' | 'content' | 'deleted_at' | 'file_name'>): string => {
   if (row.deleted_at) return 'Pesan ini dihapus'
   const type = row.type ?? 'text'
   if (type === 'image') return '📷 Foto'
   if (type === 'voice') return '🎤 Pesan suara'
+  if (type === 'file') return `📎 ${row.file_name ?? 'File'}`
   return row.content
 }
 
@@ -419,8 +463,10 @@ const attachReplyPreviews = (rows: MessageRow[], messages: ChatMessageApi[]) => 
   if (ids.length === 0) return
   const placeholders = ids.map(() => '?').join(',')
   const originals = db
-    .query(`SELECT id, sender_id, content, type, deleted_at FROM messages WHERE id IN (${placeholders})`)
-    .all(...ids) as Array<Pick<MessageRow, 'id' | 'sender_id' | 'content' | 'type' | 'deleted_at'>>
+    .query(`SELECT id, sender_id, content, type, deleted_at, file_name FROM messages WHERE id IN (${placeholders})`)
+    .all(...ids) as Array<
+    Pick<MessageRow, 'id' | 'sender_id' | 'content' | 'type' | 'deleted_at' | 'file_name'>
+  >
   const byId = new Map(originals.map((o) => [o.id, o]))
   for (const m of messages) {
     if (!m.replyToId) continue
@@ -569,6 +615,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         pm.content AS pin_content,
         pm.type AS pin_type,
         pm.deleted_at AS pin_deleted,
+        pm.file_name AS pin_file_name,
         (SELECT r.last_read_message_id FROM reads r
           WHERE r.conversation_id = c.id
             AND r.user_id = (CASE WHEN c.user_a_id = $me THEN c.user_b_id ELSE c.user_a_id END)
@@ -612,6 +659,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     pin_content: string | null
     pin_type: string | null
     pin_deleted: number | null
+    pin_file_name: string | null
     partner_read: number | null
     unread: number
   }>
@@ -649,6 +697,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
               type: r.pin_type ?? 'text',
               content: r.pin_content ?? '',
               deleted_at: r.pin_deleted,
+              file_name: r.pin_file_name,
             }),
             type: r.pin_type ?? 'text',
           }
@@ -686,22 +735,41 @@ const removeOnlineSocket = (userId: string, socketId: string) => {
 }
 
 /* ------------------------------------------------------------------ */
-/* Message persistence + fan-out (human sends: text / image / voice)   */
+/* Message persistence + fan-out (human sends: text/image/voice/file)  */
 /* ------------------------------------------------------------------ */
 
-type MessageType = 'text' | 'image' | 'voice' | 'system'
+type MessageType = 'text' | 'image' | 'voice' | 'file' | 'system'
 
 const insertAndFanOut = (
   conversation: ConversationRow,
   senderId: string,
   content: string,
   type: MessageType,
-  opts: { replyToId?: number; durationMs?: number } = {}
+  opts: {
+    replyToId?: number
+    durationMs?: number
+    /* v7 — file-message metadata (type 'file' only, stored as-is). */
+    fileName?: string
+    fileSize?: number
+    mimeType?: string
+  } = {}
 ): ChatMessageApi => {
   const ts = now()
+  const isFile = type === 'file'
   const result = db.run(
-    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [conversation.id, senderId, content, ts, type, opts.replyToId ?? null, opts.durationMs ?? null]
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [
+      conversation.id,
+      senderId,
+      content,
+      ts,
+      type,
+      opts.replyToId ?? null,
+      opts.durationMs ?? null,
+      isFile ? (opts.fileName ?? null) : null,
+      isFile && typeof opts.fileSize === 'number' ? opts.fileSize : null,
+      isFile ? (opts.mimeType ?? null) : null,
+    ]
   )
   db.run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [ts, conversation.id])
   const id = Number(result.lastInsertRowid)
@@ -807,7 +875,8 @@ const io = new Server(httpServer, {
   },
   pingTimeout: 60000,
   pingInterval: 25000,
-  // image/voice messages travel as base64 data URLs
+  // image/voice messages travel as base64 data URLs; file bytes never pass
+  // through here (out-of-band via POST /api/upload)
   maxHttpBufferSize: 6e6,
 })
 
@@ -1055,6 +1124,7 @@ io.on('connection', (socket) => {
       const type = (typeof data?.type === 'string' ? data.type : 'text') as MessageType
       const content = typeof data?.content === 'string' ? data.content : ''
       let trimmed: string
+      let fileMeta: { fileName: string; fileSize: number; mimeType: string } | null = null
 
       if (type === 'text') {
         trimmed = content.trim()
@@ -1072,6 +1142,36 @@ io.on('connection', (socket) => {
           ack({ ok: false, error: 'INVALID_MESSAGE' })
           return
         }
+      } else if (type === 'file') {
+        // v7 — content is the public URL path returned by POST /api/upload;
+        // the bytes themselves were uploaded out-of-band and never pass
+        // through this service. Only the metadata rides on the socket.
+        trimmed = content
+        if (!FILE_URL_PATTERN.test(trimmed)) {
+          ack({ ok: false, error: 'INVALID_MESSAGE' })
+          return
+        }
+        const fileName = typeof data?.fileName === 'string' ? data.fileName.trim() : ''
+        if (fileName.length < 1 || fileName.length > MAX_FILE_NAME_LENGTH) {
+          ack({ ok: false, error: 'INVALID_MESSAGE' })
+          return
+        }
+        const mimeType = typeof data?.mimeType === 'string' ? data.mimeType : ''
+        if (mimeType.length > 100 || !MIME_TYPE_PATTERN.test(mimeType)) {
+          ack({ ok: false, error: 'INVALID_MESSAGE' })
+          return
+        }
+        const fileSize = data?.fileSize
+        if (
+          typeof fileSize !== 'number' ||
+          !Number.isInteger(fileSize) ||
+          fileSize < 0 ||
+          fileSize > MAX_FILE_BYTES
+        ) {
+          ack({ ok: false, error: 'INVALID_MESSAGE' })
+          return
+        }
+        fileMeta = { fileName, fileSize, mimeType }
       } else {
         ack({ ok: false, error: 'INVALID_MESSAGE' })
         return
@@ -1099,10 +1199,13 @@ io.on('connection', (socket) => {
           ? Math.min(300000, Math.max(0, Math.round(Number(data.durationMs))))
           : undefined
 
-      const message = insertAndFanOut(conversation, me, trimmed, type, {
-        replyToId,
-        durationMs,
-      })
+      const message = fileMeta
+        ? insertAndFanOut(conversation, me, trimmed, type, {
+            replyToId,
+            durationMs,
+            ...fileMeta,
+          })
+        : insertAndFanOut(conversation, me, trimmed, type, { replyToId, durationMs })
       ack({ ok: true, message })
 
       // Voice notes: transcribe in the background.
@@ -1116,7 +1219,13 @@ io.on('connection', (socket) => {
       }
 
       console.log(
-        `[${me.slice(0, 8)}] -> ${conversation.id.slice(0, 8)} (${type}): ${type === 'text' ? trimmed.slice(0, 60) : `${trimmed.length}b`}`
+        `[${me.slice(0, 8)}] -> ${conversation.id.slice(0, 8)} (${type}): ${
+          type === 'text'
+            ? trimmed.slice(0, 60)
+            : type === 'file'
+              ? (fileMeta?.fileName ?? trimmed)
+              : `${trimmed.length}b`
+        }`
       )
     })
   )
@@ -1148,11 +1257,12 @@ io.on('connection', (socket) => {
         return
       }
       const ts = now()
-      // Redact content so deleted media/text leaves every future payload.
-      db.run(`UPDATE messages SET content = '', transcript = NULL, deleted_at = ? WHERE id = ?`, [
-        ts,
-        id,
-      ])
+      // Redact content (and v7 file metadata) so deleted messages leave no
+      // trace in any future payload.
+      db.run(
+        `UPDATE messages SET content = '', transcript = NULL, file_name = NULL, file_size = NULL, mime_type = NULL, deleted_at = ? WHERE id = ?`,
+        [ts, id]
+      )
       const payload = {
         id,
         conversationId: conversation.id,
@@ -1517,7 +1627,7 @@ ensureAdmin()
 
 httpServer.listen(PORT, () => {
   console.log(
-    `ChatKita chat-service v6 listening on port ${PORT} (path: '/', push: ${VAPID_PUBLIC ? 'on' : 'off'})`
+    `ChatKita chat-service v7 listening on port ${PORT} (path: '/', push: ${VAPID_PUBLIC ? 'on' : 'off'})`
   )
 })
 

@@ -4,9 +4,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowDown,
   ImagePlus,
+  Loader2,
   LogOut,
   MessageCircleMore,
   Mic,
+  Paperclip,
   Pin,
   Search,
   SendHorizonal,
@@ -19,6 +21,7 @@ import type { Socket } from "socket.io-client";
 
 import { ChatBubble } from "@/components/chat/ChatBubble";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
+import { MediaViewer, FileKindIcon, type ViewerMedia } from "@/components/chat/media-viewer";
 import { TypingDots } from "@/components/chat/TypingDots";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -75,6 +78,7 @@ import {
   avatarColorClass,
   canEditMessage,
   FONT_SCALES,
+  formatFileSize,
   formatLastSeen,
   initials,
   readFontScale,
@@ -167,6 +171,27 @@ async function fileToDataUrl(file: File): Promise<string> {
   ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
   bitmap.close();
   return canvas.toDataURL("image/jpeg", 0.82);
+}
+
+/** Ukuran maksimum lampiran dokumen (mirror POST /api/upload + chat-service). */
+const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MiB
+
+/**
+ * Unggah file ke POST /api/upload (multipart, field `file`) → URL publik
+ * /api/media/<nama> + metadata. Dilempar error bila respons tidak ok.
+ */
+async function uploadFile(
+  file: File
+): Promise<{ url: string; fileName: string; mimeType: string; size: number }> {
+  const body = new FormData();
+  body.append("file", file);
+  const res = await fetch("/api/upload", { method: "POST", body });
+  const data = (await res.json().catch(() => null)) as
+    | { ok: true; url: string; fileName: string; mimeType: string; size: number }
+    | { ok: false; error: string }
+    | null;
+  if (!res.ok || !data || data.ok !== true) throw new Error("upload-failed");
+  return data;
 }
 
 const fmtTimer = (ms: number) => {
@@ -324,11 +349,16 @@ export function Messenger() {
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [pendingImage, setPendingImage] = useState<string | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
+  // Lampiran dokumen/video/audio: file terpilih → dialog konfirmasi → upload.
+  const [pendingFile, setPendingFile] = useState<{ file: File } | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [showJump, setShowJump] = useState(false);
   const [newCount, setNewCount] = useState(0);
-  const [lightbox, setLightbox] = useState<string | null>(null);
+  // Viewer media full-screen (pengganti lightbox gambar saja).
+  const [viewer, setViewer] = useState<ViewerMedia | null>(null);
 
   // Web Push VAPID public key (null = push unavailable).
   const [pushPublicKey, setPushPublicKey] = useState<string | null>(null);
@@ -350,6 +380,7 @@ export function Messenger() {
   const atBottomRef = useRef(true);
   const hiddenUnreadRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const docInputRef = useRef<HTMLInputElement | null>(null);
   const translatingIdRef = useRef<number | null>(null);
 
   const recorder = useVoiceRecorder();
@@ -679,6 +710,10 @@ export function Messenger() {
     setPinnedMsg(null);
     setPushPublicKey(null);
     setPendingImage(null);
+    setPendingFile(null);
+    setUploading(false);
+    setFileError(null);
+    setViewer(null);
     setSearchOpen(false);
     setSearchQuery("");
     setTitleUnread(0);
@@ -693,8 +728,8 @@ export function Messenger() {
 
   const emitMessage = (
     content: string,
-    type: "text" | "image" | "voice",
-    extra: { durationMs?: number } = {}
+    type: "text" | "image" | "voice" | "file",
+    extra: { durationMs?: number; fileName?: string; mimeType?: string; fileSize?: number } = {}
   ) => {
     const socket = socketRef.current;
     const id = conversationIdRef.current;
@@ -795,6 +830,42 @@ export function Messenger() {
   const sendImage = () => {
     if (!pendingImage) return;
     if (emitMessage(pendingImage, "image")) setPendingImage(null);
+  };
+
+  /* Lampiran file: gambar dirutekan ke alur foto (kompresi), lainnya → dialog. */
+  const handleFilePick = (file: File | undefined | null) => {
+    if (!file) return;
+    setFileError(null);
+    if (file.type.startsWith("image/")) {
+      void handleImagePick(file);
+      return;
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      setFileError("File terlalu besar (maks 25 MB).");
+      return;
+    }
+    setPendingFile({ file });
+  };
+
+  const sendFile = async () => {
+    const target = pendingFile;
+    if (!target) return;
+    setUploading(true);
+    setFileError(null);
+    try {
+      const meta = await uploadFile(target.file);
+      const sent = emitMessage(meta.url, "file", {
+        fileName: meta.fileName,
+        mimeType: meta.mimeType,
+        fileSize: meta.size,
+      });
+      if (sent) setPendingFile(null);
+      else setFileError("Pesan gagal terkirim, coba lagi.");
+    } catch {
+      setFileError("Gagal mengunggah file.");
+    } finally {
+      setUploading(false);
+    }
   };
 
   const sendVoice = async () => {
@@ -1159,6 +1230,9 @@ export function Messenger() {
                   side={m.senderId === me.userId ? "right" : "left"}
                   type={m.type}
                   deleted={!!m.deletedAt}
+                  fileName={m.fileName}
+                  fileSize={m.fileSize}
+                  mimeType={m.mimeType}
                   read={m.senderId === me.userId && m.id <= adminReadId}
                   replyTo={m.replyTo}
                   replyAuthor={m.replyTo?.senderId === me.userId ? "Anda" : partner?.name}
@@ -1173,7 +1247,7 @@ export function Messenger() {
                   canEdit={canEditMessage(m, me.userId)}
                   onReply={() => setReplyTo(m)}
                   onDelete={() => handleDelete(m)}
-                  onImageOpen={setLightbox}
+                  onMediaOpen={setViewer}
                   onReact={(emoji) => handleReact(m, emoji)}
                   onEdit={() => handleEditStart(m)}
                   onTranslate={
@@ -1214,10 +1288,10 @@ export function Messenger() {
           </div>
         ) : null}
 
-        {/* Send / image errors */}
-        {sendError || imageError ? (
+        {/* Send / image / file errors */}
+        {sendError || imageError || fileError ? (
           <p className="px-4 pb-1 text-xs text-destructive">
-            {imageError ?? "Pesan gagal terkirim, coba lagi."}
+            {fileError ?? imageError ?? "Pesan gagal terkirim, coba lagi."}
           </p>
         ) : null}
 
@@ -1235,7 +1309,9 @@ export function Messenger() {
                     ? "📷 Foto"
                     : replyTo.type === "voice"
                       ? "🎤 Pesan suara"
-                      : replyTo.content}
+                      : replyTo.type === "file"
+                        ? `📎 ${replyTo.fileName ?? "File"}`
+                        : replyTo.content}
               </p>
             </div>
             <button
@@ -1344,6 +1420,16 @@ export function Messenger() {
                   e.target.value = "";
                 }}
               />
+              <input
+                ref={docInputRef}
+                type="file"
+                className="hidden"
+                aria-label="Lampirkan file"
+                onChange={(e) => {
+                  handleFilePick(e.target.files?.[0]);
+                  e.target.value = "";
+                }}
+              />
               <Button
                 variant="ghost"
                 size="icon"
@@ -1361,6 +1447,16 @@ export function Messenger() {
                 onClick={() => fileInputRef.current?.click()}
               >
                 <ImagePlus className="size-5" aria-hidden="true" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
+                aria-label="Lampirkan file"
+                title="Lampirkan file"
+                onClick={() => docInputRef.current?.click()}
+              >
+                <Paperclip className="size-5" aria-hidden="true" />
               </Button>
               <Input
                 value={input}
@@ -1434,30 +1530,82 @@ export function Messenger() {
         />
       ) : null}
 
-      {/* Image lightbox */}
-      {lightbox ? (
-        <div
-          role="dialog"
-          aria-label="Lihat foto"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4"
-          onClick={() => setLightbox(null)}
+      {/* Dialog konfirmasi lampiran file (unggah → kirim) */}
+      {pendingFile ? (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open && !uploading) setPendingFile(null);
+          }}
         >
-          <img
-            src={lightbox}
-            alt="Foto diperbesar"
-            className="max-h-[90vh] max-w-full rounded-lg object-contain"
-          />
-          <Button
-            variant="secondary"
-            size="icon"
-            className="absolute right-4 top-4"
-            aria-label="Tutup foto"
-            onClick={() => setLightbox(null)}
-          >
-            <X className="size-4" />
-          </Button>
-        </div>
+          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <FileKindIcon
+                  mimeType={pendingFile.file.type}
+                  fileName={pendingFile.file.name}
+                  className="size-5 text-emerald-600"
+                />
+                Kirim file
+              </DialogTitle>
+              <DialogDescription>
+                File ini akan dikirim ke {partner?.name ?? "Admin"}.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex items-center gap-3 rounded-xl border bg-muted/60 p-3">
+              <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-background text-muted-foreground">
+                <FileKindIcon
+                  mimeType={pendingFile.file.type}
+                  fileName={pendingFile.file.name}
+                  className="size-5"
+                />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="break-words text-sm font-medium leading-snug">
+                  {pendingFile.file.name}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {formatFileSize(pendingFile.file.size)}
+                </p>
+              </div>
+            </div>
+            {uploading ? (
+              <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                Mengunggah…
+              </p>
+            ) : null}
+            {fileError ? <p className="text-sm text-destructive">{fileError}</p> : null}
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <Button
+                variant="outline"
+                className="h-11 sm:min-w-24"
+                disabled={uploading}
+                onClick={() => setPendingFile(null)}
+              >
+                Batal
+              </Button>
+              <Button
+                className="h-11 bg-emerald-600 text-white hover:bg-emerald-600/90 sm:min-w-28"
+                disabled={uploading}
+                onClick={() => void sendFile()}
+              >
+                {uploading ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                    Mengunggah…
+                  </>
+                ) : (
+                  "Kirim"
+                )}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
       ) : null}
+
+      {/* Viewer media full-screen (foto/video/audio/PDF/dokumen) */}
+      <MediaViewer media={viewer} onClose={() => setViewer(null)} />
     </div>
   );
 }

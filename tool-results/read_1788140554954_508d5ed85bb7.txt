@@ -1,0 +1,1464 @@
+     1→"use client";
+     2→
+     3→import { useCallback, useEffect, useRef, useState } from "react";
+     4→import {
+     5→  ArrowDown,
+     6→  ImagePlus,
+     7→  LogOut,
+     8→  MessageCircleMore,
+     9→  Mic,
+    10→  Pin,
+    11→  Search,
+    12→  SendHorizonal,
+    13→  ShieldCheck,
+    14→  Smile,
+    15→  Type,
+    16→  X,
+    17→} from "lucide-react";
+    18→import type { Socket } from "socket.io-client";
+    19→
+    20→import { ChatBubble } from "@/components/chat/ChatBubble";
+    21→import { EmojiPicker } from "@/components/chat/emoji-picker";
+    22→import { TypingDots } from "@/components/chat/TypingDots";
+    23→import { ThemeToggle } from "@/components/theme-toggle";
+    24→import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+    25→import { Button } from "@/components/ui/button";
+    26→import {
+    27→  Card,
+    28→  CardContent,
+    29→  CardDescription,
+    30→  CardHeader,
+    31→  CardTitle,
+    32→} from "@/components/ui/card";
+    33→import {
+    34→  Dialog,
+    35→  DialogContent,
+    36→  DialogDescription,
+    37→  DialogHeader,
+    38→  DialogTitle,
+    39→} from "@/components/ui/dialog";
+    40→import {
+    41→  DropdownMenu,
+    42→  DropdownMenuContent,
+    43→  DropdownMenuItem,
+    44→  DropdownMenuLabel,
+    45→  DropdownMenuTrigger,
+    46→} from "@/components/ui/dropdown-menu";
+    47→import { Input } from "@/components/ui/input";
+    48→import { Label } from "@/components/ui/label";
+    49→import { useVoiceRecorder } from "@/hooks/use-voice-recorder";
+    50→import { createChatSocket } from "@/lib/chat-socket";
+    51→import { playBlip, setTitleUnread } from "@/lib/chat-notify";
+    52→import { onInstallAvailability, promptInstall, subscribeToPush } from "@/lib/chat-push";
+    53→import {
+    54→  ADMIN_ID,
+    55→  CHAT_LAST_NAME_KEY,
+    56→  CHAT_SESSION_KEY,
+    57→  MAX_MESSAGE_LENGTH,
+    58→  MAX_NAME_LENGTH,
+    59→  draftKey,
+    60→  type AckOf,
+    61→  type ChatErrorAck,
+    62→  type ChatMessage,
+    63→  type ConversationOverview,
+    64→  type HistoryAck,
+    65→  type MessageAck,
+    66→  type MessageUpdatePayload,
+    67→  type PartnerInfo,
+    68→  type PinUpdatePayload,
+    69→  type PublicSettingsAck,
+    70→  type SetPinAck,
+    71→  type TranslateAck,
+    72→  type UserAuthAck,
+    73→} from "@/lib/chat-types";
+    74→import {
+    75→  avatarColorClass,
+    76→  canEditMessage,
+    77→  FONT_SCALES,
+    78→  formatLastSeen,
+    79→  initials,
+    80→  readFontScale,
+    81→  saveFontScale,
+    82→  type FontScale,
+    83→} from "@/lib/chat-utils";
+    84→import { cn } from "@/lib/utils";
+    85→
+    86→interface StoredUser {
+    87→  userId: string;
+    88→  name: string;
+    89→}
+    90→
+    91→/** Read (and validate) the persisted login. Client-side only. */
+    92→function readStoredUser(): StoredUser | null {
+    93→  try {
+    94→    const raw = window.localStorage.getItem(CHAT_SESSION_KEY);
+    95→    if (!raw) return null;
+    96→    const parsed = JSON.parse(raw) as Partial<StoredUser> | null;
+    97→    if (
+    98→      parsed &&
+    99→      typeof parsed.userId === "string" &&
+   100→      parsed.userId.length > 0 &&
+   101→      typeof parsed.name === "string" &&
+   102→      parsed.name.length > 0
+   103→    ) {
+   104→      return { userId: parsed.userId, name: parsed.name };
+   105→    }
+   106→    return null;
+   107→  } catch {
+   108→    return null;
+   109→  }
+   110→}
+   111→
+   112→/**
+   113→ * Name this browser previously logged in with. Unlike the session it
+   114→ * survives logout, so returning users can continue their conversation
+   115→ * without retyping (or mistyping) their name.
+   116→ */
+   117→function readLastName(): string {
+   118→  try {
+   119→    return window.localStorage.getItem(CHAT_LAST_NAME_KEY) ?? "";
+   120→  } catch {
+   121→    return "";
+   122→  }
+   123→}
+   124→
+   125→function saveLastName(name: string): void {
+   126→  try {
+   127→    window.localStorage.setItem(CHAT_LAST_NAME_KEY, name);
+   128→  } catch {
+   129→    /* storage unavailable — the hint simply stays empty */
+   130→  }
+   131→}
+   132→
+   133→const FONT_SCALE_LABELS: { key: FontScale; label: string }[] = [
+   134→  { key: "sm", label: "Kecil" },
+   135→  { key: "md", label: "Sedang" },
+   136→  { key: "lg", label: "Besar" },
+   137→];
+   138→
+   139→function readDraft(scope: string, id: string): string {
+   140→  try {
+   141→    return window.localStorage.getItem(draftKey(scope, id)) ?? "";
+   142→  } catch {
+   143→    return "";
+   144→  }
+   145→}
+   146→
+   147→function saveDraft(scope: string, id: string, value: string): void {
+   148→  try {
+   149→    if (value) window.localStorage.setItem(draftKey(scope, id), value);
+   150→    else window.localStorage.removeItem(draftKey(scope, id));
+   151→  } catch {
+   152→    /* ignore */
+   153→  }
+   154→}
+   155→
+   156→/** Downscale + compress an image file to a JPEG data URL the server accepts. */
+   157→async function fileToDataUrl(file: File): Promise<string> {
+   158→  if (file.size > 6 * 1024 * 1024) throw new Error("too-large");
+   159→  const bitmap = await createImageBitmap(file);
+   160→  const max = 1280;
+   161→  const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
+   162→  const canvas = document.createElement("canvas");
+   163→  canvas.width = Math.round(bitmap.width * scale);
+   164→  canvas.height = Math.round(bitmap.height * scale);
+   165→  const ctx = canvas.getContext("2d");
+   166→  if (!ctx) throw new Error("canvas");
+   167→  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+   168→  bitmap.close();
+   169→  return canvas.toDataURL("image/jpeg", 0.82);
+   170→}
+   171→
+   172→const fmtTimer = (ms: number) => {
+   173→  const total = Math.floor(ms / 1000);
+   174→  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+   175→};
+   176→
+   177→/* ------------------------------------------------------------------ */
+   178→/* PIN dialog (protect this account with a 4–8 digit code)             */
+   179→/* ------------------------------------------------------------------ */
+   180→
+   181→function PinDialog({
+   182→  open,
+   183→  onOpenChange,
+   184→  socketRef,
+   185→  hasPin,
+   186→  onHasPin,
+   187→}: {
+   188→  open: boolean;
+   189→  onOpenChange: (v: boolean) => void;
+   190→  socketRef: React.RefObject<Socket | null>;
+   191→  hasPin: boolean;
+   192→  onHasPin: (v: boolean) => void;
+   193→}) {
+   194→  const [pin, setPin] = useState("");
+   195→  const [error, setError] = useState<string | null>(null);
+   196→  const [saved, setSaved] = useState(false);
+   197→
+   198→  // Mounted only while open (see render below) — state resets on remount.
+   199→
+   200→  const submit = () => {
+   201→    const socket = socketRef.current;
+   202→    if (!socket || !/^\d{4,8}$/.test(pin)) {
+   203→      setError("PIN harus 4–8 angka.");
+   204→      return;
+   205→    }
+   206→    socket.emit(
+   207→      "user:setpin",
+   208→      { pin },
+   209→      (res: AckOf<SetPinAck>) => {
+   210→        if (res.ok) {
+   211→          onHasPin(res.hasPin);
+   212→          setSaved(true);
+   213→          setError(null);
+   214→          setTimeout(() => onOpenChange(false), 700);
+   215→        } else {
+   216→          setError(res.error === "INVALID_PIN" ? "PIN harus 4–8 angka." : "Gagal, coba lagi.");
+   217→        }
+   218→      }
+   219→    );
+   220→  };
+   221→
+   222→  const clear = () => {
+   223→    const socket = socketRef.current;
+   224→    if (!socket) return;
+   225→    socket.emit("user:setpin", { pin: null }, (res: AckOf<SetPinAck>) => {
+   226→      if (res.ok) {
+   227→        onHasPin(false);
+   228→        onOpenChange(false);
+   229→      } else setError("Gagal menghapus PIN.");
+   230→    });
+   231→  };
+   232→
+   233→  return (
+   234→    <Dialog open={open} onOpenChange={onOpenChange}>
+   235→      <DialogContent className="max-w-sm rounded-2xl">
+   236→        <DialogHeader>
+   237→          <DialogTitle className="flex items-center gap-2">
+   238→            <ShieldCheck className="size-5 text-emerald-600" aria-hidden="true" />
+   239→            Kunci Akun dengan PIN
+   240→          </DialogTitle>
+   241→          <DialogDescription>
+   242→            {hasPin
+   243→              ? "Akun Anda terlindungi PIN. Ganti atau hapus PIN di sini."
+   244→              : "Tanpa PIN, siapa pun yang tahu nama Anda bisa membuka chat ini. Pasang PIN 4–8 angka agar lebih aman."}
+   245→          </DialogDescription>
+   246→        </DialogHeader>
+   247→        {saved ? (
+   248→          <p className="text-sm font-medium text-emerald-600">PIN tersimpan ✓</p>
+   249→        ) : (
+   250→          <div className="space-y-3">
+   251→            <div className="space-y-2">
+   252→              <Label htmlFor="pin-entry">PIN baru (4–8 angka)</Label>
+   253→              <Input
+   254→                id="pin-entry"
+   255→                type="password"
+   256→                inputMode="numeric"
+   257→                maxLength={8}
+   258→                value={pin}
+   259→                placeholder="••••"
+   260→                onChange={(e) => {
+   261→                  setPin(e.target.value.replace(/\D/g, ""));
+   262→                  setError(null);
+   263→                }}
+   264→                onKeyDown={(e) => {
+   265→                  if (e.key === "Enter") submit();
+   266→                }}
+   267→              />
+   268→              {error ? <p className="text-sm text-destructive">{error}</p> : null}
+   269→            </div>
+   270→            <div className="flex gap-2">
+   271→              <Button
+   272→                className="h-10 flex-1 bg-emerald-600 text-white hover:bg-emerald-600/90"
+   273→                onClick={submit}
+   274→              >
+   275→                Simpan PIN
+   276→              </Button>
+   277→              {hasPin ? (
+   278→                <Button variant="outline" className="h-10" onClick={clear}>
+   279→                  Hapus PIN
+   280→                </Button>
+   281→              ) : null}
+   282→            </div>
+   283→          </div>
+   284→        )}
+   285→      </DialogContent>
+   286→    </Dialog>
+   287→  );
+   288→}
+   289→
+   290→/* ------------------------------------------------------------------ */
+   291→/* Messenger                                                           */
+   292→/* ------------------------------------------------------------------ */
+   293→
+   294→/**
+   295→ * ChatKita Messenger (sisi user) — chat 1-on-1 dengan Admin, seperti
+   296→ * aplikasi pesan biasa: cukup nama untuk masuk, langsung terhubung.
+   297→ * User lain tidak pernah terlihat di sini (isolasi dijamin server).
+   298→ * Owns its own socket connection, always disconnected on unmount.
+   299→ */
+   300→export function Messenger() {
+   301→  const [me, setMe] = useState<StoredUser | null>(null);
+   302→  const [hasPin, setHasPin] = useState(false);
+   303→  const [pinOpen, setPinOpen] = useState(false);
+   304→  const [conversationId, setConversationId] = useState<string | null>(null);
+   305→  const [partner, setPartner] = useState<PartnerInfo | null>(null);
+   306→  const [messages, setMessages] = useState<ChatMessage[]>([]);
+   307→  const [partnerTyping, setPartnerTyping] = useState(false);
+   308→  const [connected, setConnected] = useState(false);
+   309→  // Messenger mounts client-only (the page gates it behind hydration),
+   310→  // so reading localStorage in the initializer is safe.
+   311→  // The input is NEVER prefilled — a returning user gets a one-tap
+   312→  // "Lanjut chat sebagai …" button instead (clearer than a mystery value
+   313→  // sitting in the field).
+   314→  const [name, setName] = useState("");
+   315→  const [lastName, setLastName] = useState(() => readLastName());
+   316→  const [pinEntry, setPinEntry] = useState("");
+   317→  const [needsPin, setNeedsPin] = useState(false);
+   318→  const [authError, setAuthError] = useState<string | null>(null);
+   319→  const [input, setInput] = useState("");
+   320→  const [sendError, setSendError] = useState(false);
+   321→
+   322→  const [adminReadId, setAdminReadId] = useState(0);
+   323→  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+   324→  const [emojiOpen, setEmojiOpen] = useState(false);
+   325→  const [pendingImage, setPendingImage] = useState<string | null>(null);
+   326→  const [imageError, setImageError] = useState<string | null>(null);
+   327→  const [searchOpen, setSearchOpen] = useState(false);
+   328→  const [searchQuery, setSearchQuery] = useState("");
+   329→  const [showJump, setShowJump] = useState(false);
+   330→  const [newCount, setNewCount] = useState(0);
+   331→  const [lightbox, setLightbox] = useState<string | null>(null);
+   332→
+   333→  // Web Push VAPID public key (null = push unavailable).
+   334→  const [pushPublicKey, setPushPublicKey] = useState<string | null>(null);
+   335→  const [pinnedMsg, setPinnedMsg] = useState<{ id: number; snippet: string } | null>(null);
+   336→  const [editing, setEditing] = useState<ChatMessage | null>(null);
+   337→  const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
+   338→  const [installAvailable, setInstallAvailable] = useState(false);
+   339→  const [translatingId, setTranslatingId] = useState<number | null>(null);
+   340→
+   341→  /** Bumped on logout to tear down + recreate the socket (fresh rooms). */
+   342→  const [epoch, setEpoch] = useState(0);
+   343→
+   344→  const socketRef = useRef<Socket | null>(null);
+   345→  const meRef = useRef<StoredUser | null>(null);
+   346→  const conversationIdRef = useRef<string | null>(null);
+   347→  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   348→  const partnerTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   349→  const scrollRef = useRef<HTMLDivElement | null>(null);
+   350→  const atBottomRef = useRef(true);
+   351→  const hiddenUnreadRef = useRef(0);
+   352→  const fileInputRef = useRef<HTMLInputElement | null>(null);
+   353→  const translatingIdRef = useRef<number | null>(null);
+   354→
+   355→  const recorder = useVoiceRecorder();
+   356→
+   357→  const scrollToBottom = useCallback((smooth = false) => {
+   358→    const el = scrollRef.current;
+   359→    if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+   360→  }, []);
+   361→
+   362→  /* ---------------------------------------------------------------- */
+   363→  /* Socket lifecycle (recreated on logout via `epoch`)                */
+   364→  /* ---------------------------------------------------------------- */
+   365→  useEffect(() => {
+   366→    // Restore persisted login (ref only) so the first `connect` re-auths
+   367→    // immediately. State is set inside the connect ack.
+   368→    meRef.current = readStoredUser();
+   369→
+   370→    const socket = createChatSocket();
+   371→    socketRef.current = socket;
+   372→
+   373→    const loadHistory = (id: string) => {
+   374→      socket.emit(
+   375→        "messages:history",
+   376→        { conversationId: id },
+   377→        (res: AckOf<HistoryAck>) => {
+   378→          if (res.ok) {
+   379→            setPartner(res.partner);
+   380→            setMessages(res.messages);
+   381→            setAdminReadId(res.partnerLastReadId);
+   382→            setPinnedMsg(res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null);
+   383→            socketRef.current?.emit("messages:read", { conversationId: id });
+   384→          }
+   385→        }
+   386→      );
+   387→    };
+   388→
+   389→    socket.on("connect", () => {
+   390→      setConnected(true);
+   391→      // Pre-login: fetch the Web Push VAPID public key (v6 shape:
+   392→      // { ok, pushPublicKey }) so it is ready right after login.
+   393→      if (!meRef.current) {
+   394→        socket.emit("public:settings", {}, (res: AckOf<PublicSettingsAck>) => {
+   395→          if (res.ok && res.pushPublicKey) setPushPublicKey(res.pushPublicKey);
+   396→        });
+   397→      }
+   398→      const current = meRef.current;
+   399→      if (!current) return;
+   400→      // Re-auth on EVERY connect to (re)join the personal room and get
+   401→      // the freshest history (also closes reconnect gaps).
+   402→      socket.emit(
+   403→        "user:auth",
+   404→        { name: current.name, userId: current.userId },
+   405→        (res: AckOf<UserAuthAck>) => {
+   406→          if (res.ok) {
+   407→            const next = { userId: res.user.id, name: res.user.name };
+   408→            window.localStorage.setItem(CHAT_SESSION_KEY, JSON.stringify(next));
+   409→            saveLastName(res.user.name);
+   410→            setLastName(res.user.name);
+   411→            meRef.current = next;
+   412→            conversationIdRef.current = res.conversationId;
+   413→            setMe(next);
+   414→            setHasPin(res.user.hasPin ?? false);
+   415→            setNeedsPin(false);
+   416→            setPinEntry("");
+   417→            setConversationId(res.conversationId);
+   418→            setPartner(res.partner);
+   419→            setMessages(res.messages);
+   420→            setAdminReadId(res.partnerLastReadId);
+   421→            // Push opt-in + pinned banner + draft (the ack carries the
+   422→            // VAPID key directly in the v6 contract).
+   423→            setPushPublicKey(res.pushPublicKey || null);
+   424→            setPinnedMsg(
+   425→              res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null
+   426→            );
+   427→            setInput(readDraft("user", res.user.id));
+   428→            void subscribeToPush(socket, res.pushPublicKey);
+   429→          } else {
+   430→            // Stored login no longer valid — drop it, back to the form.
+   431→            window.localStorage.removeItem(CHAT_SESSION_KEY);
+   432→            meRef.current = null;
+   433→            conversationIdRef.current = null;
+   434→            setMe(null);
+   435→            setConversationId(null);
+   436→            setPartner(null);
+   437→            setMessages([]);
+   438→            setAuthError(
+   439→              res.error === "NAME_RESERVED"
+   440→                ? "Nama “Admin” tidak tersedia — coba nama lain."
+   441→                : "Sesi berakhir. Silakan masuk kembali."
+   442→            );
+   443→          }
+   444→        }
+   445→      );
+   446→    });
+   447→
+   448→    socket.on("disconnect", () => {
+   449→      setConnected(false);
+   450→    });
+   451→
+   452→    // Recovery: if the current conversation disappears server-side
+   453→    // (e.g. database reset), hop to the one conversation we do have.
+   454→    socket.on("conversations:update", (list: ConversationOverview[]) => {
+   455→      const current = conversationIdRef.current;
+   456→      if (current && !list.some((c) => c.id === current) && list.length > 0) {
+   457→        const next = list[0];
+   458→        conversationIdRef.current = next.id;
+   459→        setConversationId(next.id);
+   460→        loadHistory(next.id);
+   461→      }
+   462→    });
+   463→
+   464→    // v5 — pinned-message banner updates (admin pins/unpins).
+   465→    socket.on("conversation:update", (p: PinUpdatePayload) => {
+   466→      if (p.conversationId !== conversationIdRef.current) return;
+   467→      setPinnedMsg(p.pinned ? { id: p.pinned.id, snippet: p.pinned.snippet } : null);
+   468→    });
+   469→
+   470→    // Append messages ONLY here; skip if the last stored message already
+   471→    // has the same id (history-replacement vs live-event race).
+   472→    socket.on("message:new", (msg: ChatMessage) => {
+   473→      setMessages((prev) => {
+   474→        if (prev.some((m) => m.id === msg.id)) return prev;
+   475→        return [...prev, msg];
+   476→      });
+   477→      // The user's single conversation is always the visible one.
+   478→      socketRef.current?.emit("messages:read", {
+   479→        conversationId: msg.conversationId,
+   480→      });
+   481→      if (atBottomRef.current) {
+   482→        requestAnimationFrame(() => scrollToBottom(true));
+   483→      } else if (msg.senderId !== meRef.current?.userId) {
+   484→        setNewCount((c) => c + 1);
+   485→      }
+   486→      if (document.hidden) {
+   487→        hiddenUnreadRef.current += 1;
+   488→        playBlip();
+   489→        setTitleUnread(hiddenUnreadRef.current);
+   490→      }
+   491→    });
+   492→
+   493→    // Delete tombstones + late voice transcripts + edits/translations/reactions.
+   494→    socket.on("message:updated", (u: MessageUpdatePayload) => {
+   495→      setMessages((prev) =>
+   496→        prev.map((m) =>
+   497→          m.id === u.id
+   498→            ? {
+   499→                ...m,
+   500→                content: u.content ?? m.content,
+   501→                deletedAt: u.deletedAt ?? m.deletedAt,
+   502→                transcript: u.transcript ?? m.transcript,
+   503→                editedAt: u.editedAt ?? m.editedAt,
+   504→                translation: u.translation ?? m.translation,
+   505→                reactions: u.reactions ?? m.reactions,
+   506→              }
+   507→            : m
+   508→        )
+   509→      );
+   510→      if (u.translation && u.id === translatingIdRef.current) {
+   511→        translatingIdRef.current = null;
+   512→        setTranslatingId(null);
+   513→      }
+   514→    });
+   515→
+   516→    // Live ✓✓: the admin read up to `lastReadMessageId`.
+   517→    socket.on(
+   518→      "read:update",
+   519→      (r: { conversationId: string; userId: string; lastReadMessageId: number }) => {
+   520→        if (r.userId === ADMIN_ID) setAdminReadId(r.lastReadMessageId);
+   521→      }
+   522→    );
+   523→
+   524→    socket.on(
+   525→      "partner:typing",
+   526→      ({ isTyping }: { conversationId: string; isTyping: boolean }) => {
+   527→        if (partnerTypingTimerRef.current) {
+   528→          clearTimeout(partnerTypingTimerRef.current);
+   529→          partnerTypingTimerRef.current = null;
+   530→        }
+   531→        setPartnerTyping(isTyping);
+   532→        if (isTyping) {
+   533→          // Auto-clear after 8s in case a stop event is missed.
+   534→          partnerTypingTimerRef.current = setTimeout(() => {
+   535→            partnerTypingTimerRef.current = null;
+   536→            setPartnerTyping(false);
+   537→          }, 8000);
+   538→        }
+   539→      }
+   540→    );
+   541→
+   542→    // Users only ever receive presence for the admin (server-enforced).
+   543→    socket.on(
+   544→      "presence:update",
+   545→      ({
+   546→        userId,
+   547→        online,
+   548→        lastSeenAt,
+   549→      }: {
+   550→        userId: string;
+   551→        online: boolean;
+   552→        lastSeenAt: string | null;
+   553→      }) => {
+   554→        if (userId !== ADMIN_ID) return;
+   555→        setPartner((prev) =>
+   556→          prev
+   557→            ? { ...prev, online, lastSeenAt: online ? null : lastSeenAt }
+   558→            : prev
+   559→        );
+   560→      }
+   561→    );
+   562→
+   563→    // Leaving the tab clears the unread title badge.
+   564→    const onVisible = () => {
+   565→      if (!document.hidden) {
+   566→        hiddenUnreadRef.current = 0;
+   567→        setTitleUnread(0);
+   568→      }
+   569→    };
+   570→    document.addEventListener("visibilitychange", onVisible);
+   571→
+   572→    // v5 — PWA install prompt availability.
+   573→    const offInstall = onInstallAvailability(setInstallAvailable);
+   574→
+   575→    return () => {
+   576→      document.removeEventListener("visibilitychange", onVisible);
+   577→      offInstall();
+   578→      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+   579→      if (partnerTypingTimerRef.current)
+   580→        clearTimeout(partnerTypingTimerRef.current);
+   581→      socket.disconnect();
+   582→      socketRef.current = null;
+   583→    };
+   584→  }, [epoch, scrollToBottom]);
+   585→
+   586→  /* Jump to latest whenever the conversation switches. */
+   587→  useEffect(() => {
+   588→    atBottomRef.current = true;
+   589→    requestAnimationFrame(() => {
+   590→      setNewCount(0);
+   591→      scrollToBottom();
+   592→    });
+   593→  }, [conversationId, scrollToBottom]);
+   594→
+   595→  /* Clear the tab badge when the user reads while visible. */
+   596→  useEffect(() => {
+   597→    if (!document.hidden) setTitleUnread(0);
+   598→  }, [messages]);
+   599→
+   600→  /* ---------------------------------------------------------------- */
+   601→  /* Actions                                                           */
+   602→  /* ---------------------------------------------------------------- */
+   603→
+   604→  /**
+   605→   * Login. `override` lets the "Lanjut chat sebagai …" button authenticate
+   606→   * with the stored last name without putting it back into the input.
+   607→   */
+   608→  const handleAuth = (override?: string) => {
+   609→    const socket = socketRef.current;
+   610→    const trimmed = (override ?? name).trim();
+   611→    if (!socket || !connected || !trimmed) return;
+   612→    if (override && override !== name) setName(override);
+   613→    setAuthError(null);
+   614→    socket.emit(
+   615→      "user:auth",
+   616→      {
+   617→        name: trimmed,
+   618→        pin: needsPin && pinEntry ? pinEntry : undefined,
+   619→      },
+   620→      (res: AckOf<UserAuthAck>) => {
+   621→        if (res.ok) {
+   622→          const next = { userId: res.user.id, name: res.user.name };
+   623→          window.localStorage.setItem(CHAT_SESSION_KEY, JSON.stringify(next));
+   624→          saveLastName(res.user.name);
+   625→          setLastName(res.user.name);
+   626→          meRef.current = next;
+   627→          conversationIdRef.current = res.conversationId;
+   628→          setMe(next);
+   629→          setHasPin(res.user.hasPin ?? false);
+   630→          setNeedsPin(false);
+   631→          setPinEntry("");
+   632→          setConversationId(res.conversationId);
+   633→          setPartner(res.partner);
+   634→          setMessages(res.messages);
+   635→          setAdminReadId(res.partnerLastReadId);
+   636→          setPushPublicKey(res.pushPublicKey || null);
+   637→          setPinnedMsg(res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null);
+   638→          setInput(readDraft("user", res.user.id));
+   639→          void subscribeToPush(socket, res.pushPublicKey || pushPublicKey || "");
+   640→        } else {
+   641→          if (res.error === "PIN_REQUIRED" || res.error === "INVALID_PIN") {
+   642→            setNeedsPin(true);
+   643→            setAuthError(
+   644→              res.error === "PIN_REQUIRED"
+   645→                ? "Akun ini dilindungi PIN — masukkan PIN Anda."
+   646→                : "PIN salah, coba lagi."
+   647→            );
+   648→            return;
+   649→          }
+   650→          setAuthError(
+   651→            res.error === "INVALID_NAME"
+   652→              ? "Nama tidak valid (1–40 karakter)."
+   653→              : res.error === "NAME_RESERVED"
+   654→                ? "Nama “Admin” tidak tersedia — coba nama lain."
+   655→                : "Terjadi kesalahan, coba lagi."
+   656→          );
+   657→        }
+   658→      }
+   659→    );
+   660→  };
+   661→
+   662→  const handleLogout = () => {
+   663→    // Keep the typed draft so it survives logout → login.
+   664→    if (meRef.current) saveDraft("user", meRef.current.userId, input);
+   665→    window.localStorage.removeItem(CHAT_SESSION_KEY);
+   666→    meRef.current = null;
+   667→    conversationIdRef.current = null;
+   668→    setMe(null);
+   669→    setHasPin(false);
+   670→    setConversationId(null);
+   671→    setPartner(null);
+   672→    setMessages([]);
+   673→    setPartnerTyping(false);
+   674→    setAuthError(null);
+   675→    setInput("");
+   676→    setSendError(false);
+   677→    setReplyTo(null);
+   678→    setEditing(null);
+   679→    setPinnedMsg(null);
+   680→    setPushPublicKey(null);
+   681→    setPendingImage(null);
+   682→    setSearchOpen(false);
+   683→    setSearchQuery("");
+   684→    setTitleUnread(0);
+   685→    hiddenUnreadRef.current = 0;
+   686→    // Login card comes back EMPTY — a returning user simply taps the
+   687→    // "Lanjut chat sebagai …" button (server matches the account by
+   688→    // case-insensitive name and returns the full history).
+   689→    setName("");
+   690→    // Fresh socket ⇒ server cleanly forgets this client's rooms.
+   691→    setEpoch((e) => e + 1);
+   692→  };
+   693→
+   694→  const emitMessage = (
+   695→    content: string,
+   696→    type: "text" | "image" | "voice",
+   697→    extra: { durationMs?: number } = {}
+   698→  ) => {
+   699→    const socket = socketRef.current;
+   700→    const id = conversationIdRef.current;
+   701→    if (!socket || !id || !connected) return false;
+   702→    socket.emit(
+   703→      "messages:send",
+   704→      {
+   705→        conversationId: id,
+   706→        content,
+   707→        type,
+   708→        replyToId: replyTo?.id,
+   709→        ...extra,
+   710→      },
+   711→      (res: AckOf<MessageAck>) => {
+   712→        if (!res.ok) setSendError(true);
+   713→      }
+   714→    );
+   715→    setReplyTo(null);
+   716→    if (meRef.current) saveDraft("user", meRef.current.userId, "");
+   717→    return true;
+   718→  };
+   719→
+   720→  const handleSend = () => {
+   721→    const content = input.trim();
+   722→    if (!content) return;
+   723→    // v5 — edit mode: Enter saves the edited message instead of sending.
+   724→    if (editing) {
+   725→      const target = editing;
+   726→      socketRef.current?.emit(
+   727→        "message:edit",
+   728→        { messageId: target.id, content },
+   729→        (res: AckOf<{ ok: true }>) => {
+   730→          if (!res.ok) setSendError(true);
+   731→        }
+   732→      );
+   733→      setEditing(null);
+   734→      setInput("");
+   735→      return;
+   736→    }
+   737→    setInput("");
+   738→    setSendError(false);
+   739→    if (!emitMessage(content, "text")) setInput(content);
+   740→  };
+   741→
+   742→  /* v5 — reactions / edit / translate on bubbles. */
+   743→  const handleReact = (msg: ChatMessage, emoji: string) => {
+   744→    socketRef.current?.emit("message:react", { messageId: msg.id, emoji });
+   745→  };
+   746→
+   747→  const handleEditStart = (msg: ChatMessage) => {
+   748→    setReplyTo(null);
+   749→    setEditing(msg);
+   750→    setInput(msg.content);
+   751→  };
+   752→
+   753→  const handleEditCancel = () => {
+   754→    setEditing(null);
+   755→    setInput("");
+   756→  };
+   757→
+   758→  const handleTranslate = (msg: ChatMessage) => {
+   759→    if (translatingIdRef.current) return;
+   760→    if (msg.translation) return;
+   761→    translatingIdRef.current = msg.id;
+   762→    setTranslatingId(msg.id);
+   763→    socketRef.current?.emit(
+   764→      "message:translate",
+   765→      { messageId: msg.id },
+   766→      (res: AckOf<TranslateAck>) => {
+   767→        if (!res.ok) {
+   768→          translatingIdRef.current = null;
+   769→          setTranslatingId(null);
+   770→        }
+   771→      }
+   772→    );
+   773→  };
+   774→
+   775→  const scrollToMessage = (id: number) => {
+   776→    const el = scrollRef.current?.querySelector(`[data-mid="${id}"]`);
+   777→    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+   778→  };
+   779→
+   780→  const handleImagePick = async (file: File | undefined | null) => {
+   781→    if (!file) return;
+   782→    setImageError(null);
+   783→    try {
+   784→      const dataUrl = await fileToDataUrl(file);
+   785→      setPendingImage(dataUrl);
+   786→    } catch (err) {
+   787→      setImageError(
+   788→        err instanceof Error && err.message === "too-large"
+   789→          ? "Foto terlalu besar (maks 6MB)."
+   790→          : "Foto tidak bisa dibaca."
+   791→      );
+   792→    }
+   793→  };
+   794→
+   795→  const sendImage = () => {
+   796→    if (!pendingImage) return;
+   797→    if (emitMessage(pendingImage, "image")) setPendingImage(null);
+   798→  };
+   799→
+   800→  const sendVoice = async () => {
+   801→    const result = await recorder.stop();
+   802→    if (result) emitMessage(result.dataUrl, "voice", { durationMs: result.durationMs });
+   803→  };
+   804→
+   805→  const handleDelete = (msg: ChatMessage) => {
+   806→    socketRef.current?.emit("messages:delete", { messageId: msg.id });
+   807→  };
+   808→
+   809→  const handleInputChange = (value: string) => {
+   810→    setInput(value);
+   811→    setSendError(false);
+   812→    if (meRef.current) saveDraft("user", meRef.current.userId, value);
+   813→    const socket = socketRef.current;
+   814→    const id = conversationIdRef.current;
+   815→    if (!socket || !id || !connected) return;
+   816→    socket.emit("typing", { conversationId: id, isTyping: true });
+   817→    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+   818→    typingTimerRef.current = setTimeout(() => {
+   819→      socketRef.current?.emit("typing", { conversationId: id, isTyping: false });
+   820→    }, 1500);
+   821→  };
+   822→
+   823→  /* ---------------------------------------------------------------- */
+   824→  /* Render: login                                                     */
+   825→  /* ---------------------------------------------------------------- */
+   826→  if (!me) {
+   827→    return (
+   828→      <div className="relative flex min-h-0 w-full flex-1 items-center justify-center px-4 pb-6">
+   829→        {/* Toggle tema mengambang — layar login tidak punya header */}
+   830→        <div className="absolute right-2 top-2">
+   831→          <ThemeToggle />
+   832→        </div>
+   833→        <Card className="w-full max-w-md rounded-2xl">
+   834→          <CardHeader>
+   835→            <span
+   836→              className="w-fit rounded-lg bg-emerald-600/10 p-3 text-emerald-600"
+   837→              aria-hidden="true"
+   838→            >
+   839→              <MessageCircleMore className="size-6" />
+   840→            </span>
+   841→            <CardTitle className="text-xl">Masuk Chat</CardTitle>
+   842→            <CardDescription>
+   843→              Cukup nama Anda untuk langsung terhubung & chat dengan Admin
+   844→            </CardDescription>
+   845→          </CardHeader>
+   846→          <CardContent>
+   847→            <form
+   848→              className="space-y-3"
+   849→              onSubmit={(e) => {
+   850→                e.preventDefault();
+   851→                handleAuth();
+   852→              }}
+   853→            >
+   854→              {lastName ? (
+   855→                <>
+   856→                  <Button
+   857→                    type="button"
+   858→                    className="h-11 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+   859→                    disabled={!connected}
+   860→                    onClick={() => handleAuth(lastName)}
+   861→                  >
+   862→                    {connected
+   863→                      ? `Lanjut chat sebagai “${lastName}”`
+   864→                      : "Menghubungkan…"}
+   865→                  </Button>
+   866→                  <p className="text-center text-xs text-muted-foreground">
+   867→                    Lanjutkan percakapan Anda sebelumnya — riwayat pesan tetap ada
+   868→                  </p>
+   869→                  <div className="flex items-center gap-3" aria-hidden="true">
+   870→                    <span className="h-px flex-1 bg-border" />
+   871→                    <span className="text-xs text-muted-foreground">
+   872→                      atau masuk sebagai nama lain
+   873→                    </span>
+   874→                    <span className="h-px flex-1 bg-border" />
+   875→                  </div>
+   876→                </>
+   877→              ) : null}
+   878→              <div className="space-y-2">
+   879→                <Label htmlFor="messenger-name">
+   880→                  {lastName ? "Nama baru" : "Nama Anda"}
+   881→                </Label>
+   882→                <Input
+   883→                  id="messenger-name"
+   884→                  value={name}
+   885→                  maxLength={MAX_NAME_LENGTH}
+   886→                  placeholder="cth. Budi Santoso"
+   887→                  autoComplete="name"
+   888→                  className="h-11"
+   889→                  onChange={(e) => {
+   890→                    setName(e.target.value);
+   891→                    setAuthError(null);
+   892→                  }}
+   893→                />
+   894→              </div>
+   895→              {needsPin ? (
+   896→                <div className="space-y-2">
+   897→                  <Label htmlFor="messenger-pin">PIN akun</Label>
+   898→                  <Input
+   899→                    id="messenger-pin"
+   900→                    type="password"
+   901→                    inputMode="numeric"
+   902→                    maxLength={8}
+   903→                    value={pinEntry}
+   904→                    placeholder="••••"
+   905→                    className="h-11"
+   906→                    onChange={(e) => {
+   907→                      setPinEntry(e.target.value.replace(/\D/g, ""));
+   908→                      setAuthError(null);
+   909→                    }}
+   910→                  />
+   911→                </div>
+   912→              ) : null}
+   913→              {authError ? <p className="text-sm text-destructive">{authError}</p> : null}
+   914→              <Button
+   915→                type="submit"
+   916→                variant={lastName ? "outline" : "default"}
+   917→                className={
+   918→                  lastName
+   919→                    ? "h-11 w-full"
+   920→                    : "h-11 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+   921→                }
+   922→                disabled={!connected || !name.trim() || (needsPin && !pinEntry)}
+   923→              >
+   924→                {connected ? "Masuk" : "Menghubungkan…"}
+   925→              </Button>
+   926→              {!lastName ? (
+   927→                <p className="text-center text-xs text-muted-foreground">
+   928→                  Nama yang sama = akun yang sama, jadi Anda bisa lanjut chat kapan saja
+   929→                </p>
+   930→              ) : null}
+   931→              {installAvailable ? (
+   932→                <Button
+   933→                  type="button"
+   934→                  variant="outline"
+   935→                  className="h-10 w-full"
+   936→                  onClick={() => promptInstall()}
+   937→                >
+   938→                  📲 Install aplikasi di perangkat ini
+   939→                </Button>
+   940→              ) : null}
+   941→            </form>
+   942→          </CardContent>
+   943→        </Card>
+   944→      </div>
+   945→    );
+   946→  }
+   947→
+   948→  /* ---------------------------------------------------------------- */
+   949→  /* Render: full-screen 1-on-1 chat with Admin                        */
+   950→  /* ---------------------------------------------------------------- */
+   951→  const partnerStatus = partnerTyping
+   952→    ? "sedang mengetik…"
+   953→    : partner?.online
+   954→      ? "Online"
+   955→      : formatLastSeen(partner?.lastSeenAt);
+   956→
+   957→  const query = searchQuery.trim().toLowerCase();
+   958→  const visibleMessages = query
+   959→    ? messages.filter((m) =>
+   960→        (m.type === "text" ? m.content : (m.transcript ?? "")).toLowerCase().includes(query)
+   961→      )
+   962→    : messages;
+   963→
+   964→  return (
+   965→    <div className="flex min-h-0 w-full flex-1 flex-col">
+   966→      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-card">
+   967→        {/* Reconnecting strip */}
+   968→        {!connected ? (
+   969→          <p className="bg-amber-500/10 px-3 py-1.5 text-xs text-amber-600 dark:text-amber-400">
+   970→            Koneksi terputus — mencoba menyambung ulang…
+   971→          </p>
+   972→        ) : null}
+   973→
+   974→        {/* Chat header */}
+   975→        <div className="flex shrink-0 items-center gap-2 border-b p-3">
+   976→          <span className="relative shrink-0">
+   977→            <Avatar className="size-10">
+   978→              <AvatarFallback
+   979→                className={cn(
+   980→                  "text-sm font-semibold text-white",
+   981→                  avatarColorClass(partner?.name ?? "Admin")
+   982→                )}
+   983→              >
+   984→                {initials(partner?.name ?? "Admin")}
+   985→              </AvatarFallback>
+   986→            </Avatar>
+   987→            <span
+   988→              aria-hidden="true"
+   989→              className={cn(
+   990→                "absolute -right-0.5 -bottom-0.5 size-3 rounded-full border-2 border-background",
+   991→                partner?.online ? "bg-emerald-500" : "bg-muted-foreground/40"
+   992→              )}
+   993→            />
+   994→          </span>
+   995→          <div className="min-w-0 flex-1">
+   996→            <p className="truncate font-semibold leading-tight">
+   997→              {partner?.name ?? "Admin"}
+   998→            </p>
+   999→            <p
+  1000→              className={cn(
+  1001→                "truncate text-xs",
+  1002→                partnerTyping || partner?.online
+  1003→                  ? "text-emerald-600"
+  1004→                  : "text-muted-foreground"
+  1005→              )}
+  1006→            >
+  1007→              {partnerStatus}
+  1008→            </p>
+  1009→          </div>
+  1010→          <div className="flex shrink-0 items-center gap-0.5">
+  1011→            <Button
+  1012→              variant="ghost"
+  1013→              size="icon"
+  1014→              className="size-9 text-muted-foreground hover:text-foreground"
+  1015→              aria-label={searchOpen ? "Tutup pencarian" : "Cari pesan"}
+  1016→              onClick={() => {
+  1017→                setSearchOpen((v) => !v);
+  1018→                setSearchQuery("");
+  1019→              }}
+  1020→            >
+  1021→              <Search className="size-4" aria-hidden="true" />
+  1022→            </Button>
+  1023→            <DropdownMenu>
+  1024→              <DropdownMenuTrigger asChild>
+  1025→                <Button
+  1026→                  variant="ghost"
+  1027→                  size="icon"
+  1028→                  className="size-9 text-muted-foreground hover:text-foreground"
+  1029→                  aria-label="Ukuran huruf"
+  1030→                >
+  1031→                  <Type className="size-4" aria-hidden="true" />
+  1032→                </Button>
+  1033→              </DropdownMenuTrigger>
+  1034→              <DropdownMenuContent align="end">
+  1035→                <DropdownMenuLabel>Ukuran huruf</DropdownMenuLabel>
+  1036→                {(
+  1037→                  FONT_SCALE_LABELS
+  1038→                ).map((o) => (
+  1039→                  <DropdownMenuItem
+  1040→                    key={o.key}
+  1041→                    onClick={() => {
+  1042→                      setFontScale(o.key);
+  1043→                      saveFontScale(o.key);
+  1044→                    }}
+  1045→                    className={cn(fontScale === o.key && "bg-accent")}
+  1046→                  >
+  1047→                    {o.label}
+  1048→                  </DropdownMenuItem>
+  1049→                ))}
+  1050→              </DropdownMenuContent>
+  1051→            </DropdownMenu>
+  1052→            <Button
+  1053→              variant="ghost"
+  1054→              size="icon"
+  1055→              className={cn(
+  1056→                "size-9",
+  1057→                hasPin ? "text-emerald-600" : "text-muted-foreground hover:text-foreground"
+  1058→              )}
+  1059→              aria-label="Kunci akun dengan PIN"
+  1060→              onClick={() => setPinOpen(true)}
+  1061→            >
+  1062→              <ShieldCheck className="size-4" aria-hidden="true" />
+  1063→            </Button>
+  1064→            <ThemeToggle />
+  1065→            <Button
+  1066→              variant="ghost"
+  1067→              size="icon"
+  1068→              className="size-9 shrink-0 text-muted-foreground hover:text-destructive"
+  1069→              aria-label="Keluar"
+  1070→              onClick={handleLogout}
+  1071→            >
+  1072→              <LogOut className="size-4" aria-hidden="true" />
+  1073→            </Button>
+  1074→          </div>
+  1075→        </div>
+  1076→
+  1077→        {/* Search bar */}
+  1078→        {searchOpen ? (
+  1079→          <div className="shrink-0 border-b bg-muted/40 p-2">
+  1080→            <div className="relative">
+  1081→              <Search
+  1082→                className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+  1083→                aria-hidden="true"
+  1084→              />
+  1085→              <Input
+  1086→                autoFocus
+  1087→                value={searchQuery}
+  1088→                placeholder="Cari isi pesan…"
+  1089→                aria-label="Cari pesan"
+  1090→                className="h-9 pl-9 pr-8"
+  1091→                onChange={(e) => setSearchQuery(e.target.value)}
+  1092→              />
+  1093→              {searchQuery ? (
+  1094→                <button
+  1095→                  type="button"
+  1096→                  aria-label="Bersihkan pencarian"
+  1097→                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+  1098→                  onClick={() => setSearchQuery("")}
+  1099→                >
+  1100→                  <X className="size-4" />
+  1101→                </button>
+  1102→              ) : null}
+  1103→            </div>
+  1104→            {query ? (
+  1105→              <p className="px-1 pt-1 text-xs text-muted-foreground">
+  1106→                {visibleMessages.length} pesan cocok
+  1107→              </p>
+  1108→            ) : null}
+  1109→          </div>
+  1110→        ) : null}
+  1111→
+  1112→        {/* Pinned message banner (v5) */}
+  1113→        {pinnedMsg ? (
+  1114→          <button
+  1115→            type="button"
+  1116→            className="flex shrink-0 items-center gap-2 border-b bg-amber-500/5 px-3 py-1.5 text-left text-xs"
+  1117→            onClick={() => scrollToMessage(pinnedMsg.id)}
+  1118→          >
+  1119→            <Pin className="size-3.5 shrink-0 text-amber-600" aria-hidden="true" />
+  1120→            <span className="min-w-0 flex-1 truncate text-muted-foreground">
+  1121→              {pinnedMsg.snippet}
+  1122→            </span>
+  1123→          </button>
+  1124→        ) : null}
+  1125→
+  1126→        {/* Messages */}
+  1127→        <div
+  1128→          ref={scrollRef}
+  1129→          className="chat-scroll relative min-h-0 flex-1 overflow-y-auto overscroll-contain"
+  1130→          onScroll={(e) => {
+  1131→            const el = e.currentTarget;
+  1132→            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  1133→            atBottomRef.current = atBottom;
+  1134→            setShowJump(!atBottom);
+  1135→            if (atBottom) setNewCount(0);
+  1136→          }}
+  1137→        >
+  1138→          <div
+  1139→            className="flex w-full flex-col gap-2 p-3 sm:p-4 md:p-6"
+  1140→            style={{ fontSize: FONT_SCALES[fontScale] }}
+  1141→          >
+  1142→            {visibleMessages.length === 0 ? (
+  1143→              query ? (
+  1144→                <p className="py-10 text-center text-sm text-muted-foreground">
+  1145→                  Tidak ada pesan yang cocok dengan “{searchQuery}”.
+  1146→                </p>
+  1147→              ) : (
+  1148→                <p className="py-10 text-center text-sm text-muted-foreground">
+  1149→                  Belum ada pesan. Sapa {partner?.name ?? "Admin"}!
+  1150→                </p>
+  1151→              )
+  1152→            ) : (
+  1153→              visibleMessages.map((m) => (
+  1154→                <ChatBubble
+  1155→                  key={m.id}
+  1156→                  messageId={m.id}
+  1157→                  content={m.content}
+  1158→                  createdAt={m.createdAt}
+  1159→                  side={m.senderId === me.userId ? "right" : "left"}
+  1160→                  type={m.type}
+  1161→                  deleted={!!m.deletedAt}
+  1162→                  read={m.senderId === me.userId && m.id <= adminReadId}
+  1163→                  replyTo={m.replyTo}
+  1164→                  replyAuthor={m.replyTo?.senderId === me.userId ? "Anda" : partner?.name}
+  1165→                  durationMs={m.durationMs}
+  1166→                  transcript={m.transcript}
+  1167→                  reactions={m.reactions}
+  1168→                  myUserId={me.userId}
+  1169→                  edited={!!m.editedAt}
+  1170→                  translation={m.translation}
+  1171→                  translating={translatingId === m.id}
+  1172→                  pinned={pinnedMsg?.id === m.id}
+  1173→                  canEdit={canEditMessage(m, me.userId)}
+  1174→                  onReply={() => setReplyTo(m)}
+  1175→                  onDelete={() => handleDelete(m)}
+  1176→                  onImageOpen={setLightbox}
+  1177→                  onReact={(emoji) => handleReact(m, emoji)}
+  1178→                  onEdit={() => handleEditStart(m)}
+  1179→                  onTranslate={
+  1180→                    m.senderId !== me.userId && m.type === "text" && !m.deletedAt
+  1181→                      ? () => handleTranslate(m)
+  1182→                      : undefined
+  1183→                  }
+  1184→                />
+  1185→              ))
+  1186→            )}
+  1187→          </div>
+  1188→
+  1189→          {/* Jump to latest */}
+  1190→          {showJump ? (
+  1191→            <Button
+  1192→              size="icon"
+  1193→              aria-label={newCount > 0 ? `${newCount} pesan baru` : "Ke pesan terbaru"}
+  1194→              className="absolute bottom-24 right-4 z-10 size-10 rounded-full bg-emerald-600 text-white shadow-lg hover:bg-emerald-600/90"
+  1195→              onClick={() => {
+  1196→                setNewCount(0);
+  1197→                scrollToBottom(true);
+  1198→              }}
+  1199→            >
+  1200→              <ArrowDown className="size-4" aria-hidden="true" />
+  1201→              {newCount > 0 ? (
+  1202→                <span className="absolute -right-1 -top-1 flex size-5 items-center justify-center rounded-full bg-rose-500 text-[10px] font-semibold">
+  1203→                  {newCount > 9 ? "9+" : newCount}
+  1204→                </span>
+  1205→              ) : null}
+  1206→            </Button>
+  1207→          ) : null}
+  1208→        </div>
+  1209→
+  1210→        {/* Typing indicator */}
+  1211→        {partnerTyping ? (
+  1212→          <div className="px-4 pb-1">
+  1213→            <TypingDots label="sedang mengetik…" />
+  1214→          </div>
+  1215→        ) : null}
+  1216→
+  1217→        {/* Send / image errors */}
+  1218→        {sendError || imageError ? (
+  1219→          <p className="px-4 pb-1 text-xs text-destructive">
+  1220→            {imageError ?? "Pesan gagal terkirim, coba lagi."}
+  1221→          </p>
+  1222→        ) : null}
+  1223→
+  1224→        {/* Reply chip */}
+  1225→        {replyTo ? (
+  1226→          <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border-l-2 border-emerald-500 bg-muted/60 px-2 py-1.5 text-xs">
+  1227→            <div className="min-w-0 flex-1">
+  1228→              <p className="font-medium text-emerald-600">
+  1229→                Balas ke {replyTo.senderId === me.userId ? "diri sendiri" : (partner?.name ?? "Admin")}
+  1230→              </p>
+  1231→              <p className="truncate text-muted-foreground">
+  1232→                {replyTo.deletedAt
+  1233→                  ? "Pesan ini dihapus"
+  1234→                  : replyTo.type === "image"
+  1235→                    ? "📷 Foto"
+  1236→                    : replyTo.type === "voice"
+  1237→                      ? "🎤 Pesan suara"
+  1238→                      : replyTo.content}
+  1239→              </p>
+  1240→            </div>
+  1241→            <button
+  1242→              type="button"
+  1243→              aria-label="Batal membalas"
+  1244→              className="text-muted-foreground hover:text-foreground"
+  1245→              onClick={() => setReplyTo(null)}
+  1246→            >
+  1247→              <X className="size-4" />
+  1248→            </button>
+  1249→          </div>
+  1250→        ) : null}
+  1251→
+  1252→        {/* Edit chip (v5) */}
+  1253→        {editing ? (
+  1254→          <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border-l-2 border-amber-500 bg-amber-500/10 px-2 py-1.5 text-xs">
+  1255→            <div className="min-w-0 flex-1">
+  1256→              <p className="font-medium text-amber-600">Mengedit pesan</p>
+  1257→              <p className="truncate text-muted-foreground">{editing.content}</p>
+  1258→            </div>
+  1259→            <button
+  1260→              type="button"
+  1261→              aria-label="Batal mengedit"
+  1262→              className="text-muted-foreground hover:text-foreground"
+  1263→              onClick={handleEditCancel}
+  1264→            >
+  1265→              <X className="size-4" />
+  1266→            </button>
+  1267→          </div>
+  1268→        ) : null}
+  1269→
+  1270→        {/* Pending image chip */}
+  1271→        {pendingImage ? (
+  1272→          <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border bg-muted/60 px-2 py-1.5">
+  1273→            <img
+  1274→              src={pendingImage}
+  1275→              alt="Pratinjau foto"
+  1276→              className="size-10 rounded-md object-cover"
+  1277→            />
+  1278→            <p className="flex-1 text-xs text-muted-foreground">Foto siap dikirim</p>
+  1279→            <button
+  1280→              type="button"
+  1281→              aria-label="Batal kirim foto"
+  1282→              className="text-muted-foreground hover:text-foreground"
+  1283→              onClick={() => setPendingImage(null)}
+  1284→            >
+  1285→              <X className="size-4" />
+  1286→            </button>
+  1287→          </div>
+  1288→        ) : null}
+  1289→
+  1290→        {/* Input row (or recording bar) */}
+  1291→        <div className="relative shrink-0 border-t p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+  1292→          {emojiOpen ? (
+  1293→            <EmojiPicker
+  1294→              onPick={(emoji) => {
+  1295→                setInput((v) => (v + emoji).slice(0, MAX_MESSAGE_LENGTH));
+  1296→                setEmojiOpen(false);
+  1297→              }}
+  1298→              onClose={() => setEmojiOpen(false)}
+  1299→              className="left-2"
+  1300→            />
+  1301→          ) : null}
+  1302→
+  1303→          {recorder.recording ? (
+  1304→            <div className="flex items-center gap-3 rounded-full border border-rose-500/40 bg-rose-500/5 px-4 py-2">
+  1305→              <span className="relative flex size-3 shrink-0">
+  1306→                <span
+  1307→                  aria-hidden="true"
+  1308→                  className="absolute inline-flex size-3 animate-ping rounded-full bg-rose-500 opacity-60"
+  1309→                />
+  1310→                <span aria-hidden="true" className="relative inline-flex size-3 rounded-full bg-rose-500" />
+  1311→              </span>
+  1312→              <span className="shrink-0 text-sm font-medium tabular-nums">
+  1313→                {fmtTimer(recorder.elapsedMs)}
+  1314→              </span>
+  1315→              <span className="flex-1 text-xs text-muted-foreground">Merekam suara…</span>
+  1316→              <Button
+  1317→                variant="ghost"
+  1318→                size="icon"
+  1319→                className="size-9 rounded-full text-muted-foreground hover:text-destructive"
+  1320→                aria-label="Batal rekam"
+  1321→                onClick={() => recorder.cancel()}
+  1322→              >
+  1323→                <X className="size-4" />
+  1324→              </Button>
+  1325→              <Button
+  1326→                size="icon"
+  1327→                className="size-9 rounded-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+  1328→                aria-label="Kirim pesan suara"
+  1329→                onClick={() => void sendVoice()}
+  1330→              >
+  1331→                <SendHorizonal className="size-4" aria-hidden="true" />
+  1332→              </Button>
+  1333→            </div>
+  1334→          ) : (
+  1335→            <div className="flex items-center gap-2">
+  1336→              <input
+  1337→                ref={fileInputRef}
+  1338→                type="file"
+  1339→                accept="image/*"
+  1340→                className="hidden"
+  1341→                aria-label="Pilih foto"
+  1342→                onChange={(e) => {
+  1343→                  void handleImagePick(e.target.files?.[0]);
+  1344→                  e.target.value = "";
+  1345→                }}
+  1346→              />
+  1347→              <Button
+  1348→                variant="ghost"
+  1349→                size="icon"
+  1350→                className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
+  1351→                aria-label="Pilih emoji"
+  1352→                onClick={() => setEmojiOpen((v) => !v)}
+  1353→              >
+  1354→                <Smile className="size-5" aria-hidden="true" />
+  1355→              </Button>
+  1356→              <Button
+  1357→                variant="ghost"
+  1358→                size="icon"
+  1359→                className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
+  1360→                aria-label="Kirim foto"
+  1361→                onClick={() => fileInputRef.current?.click()}
+  1362→              >
+  1363→                <ImagePlus className="size-5" aria-hidden="true" />
+  1364→              </Button>
+  1365→              <Input
+  1366→                value={input}
+  1367→                maxLength={MAX_MESSAGE_LENGTH}
+  1368→                placeholder={editing ? "Simpan hasil edit…" : "Tulis pesan…"}
+  1369→                aria-label={editing ? "Edit pesan" : "Tulis pesan"}
+  1370→                autoComplete="off"
+  1371→                disabled={!connected}
+  1372→                className="h-11 flex-1"
+  1373→                onChange={(e) => handleInputChange(e.target.value)}
+  1374→                onKeyDown={(e) => {
+  1375→                  if (e.key === "Enter" && !e.shiftKey) {
+  1376→                    e.preventDefault();
+  1377→                    handleSend();
+  1378→                  }
+  1379→                  if (e.key === "Escape" && editing) {
+  1380→                    e.preventDefault();
+  1381→                    handleEditCancel();
+  1382→                  }
+  1383→                }}
+  1384→              />
+  1385→              {input.trim() || pendingImage ? (
+  1386→                <Button
+  1387→                  size="icon"
+  1388→                  className="size-11 shrink-0 bg-emerald-600 text-white hover:bg-emerald-600/90"
+  1389→                  aria-label="Kirim"
+  1390→                  disabled={!connected || (!input.trim() && !pendingImage)}
+  1391→                  onClick={() => (pendingImage ? sendImage() : handleSend())}
+  1392→                >
+  1393→                  <SendHorizonal className="size-4" aria-hidden="true" />
+  1394→                </Button>
+  1395→              ) : (
+  1396→                <Button
+  1397→                  variant="ghost"
+  1398→                  size="icon"
+  1399→                  className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
+  1400→                  aria-label="Rekam pesan suara"
+  1401→                  disabled={!connected}
+  1402→                  onClick={() => void recorder.start()}
+  1403→                >
+  1404→                  <Mic className="size-5" aria-hidden="true" />
+  1405→                </Button>
+  1406→              )}
+  1407→            </div>
+  1408→          )}
+  1409→
+  1410→          {/* Mic errors */}
+  1411→          {recorder.error ? (
+  1412→            <div className="mt-1 flex items-center justify-between px-1">
+  1413→              <p className="text-xs text-destructive">{recorder.error}</p>
+  1414→              <button
+  1415→                type="button"
+  1416→                className="text-xs text-muted-foreground hover:text-foreground"
+  1417→                onClick={recorder.clearError}
+  1418→              >
+  1419→                tutup
+  1420→              </button>
+  1421→            </div>
+  1422→          ) : null}
+  1423→        </div>
+  1424→      </div>
+  1425→
+  1426→      {/* PIN dialog — mounted only while open so its state resets */}
+  1427→      {pinOpen ? (
+  1428→        <PinDialog
+  1429→          open
+  1430→          onOpenChange={setPinOpen}
+  1431→          socketRef={socketRef}
+  1432→          hasPin={hasPin}
+  1433→          onHasPin={setHasPin}
+  1434→        />
+  1435→      ) : null}
+  1436→
+  1437→      {/* Image lightbox */}
+  1438→      {lightbox ? (
+  1439→        <div
+  1440→          role="dialog"
+  1441→          aria-label="Lihat foto"
+  1442→          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4"
+  1443→          onClick={() => setLightbox(null)}
+  1444→        >
+  1445→          <img
+  1446→            src={lightbox}
+  1447→            alt="Foto diperbesar"
+  1448→            className="max-h-[90vh] max-w-full rounded-lg object-contain"
+  1449→          />
+  1450→          <Button
+  1451→            variant="secondary"
+  1452→            size="icon"
+  1453→            className="absolute right-4 top-4"
+  1454→            aria-label="Tutup foto"
+  1455→            onClick={() => setLightbox(null)}
+  1456→          >
+  1457→            <X className="size-4" />
+  1458→          </Button>
+  1459→        </div>
+  1460→      ) : null}
+  1461→    </div>
+  1462→  );
+  1463→}
+  1464→

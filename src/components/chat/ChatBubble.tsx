@@ -6,6 +6,7 @@ import {
   Check,
   CheckCheck,
   Copy,
+  Download,
   Languages,
   Pause,
   Pencil,
@@ -17,18 +18,31 @@ import {
 } from "lucide-react";
 
 import type { MessageReaction, ReplyPreview } from "@/lib/chat-types";
-import { formatChatTime } from "@/lib/chat-utils";
+import { formatChatTime, formatFileSize, resolveFileKind } from "@/lib/chat-utils";
 import { cn } from "@/lib/utils";
+import { FileKindIcon } from "@/components/chat/media-viewer";
 
 /** Fixed reaction palette (mirrors the server). */
 const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"] as const;
+
+/** Media yang dibuka di viewer full-screen (foto/PDF; URL + metadata). */
+export interface BubbleMedia {
+  url: string;
+  mimeType?: string;
+  fileName?: string;
+  fileSize?: number;
+}
 
 interface ChatBubbleProps {
   content: string;
   createdAt: string;
   /** left = received (partner), right = sent by current user */
   side: "left" | "right";
-  type?: "text" | "image" | "voice" | "system";
+  type?: "text" | "image" | "voice" | "file" | "system";
+  /** file messages: metadata tampilan (ikon, ukuran, nama). */
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
   /** Partner has read up to this message → ✓✓ on own bubbles. */
   read?: boolean;
   replyTo?: ReplyPreview;
@@ -57,7 +71,8 @@ interface ChatBubbleProps {
   canPin?: boolean;
   onReply?: () => void;
   onDelete?: () => void;
-  onImageOpen?: (src: string) => void;
+  /** Buka media (foto/PDF) di viewer full-screen; jenis lain unduh langsung. */
+  onMediaOpen?: (media: BubbleMedia) => void;
   onReact?: (emoji: string) => void;
   onEdit?: () => void;
   onTranslate?: () => void;
@@ -173,6 +188,9 @@ export function ChatBubble({
   transcript,
   deleted = false,
   messageId,
+  fileName,
+  fileSize,
+  mimeType,
   reactions,
   myUserId,
   edited = false,
@@ -183,7 +201,7 @@ export function ChatBubble({
   canPin = false,
   onReply,
   onDelete,
-  onImageOpen,
+  onMediaOpen,
   onReact,
   onEdit,
   onTranslate,
@@ -225,6 +243,13 @@ export function ChatBubble({
   const isRight = side === "right";
   const canDelete = !deleted && isRight && !!onDelete;
   const reactionList = reactions ?? [];
+  /* file messages: kategori dari mimeType (+ fallback ekstensi nama). */
+  const fileKind = type === "file" ? resolveFileKind(mimeType, fileName) : null;
+  const isFileImage = type === "image" || (type === "file" && fileKind === "image");
+  const fileDownloadUrl =
+    type === "file" && content.startsWith("/api/media/")
+      ? `${content}?download=1${fileName ? `&name=${encodeURIComponent(fileName)}` : ""}`
+      : content;
 
   const handleCopy = () => {
     if (type !== "text" || deleted) return;
@@ -290,15 +315,15 @@ export function ChatBubble({
               <Trash2 className="size-3.5" aria-hidden="true" />
               Pesan ini dihapus
             </p>
-          ) : type === "image" ? (
+          ) : isFileImage ? (
             <img
               src={content}
-              alt="Foto yang dikirim"
+              alt={fileName ?? "Foto yang dikirim"}
               className="max-h-64 w-auto cursor-zoom-in rounded-xl object-cover"
               loading="lazy"
               onClick={(e) => {
                 e.stopPropagation();
-                onImageOpen?.(content);
+                onMediaOpen?.({ url: content, mimeType, fileName, fileSize });
               }}
             />
           ) : type === "voice" ? (
@@ -314,6 +339,97 @@ export function ChatBubble({
                   📝 {transcript}
                 </p>
               ) : null}
+            </div>
+          ) : type === "file" && fileKind === "video" ? (
+            /* Permukaan video tidak men-toggle baris aksi (stopPropagation). */
+            <video
+              src={content}
+              controls
+              preload="metadata"
+              className="max-h-64 w-auto rounded-xl"
+              onClick={(e) => e.stopPropagation()}
+            />
+          ) : type === "file" && fileKind === "audio" ? (
+            <div className="min-w-56 px-1.5 py-1" onClick={(e) => e.stopPropagation()}>
+              <p
+                className={cn(
+                  "mb-1 break-words text-xs font-medium",
+                  isRight ? "text-white" : "text-foreground"
+                )}
+              >
+                {fileName ?? "Audio"}
+              </p>
+              <audio
+                src={content}
+                controls
+                preload="metadata"
+                className="w-56 max-w-full"
+              />
+            </div>
+          ) : type === "file" ? (
+            /* Kartu dokumen (pdf/zip/xlsx/…): ikon + nama + ukuran + Buka/Unduh */
+            <div
+              className={cn(
+                "flex min-w-56 max-w-72 items-center gap-2.5 rounded-xl p-2",
+                isRight ? "bg-white/15" : "bg-muted/70"
+              )}
+            >
+              <span
+                className={cn(
+                  "flex size-10 shrink-0 items-center justify-center rounded-lg",
+                  isRight ? "bg-white/20 text-white" : "bg-background text-muted-foreground"
+                )}
+              >
+                <FileKindIcon mimeType={mimeType} fileName={fileName} className="size-5" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="line-clamp-2 break-words text-sm font-medium leading-snug">
+                  {fileName ?? "File"}
+                </p>
+                <p
+                  className={cn(
+                    "text-[10px] tabular-nums",
+                    isRight ? "text-white/70" : "text-muted-foreground"
+                  )}
+                >
+                  {formatFileSize(fileSize)}
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-0.5">
+                <button
+                  type="button"
+                  className={cn(
+                    "flex h-9 items-center rounded-full px-2.5 text-xs font-medium transition-colors",
+                    isRight
+                      ? "bg-white/20 text-white hover:bg-white/30"
+                      : "bg-primary/10 text-foreground hover:bg-primary/20"
+                  )}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (fileKind === "pdf") {
+                      onMediaOpen?.({ url: content, mimeType, fileName, fileSize });
+                    } else {
+                      window.open(fileDownloadUrl, "_blank", "noopener,noreferrer");
+                    }
+                  }}
+                >
+                  Buka
+                </button>
+                <a
+                  href={fileDownloadUrl}
+                  download={fileName ?? ""}
+                  aria-label="Unduh file"
+                  className={cn(
+                    "flex size-9 items-center justify-center rounded-full transition-colors",
+                    isRight
+                      ? "text-white/80 hover:bg-white/20"
+                      : "text-muted-foreground hover:bg-accent"
+                  )}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <Download className="size-4" aria-hidden="true" />
+                </a>
+              </div>
             </div>
           ) : (
             <p className="whitespace-pre-wrap break-words">{content}</p>

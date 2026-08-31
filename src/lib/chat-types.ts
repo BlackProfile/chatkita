@@ -11,10 +11,16 @@
  *     (enforced server-side via participant checks).
  *   - The Admin (owner) sees ALL conversations in one list, like
  *     WhatsApp Web.
- *   - Messages: text | image | voice | system (+ replies, edit, delete-
- *     for-everyone, emoji reactions, live ✓✓ read receipts, pinned
+ *   - Messages: text | image | voice | file | system (+ replies, edit,
+ *     delete-for-everyone, emoji reactions, live ✓✓ read receipts, pinned
  *     messages, archive, voice-note transcription, on-demand translate,
- *     Web Push notifications).
+ *     Web Push notifications, document/video/audio file sharing).
+ *   - Images & voice notes travel in-band as data URLs (size-capped).
+ *   - Files (docs, video, audio, archives, …) are uploaded out-of-band
+ *     via the Next.js route POST /api/upload (stored under db/media/ on
+ *     disk) and the message carries the public URL /api/media/<name>
+ *     plus fileName/fileSize/mimeType metadata. GET /api/media/<name>
+ *     streams the bytes back (inline preview; ?download=1 for download).
  *
  * NO customer-service tooling lives here anymore: no operating hours,
  * no quick-reply templates, no AI auto-reply/summary/suggestions, no
@@ -67,7 +73,7 @@ export interface ChatUser {
   hasPin?: boolean;
 }
 
-export type MessageContentType = "text" | "image" | "voice" | "system";
+export type MessageContentType = "text" | "image" | "voice" | "file" | "system";
 
 /** Grouped emoji reactions on one message. */
 export interface MessageReaction {
@@ -84,7 +90,7 @@ export interface ReplyPreview {
   type: string;
 }
 
-/** A chat message. Media content = data URL; deleted → content "". */
+/** A chat message. Media content = data URL or /api/media URL; deleted → content "". */
 export interface ChatMessage {
   id: number;
   conversationId: string;
@@ -107,6 +113,12 @@ export interface ChatMessage {
   translation?: string;
   /** Emoji reactions (may arrive later via message:updated). */
   reactions?: MessageReaction[];
+  /** file messages: original file name (display only). */
+  fileName?: string;
+  /** file messages: size in bytes. */
+  fileSize?: number;
+  /** file messages: MIME type (e.g. application/pdf, video/mp4). */
+  mimeType?: string;
 }
 
 /** A chat partner including live presence info. */
@@ -276,13 +288,18 @@ export type AckOf<T> = T | ChatErrorAck;
 //                     Both roles; participant-gated; marks read.
 //
 // messages:send     { conversationId: string; content: string;
-//                     type?: 'text'|'image'|'voice';
-//                     replyToId?: number; durationMs?: number }
+//                     type?: 'text'|'image'|'voice'|'file';
+//                     replyToId?: number; durationMs?: number;
+//                     fileName?: string; fileSize?: number; mimeType?: string }
 //                     → MessageAck | ChatErrorAck
 //                     Both roles; participant-gated. Sender auto-reads.
 //                     image/voice content = data URL (size-capped server-
 //                     side). Voice notes are transcribed asynchronously
 //                     (transcript arrives via message:updated).
+//                     file content = /api/media/<name> URL obtained from
+//                     POST /api/upload; fileName (1–255 chars), mimeType
+//                     (type/subtype) and fileSize (≤ 25 MiB) are required
+//                     metadata validated server-side.
 //
 // messages:delete   { messageId: number }
 //                     → { ok: true } | ChatErrorAck
