@@ -12,7 +12,6 @@ import {
   SendHorizonal,
   ShieldCheck,
   Smile,
-  Star,
   Type,
   X,
 } from "lucide-react";
@@ -47,13 +46,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { useVoiceRecorder } from "@/hooks/use-voice-recorder";
 import { createChatSocket } from "@/lib/chat-socket";
 import { playBlip, setTitleUnread } from "@/lib/chat-notify";
@@ -74,8 +66,7 @@ import {
   type MessageUpdatePayload,
   type PartnerInfo,
   type PinUpdatePayload,
-  type PublicSettings,
-  type RatingAck,
+  type PublicSettingsAck,
   type SetPinAck,
   type TranslateAck,
   type UserAuthAck,
@@ -182,77 +173,6 @@ const fmtTimer = (ms: number) => {
   const total = Math.floor(ms / 1000);
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 };
-
-/* ------------------------------------------------------------------ */
-/* Star rating card (v5 — rendered for rating_request system notices)  */
-/* ------------------------------------------------------------------ */
-
-function RatingCard({
-  socketRef,
-  conversationId,
-}: {
-  socketRef: React.RefObject<Socket | null>;
-  conversationId: string;
-}) {
-  const [hover, setHover] = useState(0);
-  const [sending, setSending] = useState(false);
-  const [done, setDone] = useState(false);
-
-  if (done) {
-    return (
-      <div className="flex justify-center">
-        <p className="rounded-full bg-emerald-600/10 px-4 py-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-400">
-          ⭐ Terima kasih, penilaian Anda tercatat!
-        </p>
-      </div>
-    );
-  }
-
-  const submit = (stars: number) => {
-    const socket = socketRef.current;
-    if (!socket || sending) return;
-    setSending(true);
-    socket.emit(
-      "rating:submit",
-      { conversationId, stars },
-      (res: AckOf<RatingAck>) => {
-        setSending(false);
-        if (res.ok) setDone(true);
-      }
-    );
-  };
-
-  return (
-    <div className="flex justify-center">
-      <div className="rounded-xl border bg-card px-4 py-3 text-center shadow-sm">
-        <p className="text-sm font-medium">Bagaimana layanan kami?</p>
-        <p className="mb-2 text-xs text-muted-foreground">Ketuk bintang untuk menilai</p>
-        <div className="flex justify-center gap-1" role="group" aria-label="Beri penilaian bintang">
-          {[1, 2, 3, 4, 5].map((n) => (
-            <button
-              key={n}
-              type="button"
-              disabled={sending}
-              aria-label={`Beri ${n} bintang`}
-              className="rounded-full p-1 transition-transform hover:scale-110 disabled:opacity-50"
-              onMouseEnter={() => setHover(n)}
-              onMouseLeave={() => setHover(0)}
-              onClick={() => submit(n)}
-            >
-              <Star
-                className={cn(
-                  "size-7",
-                  (hover || 5) >= n ? "fill-amber-400 text-amber-400" : "text-muted-foreground/40"
-                )}
-                aria-hidden="true"
-              />
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /* ------------------------------------------------------------------ */
 /* PIN dialog (protect this account with a 4–8 digit code)             */
@@ -396,8 +316,6 @@ export function Messenger() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [sendError, setSendError] = useState(false);
-  // v5 — pre-login public config (pre-chat topics come from the server).
-  const [loginTopics, setLoginTopics] = useState<string[]>([]);
 
   const [adminReadId, setAdminReadId] = useState(0);
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
@@ -410,13 +328,11 @@ export function Messenger() {
   const [newCount, setNewCount] = useState(0);
   const [lightbox, setLightbox] = useState<string | null>(null);
 
-  // v5 — menu chips / pre-chat topic / pinned banner / edit / font / push
-  const [publicSettings, setPublicSettings] = useState<PublicSettings | null>(null);
-  const [menuChipsOpen, setMenuChipsOpen] = useState(true);
+  // Web Push VAPID public key (null = push unavailable).
+  const [pushPublicKey, setPushPublicKey] = useState<string | null>(null);
   const [pinnedMsg, setPinnedMsg] = useState<{ id: number; snippet: string } | null>(null);
   const [editing, setEditing] = useState<ChatMessage | null>(null);
   const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
-  const [topic, setTopic] = useState("");
   const [installAvailable, setInstallAvailable] = useState(false);
   const [translatingId, setTranslatingId] = useState<number | null>(null);
 
@@ -470,10 +386,11 @@ export function Messenger() {
 
     socket.on("connect", () => {
       setConnected(true);
-      // v5 — pre-login config (pre-chat topics for the login card).
+      // Pre-login: fetch the Web Push VAPID public key (v6 shape:
+      // { ok, pushPublicKey }) so it is ready right after login.
       if (!meRef.current) {
-        socket.emit("public:settings", {}, (res: { ok: boolean; publicSettings?: PublicSettings }) => {
-          if (res.ok && res.publicSettings) setLoginTopics(res.publicSettings.preChatTopics);
+        socket.emit("public:settings", {}, (res: AckOf<PublicSettingsAck>) => {
+          if (res.ok && res.pushPublicKey) setPushPublicKey(res.pushPublicKey);
         });
       }
       const current = meRef.current;
@@ -499,14 +416,14 @@ export function Messenger() {
             setPartner(res.partner);
             setMessages(res.messages);
             setAdminReadId(res.partnerLastReadId);
-            // v5 — public config, pinned banner, draft, push opt-in.
-            setPublicSettings(res.publicSettings);
+            // Push opt-in + pinned banner + draft (the ack carries the
+            // VAPID key directly in the v6 contract).
+            setPushPublicKey(res.pushPublicKey || null);
             setPinnedMsg(
               res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null
             );
             setInput(readDraft("user", res.user.id));
-            setMenuChipsOpen(true);
-            void subscribeToPush(socket, res.publicSettings.pushPublicKey);
+            void subscribeToPush(socket, res.pushPublicKey);
           } else {
             // Stored login no longer valid — drop it, back to the form.
             window.localStorage.removeItem(CHAT_SESSION_KEY);
@@ -548,14 +465,8 @@ export function Messenger() {
       setPinnedMsg(p.pinned ? { id: p.pinned.id, snippet: p.pinned.snippet } : null);
     });
 
-    // v5 — live public config (admin enabled the chatbot menu etc.).
-    socket.on("public:settings:update", (s: PublicSettings) => {
-      setPublicSettings(s);
-      setLoginTopics(s.preChatTopics);
-    });
-
     // Append messages ONLY here; skip if the last stored message already
-    // has the same id (history-replacement vs broadcast race).
+    // has the same id (history-replacement vs live-event race).
     socket.on("message:new", (msg: ChatMessage) => {
       setMessages((prev) => {
         if (prev.some((m) => m.id === msg.id)) return prev;
@@ -617,7 +528,7 @@ export function Messenger() {
         }
         setPartnerTyping(isTyping);
         if (isTyping) {
-          // Auto-clear after 8s in case a stop event is missed (AI path).
+          // Auto-clear after 8s in case a stop event is missed.
           partnerTypingTimerRef.current = setTimeout(() => {
             partnerTypingTimerRef.current = null;
             setPartnerTyping(false);
@@ -698,8 +609,6 @@ export function Messenger() {
       {
         name: trimmed,
         pin: needsPin && pinEntry ? pinEntry : undefined,
-        // v5 — optional pre-chat topic (first login only).
-        topic: topic || undefined,
       },
       (res: AckOf<UserAuthAck>) => {
         if (res.ok) {
@@ -717,12 +626,10 @@ export function Messenger() {
           setPartner(res.partner);
           setMessages(res.messages);
           setAdminReadId(res.partnerLastReadId);
-          setPublicSettings(res.publicSettings);
+          setPushPublicKey(res.pushPublicKey || null);
           setPinnedMsg(res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null);
           setInput(readDraft("user", res.user.id));
-          setMenuChipsOpen(true);
-          setTopic("");
-          void subscribeToPush(socket, res.publicSettings.pushPublicKey);
+          void subscribeToPush(socket, res.pushPublicKey || pushPublicKey || "");
         } else {
           if (res.error === "PIN_REQUIRED" || res.error === "INVALID_PIN") {
             setNeedsPin(true);
@@ -763,7 +670,7 @@ export function Messenger() {
     setReplyTo(null);
     setEditing(null);
     setPinnedMsg(null);
-    setPublicSettings(null);
+    setPushPublicKey(null);
     setPendingImage(null);
     setSearchOpen(false);
     setSearchQuery("");
@@ -968,23 +875,6 @@ export function Messenger() {
                       setAuthError(null);
                     }}
                   />
-                </div>
-              ) : null}
-              {!lastName && loginTopics.length > 0 ? (
-                <div className="space-y-2">
-                  <Label htmlFor="messenger-topic">Topik (opsional)</Label>
-                  <Select value={topic} onValueChange={setTopic}>
-                    <SelectTrigger id="messenger-topic" className="h-11 w-full">
-                      <SelectValue placeholder="Pilih kebutuhan Anda…" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {loginTopics.map((t) => (
-                        <SelectItem key={t} value={t}>
-                          {t}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
                 </div>
               ) : null}
               {authError ? <p className="text-sm text-destructive">{authError}</p> : null}
@@ -1226,43 +1116,39 @@ export function Messenger() {
                 </p>
               )
             ) : (
-              visibleMessages.map((m) =>
-                m.type === "system" && m.kind === "rating_request" ? (
-                  <RatingCard key={m.id} socketRef={socketRef} conversationId={m.conversationId} />
-                ) : (
-                  <ChatBubble
-                    key={m.id}
-                    messageId={m.id}
-                    content={m.content}
-                    createdAt={m.createdAt}
-                    side={m.senderId === me.userId ? "right" : "left"}
-                    type={m.type}
-                    deleted={!!m.deletedAt}
-                    read={m.senderId === me.userId && m.id <= adminReadId}
-                    replyTo={m.replyTo}
-                    replyAuthor={m.replyTo?.senderId === me.userId ? "Anda" : partner?.name}
-                    durationMs={m.durationMs}
-                    transcript={m.transcript}
-                    reactions={m.reactions}
-                    myUserId={me.userId}
-                    edited={!!m.editedAt}
-                    translation={m.translation}
-                    translating={translatingId === m.id}
-                    pinned={pinnedMsg?.id === m.id}
-                    canEdit={canEditMessage(m, me.userId)}
-                    onReply={() => setReplyTo(m)}
-                    onDelete={() => handleDelete(m)}
-                    onImageOpen={setLightbox}
-                    onReact={(emoji) => handleReact(m, emoji)}
-                    onEdit={() => handleEditStart(m)}
-                    onTranslate={
-                      m.senderId !== me.userId && m.type === "text" && !m.deletedAt
-                        ? () => handleTranslate(m)
-                        : undefined
-                    }
-                  />
-                )
-              )
+              visibleMessages.map((m) => (
+                <ChatBubble
+                  key={m.id}
+                  messageId={m.id}
+                  content={m.content}
+                  createdAt={m.createdAt}
+                  side={m.senderId === me.userId ? "right" : "left"}
+                  type={m.type}
+                  deleted={!!m.deletedAt}
+                  read={m.senderId === me.userId && m.id <= adminReadId}
+                  replyTo={m.replyTo}
+                  replyAuthor={m.replyTo?.senderId === me.userId ? "Anda" : partner?.name}
+                  durationMs={m.durationMs}
+                  transcript={m.transcript}
+                  reactions={m.reactions}
+                  myUserId={me.userId}
+                  edited={!!m.editedAt}
+                  translation={m.translation}
+                  translating={translatingId === m.id}
+                  pinned={pinnedMsg?.id === m.id}
+                  canEdit={canEditMessage(m, me.userId)}
+                  onReply={() => setReplyTo(m)}
+                  onDelete={() => handleDelete(m)}
+                  onImageOpen={setLightbox}
+                  onReact={(emoji) => handleReact(m, emoji)}
+                  onEdit={() => handleEditStart(m)}
+                  onTranslate={
+                    m.senderId !== me.userId && m.type === "text" && !m.deletedAt
+                      ? () => handleTranslate(m)
+                      : undefined
+                  }
+                />
+              ))
             )}
           </div>
 
@@ -1299,35 +1185,6 @@ export function Messenger() {
           <p className="px-4 pb-1 text-xs text-destructive">
             {imageError ?? "Pesan gagal terkirim, coba lagi."}
           </p>
-        ) : null}
-
-        {/* Chatbot menu chips (v5) — instant self-service answers */}
-        {!editing && menuChipsOpen &&
-        publicSettings?.chatMenuEnabled &&
-        (publicSettings.chatMenuItems?.length ?? 0) > 0 ? (
-          <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto px-3 pb-1.5 chat-scroll">
-            <span className="shrink-0 text-xs text-muted-foreground">📋 Menu:</span>
-            {publicSettings.chatMenuItems.map((item) => (
-              <button
-                key={item.label}
-                type="button"
-                className="shrink-0 rounded-full border border-emerald-600/40 bg-emerald-600/5 px-3 py-1 text-xs text-emerald-700 hover:bg-emerald-600/10 dark:text-emerald-400"
-                onClick={() => {
-                  if (emitMessage(item.label, "text")) setInput("");
-                }}
-              >
-                {item.label}
-              </button>
-            ))}
-            <button
-              type="button"
-              aria-label="Sembunyikan menu"
-              className="shrink-0 text-muted-foreground hover:text-foreground"
-              onClick={() => setMenuChipsOpen(false)}
-            >
-              <X className="size-3.5" />
-            </button>
-          </div>
         ) : null}
 
         {/* Reply chip */}

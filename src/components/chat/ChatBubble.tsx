@@ -26,9 +26,9 @@ const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"] as co
 interface ChatBubbleProps {
   content: string;
   createdAt: string;
-  /** left = received (admin/customer partner), right = sent by current user */
+  /** left = received (partner), right = sent by current user */
   side: "left" | "right";
-  type?: "text" | "image" | "voice" | "system" | "broadcast";
+  type?: "text" | "image" | "voice" | "system";
   /** Partner has read up to this message → ✓✓ on own bubbles. */
   read?: boolean;
   replyTo?: ReplyPreview;
@@ -218,28 +218,6 @@ export function ChatBubble({
         <p className="max-w-[85%] rounded-full bg-muted/70 px-3.5 py-1.5 text-center text-[11px] leading-relaxed text-muted-foreground">
           {content}
         </p>
-      </motion.div>
-    );
-  }
-
-  /* Broadcast: prominent centered card (📢 pengumuman admin ke semua user). */
-  if (type === "broadcast") {
-    return (
-      <motion.div
-        initial={{ opacity: 0, y: 6 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.15 }}
-        className="flex justify-center"
-      >
-        <div className="max-w-[92%] rounded-xl border border-amber-500/40 bg-amber-500/10 px-3.5 py-2 sm:max-w-[80%]">
-          <p className="mb-0.5 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">
-            📢 Pengumuman
-          </p>
-          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{content}</p>
-          <p className="mt-1 text-right text-[10px] text-muted-foreground">
-            {formatChatTime(createdAt)}
-          </p>
-        </div>
       </motion.div>
     );
   }

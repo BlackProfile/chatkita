@@ -23,3 +23,35 @@ Task: Build ChatKita frontend (customer chat + admin panel, single route)
 
 ## Protocol assumptions
 None beyond the Task 1 contract. Verified against Task 2-a notes: `user:typing` = {sessionId, isTyping}, `admin:typing` = {isTyping}, chat:message goes to session room + admins room. Names 1–40 / messages 1–1000 match client maxLengths (MAX_NAME_LENGTH / MAX_MESSAGE_LENGTH).
+
+---
+
+# Task 2-b (round 2) — full-stack-developer — Pure-messenger cleanup (frontend)
+
+Task: Remove ALL customer-service features from the ChatKita frontend (align UI to frozen v6 chat-types.ts pure-messenger contract). Backend cleanup owned by Task 2-a (mini-services/** untouched).
+
+## Files deleted
+- `src/components/chat/admin-settings-dialog.tsx` — operating hours / AI assistant / quick replies / SLA / chatbot menu / pre-chat topics settings UI
+- `src/components/chat/admin-stats-dialog.tsx` — statistics + weekly chart + ratings summary
+
+## Files modified
+- `src/components/chat/AdminPanel.tsx` (2143 → 1598 lines)
+- `src/components/chat/Messenger.tsx` (1573 → 1430 lines)
+- `src/components/chat/ChatBubble.tsx` — broadcast branch + union member removed
+- `src/lib/chat-utils.ts` — waitingMinutes (SLA) removed; broadcast branch in messagePreview removed
+- `src/lib/chat-socket.ts` — comment-only ("customer chat" → "user chat"); plumbing untouched
+- `worklog.md` — appended Task 2-b entry
+
+## Removals (per file)
+- AdminPanel: LABEL_META + label badges + partner.topic badge; label dropdown (admin:updateuser); note dialog (admin:getnote / admin:updateuser); settings gear + AdminSettingsDialog (admin:getsettings ×2); stats button + AdminStatsDialog; SLA (waitingMinutes/slaMinutes/waitingMap/30s tick/red ⏰ badge/rose row bg/alertedRef blips); quick replies + AI suggestion chips; AI suggest/summary (ai:suggest, ai:summary, summary strip, Sparkles buttons); export (exportCsv, printTranscript, conversation:export ×2, menu items); broadcast (Megaphone button, dialog, broadcast:send, 4 state vars, Textarea import); unused icons/types pruned
+- Messenger: RatingCard + rating:submit + RatingAck + m.kind "rating_request" branch; pre-chat topics (loginTopics/topic/Select UI/user:auth topic field); chatbot menu chips (publicSettings.chatMenuEnabled) + menuChipsOpen; publicSettings state → `pushPublicKey: string | null`; public:settings ack → { ok, pushPublicKey } (AckOf<PublicSettingsAck>); user:auth ack pushPublicKey used directly for subscribeToPush; public:settings:update listener removed
+- Wording: QR dialog now "Orang lain dapat memindai QR ini (atau membuka tautannya) untuk mulai chat dengan Anda."; grep-verified zero pelanggan/layanan/customer/CRM/tiket/SLA/penilaian in UI copy
+
+## Kept (messenger core)
+Login card (name/last-name prefill/PIN/PWA install), PinDialog, logout, ✓/✓✓, unread divider (admin), jump-to-latest, search, lightbox, reply/edit(15m)/delete/react/translate/pin, voice notes + transcripts + timer, images, emoji picker, drafts, copy, presence/typing, blip + tab title, font menu, theme toggle; Admin list/search/unread/Archived tab/archive/QR share/push/mobile back; createChatSocket XTransformPort=3003 untouched.
+
+## Verification
+- `bun run lint`: CLEAN (0 errors, 0 warnings)
+- `bunx tsc --noEmit` (src/ scope): 0 type errors vs frozen v6 contract
+- Dev server: recompiled ✓ after edits; transient Module-not-found (deleted dialogs, mid-edit window) cleared; GET / → 200
+- Contract notes: stale v5 imports/fields detached (PublicSettings, RatingAck, BroadcastAck, ChatStats, ExportAck, ServiceSettings, SettingsAck, SuggestAck, SummaryAck, UpdateUserAck, UserLabel; m.kind, partner.label/topic/note, res.publicSettings). No v6 contract changes needed.

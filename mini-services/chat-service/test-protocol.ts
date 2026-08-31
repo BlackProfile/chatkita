@@ -1,6 +1,7 @@
 /**
- * Protocol test for the ChatKita chat-service (v3 model: every user
- * chats 1-on-1 with the Admin; users are isolated from each other).
+ * Protocol test for the ChatKita chat-service (v6 model: pure private
+ * messenger — every user chats 1-on-1 with the Admin; users are isolated
+ * from each other; no customer-service tooling exists anymore).
  *
  * Run directly against 127.0.0.1:3003 (test-only, bypasses the gateway):
  *   cd mini-services/chat-service && bun test-protocol.ts
@@ -77,10 +78,22 @@ const waitFor = <T>(socket: Socket, event: string, timeoutMs = 4000): Promise<T>
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
+  console.log("— 0. public:settings (pre-login push config) —");
+  const probe = await connect();
+  const pub = await emitAck<any>(probe, "public:settings", {});
+  ok(
+    "p1 public:settings → { ok, pushPublicKey }",
+    pub.ok === true && typeof pub.pushPublicKey === "string"
+  );
+  ok("p2 no legacy nested publicSettings", pub.publicSettings === undefined);
+  probe.disconnect();
+
   console.log("— a. user auth (1-on-1 with Admin) —");
   const budi = await connect();
   const a1 = await emitAck<any>(budi, "user:auth", { name: "Budi Test" });
   ok("a1 user:auth ok", a1.ok === true);
+  ok("a1b ack has string pushPublicKey", typeof a1.pushPublicKey === "string");
+  ok("a1c no legacy publicSettings in ack", a1.publicSettings === undefined);
   ok(
     "a2 conversationId present",
     typeof a1.conversationId === "string" && a1.conversationId.length > 0

@@ -3,13 +3,23 @@
  * mini service (socket.io, port 3003). DO NOT change event names or
  * payload shapes without updating BOTH sides.
  *
- * Model (v4 — "Telegram-style, private 1-on-1 with Admin"):
- *   Every human user chats with exactly ONE partner: the Admin.
+ * Model (v6 — pure private messenger, like WhatsApp/Telegram):
+ *   Every person who opens the app logs in with a name and gets a
+ *   private 1-on-1 chat with the Admin account (the app owner), just
+ *   like messaging any contact.
  *   - A user NEVER sees other users, their presence, or their messages
  *     (enforced server-side via participant checks).
- *   - The Admin sees ALL users' conversations in one list.
- *   - Messages: text | image | voice | system (+ replies, delete-for-
- *     everyone, live ✓✓ read receipts, AI transcript on voice notes).
+ *   - The Admin (owner) sees ALL conversations in one list, like
+ *     WhatsApp Web.
+ *   - Messages: text | image | voice | system (+ replies, edit, delete-
+ *     for-everyone, emoji reactions, live ✓✓ read receipts, pinned
+ *     messages, archive, voice-note transcription, on-demand translate,
+ *     Web Push notifications).
+ *
+ * NO customer-service tooling lives here anymore: no operating hours,
+ * no quick-reply templates, no AI auto-reply/summary/suggestions, no
+ * SLA alerts, no chatbot menu, no pre-chat form, no star ratings, no
+ * broadcast, no CRM labels/notes, no stats, no CSV/PDF export.
  */
 
 /** Fixed id of the admin account (seeded by the server on boot). */
@@ -57,12 +67,7 @@ export interface ChatUser {
   hasPin?: boolean;
 }
 
-export type MessageContentType =
-  | "text"
-  | "image"
-  | "voice"
-  | "system"
-  | "broadcast";
+export type MessageContentType = "text" | "image" | "voice" | "system";
 
 /** Grouped emoji reactions on one message. */
 export interface MessageReaction {
@@ -96,14 +101,12 @@ export interface ChatMessage {
   transcript?: string;
   /** Soft delete marker (content is redacted server-side). */
   deletedAt?: string;
-  /** v5 — set when the sender edited their text message. */
+  /** Set when the sender edited their text message. */
   editedAt?: string;
-  /** v5 — Indonesian translation fetched on demand. */
+  /** Indonesian translation fetched on demand. */
   translation?: string;
-  /** v5 — emoji reactions (may arrive later via message:updated). */
+  /** Emoji reactions (may arrive later via message:updated). */
   reactions?: MessageReaction[];
-  /** v5 — special system card marker (rating_request / rating_thanks). */
-  kind?: string;
 }
 
 /** A chat partner including live presence info. */
@@ -111,13 +114,7 @@ export type PartnerInfo = ChatUser & {
   online: boolean;
   /** ISO timestamp of the last time this user was online (null if unknown). */
   lastSeenAt: string | null;
-  /** Admin-set CRM label (admin side of the overview list). */
-  label?: string | null;
-  /** v5 — topic chosen on the pre-chat form (admin side). */
-  topic?: string | null;
 };
-
-export type UserLabel = "new" | "priority" | "vip";
 
 /**
  * One conversation as seen by the requesting side.
@@ -139,54 +136,22 @@ export interface ConversationOverview {
   unread: number;
   /** How far the PARTNER has read → ✓✓ on my own bubbles. */
   partnerLastReadId: number;
-  /** v5 — archived conversations live in their own admin tab. */
+  /** Archived conversations live in their own tab (WhatsApp-style). */
   archived?: boolean;
-  /** v5 — pinned message banner (both sides). */
+  /** Pinned message banner (both sides). */
   pinnedMessageId?: number | null;
   pinned?: { id: number; senderId: string; snippet: string; type: string } | null;
-}
-
-/** Admin-configurable service settings (operating hours / AI / templates). */
-export interface ServiceSettings {
-  hours: { enabled: boolean; start: string; end: string; days: number[] };
-  aiEnabled: boolean;
-  aiKb: string;
-  outsideMsg: string;
-  quickReplies: { label: string; text: string }[];
-  /** v5 — admin alert when a user message waits longer than this. */
-  slaMinutes: number;
-  /** v5 — chatbot menu on the user side (instant mapped answers). */
-  chatMenuEnabled: boolean;
-  chatMenuItems: { label: string; answer: string }[];
-  /** v5 — comma-separated pre-chat topic options ("" = form off). */
-  preChatTopics: string;
-}
-
-/** Settings exposed to logged-in users (public side, v5). */
-export interface PublicSettings {
-  chatMenuEnabled: boolean;
-  chatMenuItems: { label: string; answer: string }[];
-  preChatTopics: string[];
-  pushPublicKey: string;
-}
-
-export interface ChatStats {
-  totalUsers: number;
-  totalMessages: number;
-  messagesToday: number;
-  activeToday: number;
-  /** Average admin response time in minutes (last 7 days), null if no data. */
-  avgResponseMin: number | null;
-  /** v5 — messages per day over the last 7 days (two-way). */
-  daily: { date: string; user: number; admin: number }[];
-  /** v5 — average star rating + number of ratings. */
-  avgRating: number | null;
-  ratingCount: number;
 }
 
 /* ------------------------------------------------------------------ */
 /* Ack payloads                                                        */
 /* ------------------------------------------------------------------ */
+
+/** Ack payload returned by `public:settings` (pre-login push config). */
+export interface PublicSettingsAck {
+  ok: true;
+  pushPublicKey: string;
+}
 
 /** Ack payload returned by `user:auth`. */
 export interface UserAuthAck {
@@ -200,9 +165,9 @@ export interface UserAuthAck {
   messages: ChatMessage[];
   /** How far the admin has read → ✓✓ on my sent messages. */
   partnerLastReadId: number;
-  /** v5 — public config (menu chips, pre-chat topics, VAPID key). */
-  publicSettings: PublicSettings;
-  /** v5 — pinned banner state. */
+  /** VAPID public key for Web Push ("" when push is unavailable). */
+  pushPublicKey: string;
+  /** Pinned banner state. */
   pinnedMessageId?: number | null;
   pinned?: { id: number; senderId: string; snippet: string; type: string } | null;
 }
@@ -219,9 +184,9 @@ export interface HistoryAck {
   messages: ChatMessage[];
   partner: PartnerInfo;
   partnerLastReadId: number;
-  /** v5 — my read cursor BEFORE this call → "new messages" divider. */
+  /** My read cursor BEFORE this call → "new messages" divider. */
   lastReadBefore: number;
-  /** v5 — pinned banner state. */
+  /** Pinned banner state. */
   pinnedMessageId?: number | null;
   pinned?: { id: number; senderId: string; snippet: string; type: string } | null;
 }
@@ -237,62 +202,9 @@ export interface SetPinAck {
   hasPin: boolean;
 }
 
-export interface UpdateUserAck {
-  ok: true;
-  userId: string;
-  label: string | null;
-  note: string | null;
-}
-
-export interface NoteAck {
-  ok: true;
-  userId: string;
-  label: string | null;
-  note: string | null;
-}
-
-export interface SettingsAck {
-  ok: true;
-  settings: ServiceSettings;
-}
-
-export interface StatsAck {
-  ok: true;
-  stats: ChatStats;
-}
-
-export interface SuggestAck {
-  ok: true;
-  suggestions: string[];
-}
-
-export interface SummaryAck {
-  ok: true;
-  summary: string;
-}
-
-/* v5 acks */
-
 export interface TranslateAck {
   ok: true;
   translation: string | null;
-}
-
-export interface ExportAck {
-  ok: true;
-  conversationId: string;
-  partnerName: string;
-  messages: ChatMessage[];
-}
-
-export interface BroadcastAck {
-  ok: true;
-  sent: number;
-}
-
-export interface RatingAck {
-  ok: true;
-  stars: number;
 }
 
 export interface PinUpdatePayload {
@@ -328,9 +240,6 @@ export type ChatErrorCode =
   | "UNAUTHORIZED"
   | "PIN_REQUIRED"
   | "INVALID_PIN"
-  | "INVALID_LABEL"
-  | "INVALID_NOTE"
-  | "AI_UNAVAILABLE"
   | "SERVER_ERROR";
 
 export interface ChatErrorAck {
@@ -344,6 +253,9 @@ export type AckOf<T> = T | ChatErrorAck;
 /* ------------------------------------------------------------------ */
 /* Client → Server events (ack via callback where listed)              */
 /* ------------------------------------------------------------------ */
+//
+// public:settings    {} → PublicSettingsAck | ChatErrorAck
+//                      Pre-login fetch of the Web Push VAPID public key.
 //
 // user:auth         { name: string; userId?: string; pin?: string }
 //                     → UserAuthAck | ChatErrorAck
@@ -377,6 +289,19 @@ export type AckOf<T> = T | ChatErrorAck;
 //                     Sender-only soft delete; content redacted for
 //                     everyone; broadcast as message:updated.
 //
+// messages:edit     { messageId: number; content: string }
+//                     → { ok: true } | ChatErrorAck
+//                     Sender-only, text messages, 15-minute window;
+//                     broadcast as message:updated.
+//
+// message:react     { messageId: number; emoji: string }
+//                     → { ok: true } | ChatErrorAck
+//                     Toggle the caller's reaction on a message.
+//                     Empty emoji removes the caller's reaction.
+//
+// message:translate { messageId: number } → TranslateAck | ChatErrorAck
+//                     On-demand Indonesian translation (AI, best effort).
+//
 // messages:read     { conversationId: string }                 (no ack)
 //
 // typing            { conversationId: string; isTyping: boolean } (no ack)
@@ -384,19 +309,10 @@ export type AckOf<T> = T | ChatErrorAck;
 // user:setpin       { pin: string | null }        → SetPinAck | ChatErrorAck
 //                     4–8 digits, or null/"" to remove. User role only.
 //
-// admin:updateuser  { userId: string; label?: string|null;
-//                     note?: string|null }        → UpdateUserAck | …
-//                     Admin only. label ∈ new|priority|vip.
-//
-// admin:getnote     { userId: string }            → NoteAck | ChatErrorAck
-//
-// admin:settings    { settings: Partial<ServiceSettings> }
-//                     → SettingsAck | ChatErrorAck (admin only, merged)
-// admin:getsettings {}                            → SettingsAck | …
-// admin:stats       {}                            → StatsAck | ChatErrorAck
-//
-// ai:suggest        { conversationId: string }    → SuggestAck | …  (admin)
-// ai:summary        { conversationId: string }    → SummaryAck | …  (admin)
+// conversation:pin     { conversationId, messageId|null } (admin)
+// conversation:archive { conversationId, archived }  (admin)
+//                     Plain archive/unarchive — no rating side effects.
+// push:subscribe       { subscription }              (no ack, user/admin)
 
 /* ------------------------------------------------------------------ */
 /* Server → Client events                                              */
@@ -408,10 +324,9 @@ export type AckOf<T> = T | ChatErrorAck;
 //                        (Clients append ONLY from this event; ignore
 //                        message payloads inside success acks.)
 //
-// message:updated      { id, conversationId, deletedAt?, transcript?,
-//                        content, type }
-//                        Merge-by-id: delete tombstones + late voice
-//                        transcripts.
+// message:updated      MessageUpdatePayload
+//                        Merge-by-id: delete tombstones, edits, late
+//                        voice transcripts, translations, reactions.
 //
 // read:update          { conversationId, userId, lastReadMessageId }
 //                        `userId` = who read. Own sent messages with
@@ -424,8 +339,7 @@ export type AckOf<T> = T | ChatErrorAck;
 // partner:typing       { conversationId: string; isTyping: boolean }
 //                        Relayed to the OTHER participant (admins room
 //                        when the typer is a user, user room when the
-//                        typer is admin). Also emitted by the AI
-//                        assistant while it composes.
+//                        typer is admin).
 //
 // presence:update      { userId: string; online: boolean;
 //                        lastSeenAt: string | null }
@@ -433,23 +347,5 @@ export type AckOf<T> = T | ChatErrorAck;
 //                        (users must never learn about other users).
 //                        Admin online/offline → all `user:<id>` rooms.
 //
-// — v5 additions —
-//
-// conversation:update  PinUpdatePayload
-//                        Pinned-message banner changed (both roles).
+// conversation:update  PinUpdatePayload — pinned banner changed (both).
 // conversation:archive:update ArchiveUpdatePayload (admins room only).
-// message:updated      MessageUpdatePayload — now also merges editedAt,
-//                        translation, and reactions.
-// user:auth ack now carries publicSettings (menu, pre-chat topics, VAPID).
-// history ack now carries lastReadBefore (unread divider) + pinned state.
-//
-// New client → server events:
-// message:react        { messageId, emoji }          → { ok: true }
-// message:edit         { messageId, content }        → { ok: true }
-// message:translate    { messageId }                 → TranslateAck | …
-// conversation:pin     { conversationId, messageId|null } (admin)
-// conversation:archive { conversationId, archived }  (admin)
-// conversation:export  { conversationId }            → ExportAck (admin)
-// broadcast:send       { content }                   → BroadcastAck (admin)
-// rating:submit        { conversationId, stars }     → RatingAck (user)
-// push:subscribe       { subscription }              (no ack, user/admin)

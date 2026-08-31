@@ -5,7 +5,7 @@ import { SOCKET_URL } from "./chat-types";
 
 /**
  * Create a dedicated socket connection to the chat-service mini service.
- * Each view (customer chat / admin panel) creates its own connection and
+ * Each view (user chat / admin panel) creates its own connection and
  * MUST disconnect it on unmount.
  *
  * Never put a port in the URL — the gateway routes via XTransformPort.

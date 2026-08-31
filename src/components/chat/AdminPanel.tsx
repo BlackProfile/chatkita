@@ -7,34 +7,23 @@ import {
   ArchiveRestore,
   ArrowDown,
   ArrowLeft,
-  BarChart3,
-  Check,
-  Download,
   ImagePlus,
   Lock,
   LogOut,
-  Megaphone,
   MessagesSquare,
   Mic,
   MoreVertical,
-  NotebookPen,
   Pin,
-  Printer,
   QrCode,
   Search,
   SendHorizonal,
-  Settings,
   ShieldCheck,
   Smile,
-  Sparkles,
-  Tag,
   Type,
   X,
 } from "lucide-react";
 import type { Socket } from "socket.io-client";
 
-import { AdminSettingsDialog } from "@/components/chat/admin-settings-dialog";
-import { AdminStatsDialog } from "@/components/chat/admin-stats-dialog";
 import { ChatBubble } from "@/components/chat/ChatBubble";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
 import { TypingDots } from "@/components/chat/TypingDots";
@@ -65,7 +54,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useVoiceRecorder } from "@/hooks/use-voice-recorder";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -81,23 +69,15 @@ import {
   type AckOf,
   type AdminAuthAck,
   type ArchiveUpdatePayload,
-  type BroadcastAck,
   type ChatErrorAck,
   type ChatMessage,
-  type ChatStats,
   type ConversationOverview,
-  type ExportAck,
   type HistoryAck,
   type MessageAck,
   type MessageUpdatePayload,
   type PinUpdatePayload,
-  type ServiceSettings,
-  type SettingsAck,
-  type SuggestAck,
-  type SummaryAck,
+  type PublicSettingsAck,
   type TranslateAck,
-  type UpdateUserAck,
-  type UserLabel,
 } from "@/lib/chat-types";
 import {
   avatarColorClass,
@@ -109,16 +89,9 @@ import {
   messagePreview,
   readFontScale,
   saveFontScale,
-  waitingMinutes,
   type FontScale,
 } from "@/lib/chat-utils";
 import { cn } from "@/lib/utils";
-
-const LABEL_META: Record<UserLabel, { text: string; className: string }> = {
-  new: { text: "Baru", className: "bg-emerald-600 text-white" },
-  priority: { text: "Prioritas", className: "bg-orange-500 text-white" },
-  vip: { text: "VIP", className: "bg-amber-500 text-white" },
-};
 
 type FilterTab = "all" | "unread" | "online" | "archive";
 
@@ -190,15 +163,6 @@ export function AdminPanel() {
   /** Bumped on logout to tear down + recreate the socket (fresh rooms). */
   const [epoch, setEpoch] = useState(0);
 
-  // v2 admin tooling
-  const [settings, setSettings] = useState<ServiceSettings | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [statsOpen, setStatsOpen] = useState(false);
-  const [noteOpen, setNoteOpen] = useState(false);
-  const [noteDraft, setNoteDraft] = useState("");
-  const [suggestions, setSuggestions] = useState<string[]>([]);
-  const [suggestLoading, setSuggestLoading] = useState(false);
-  const [summaryLoading, setSummaryLoading] = useState(false);
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [pendingImage, setPendingImage] = useState<string | null>(null);
@@ -209,21 +173,16 @@ export function AdminPanel() {
   const [newCount, setNewCount] = useState(0);
   const [lightbox, setLightbox] = useState<string | null>(null);
 
-  // v5 — font / pinned / edit / translate / SLA / archive / broadcast / QR
+  // v5 — font / pinned / edit / translate / archive / QR
   const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
   const [pinnedMap, setPinnedMap] = useState<
     Record<string, { id: number; snippet: string } | null>
   >({});
   const [editing, setEditing] = useState<ChatMessage | null>(null);
   const [translatingId, setTranslatingId] = useState<number | null>(null);
-  const [broadcastOpen, setBroadcastOpen] = useState(false);
-  const [broadcastText, setBroadcastText] = useState("");
-  const [broadcastSending, setBroadcastSending] = useState(false);
-  const [broadcastResult, setBroadcastResult] = useState<string | null>(null);
   const [qrOpen, setQrOpen] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [qrUrl, setQrUrl] = useState("");
-  const [tick, setTick] = useState(0);
   /** v5 — first unread message id → "Pesan baru" divider. */
   const [unreadDividerId, setUnreadDividerId] = useState<number | null>(null);
 
@@ -239,7 +198,6 @@ export function AdminPanel() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const translatingIdRef = useRef<number | null>(null);
   const filterInputRef = useRef<HTMLInputElement | null>(null);
-  const alertedRef = useRef<Set<string>>(new Set());
 
   const recorder = useVoiceRecorder();
 
@@ -285,21 +243,13 @@ export function AdminPanel() {
           if (res.ok) {
             setAuthed(true);
             setConversations(res.conversations);
-            // Pull the service settings (quick replies need them immediately).
-            socketRef.current?.emit("admin:getsettings", {}, (sres: AckOf<SettingsAck>) => {
-              if (sres.ok) setSettings(sres.settings);
-            });
-            // v5 — opt in to Web Push so customer messages reach us even
-            // when every admin tab is closed.
-            socket.emit(
-              "public:settings",
-              {},
-              (pres: { ok: boolean; publicSettings?: { pushPublicKey: string } }) => {
-                if (pres.ok && pres.publicSettings?.pushPublicKey) {
-                  void subscribeToPush(socket, pres.publicSettings.pushPublicKey);
-                }
+            // Opt in to Web Push so messages reach us even when every
+            // admin tab is closed (ack shape: { ok, pushPublicKey }).
+            socket.emit("public:settings", {}, (pres: AckOf<PublicSettingsAck>) => {
+              if (pres.ok && pres.pushPublicKey) {
+                void subscribeToPush(socket, pres.pushPublicKey);
               }
-            );
+            });
             if (activeIdRef.current) loadHistory(activeIdRef.current);
           } else {
             // No longer authorized — drop back to the login form.
@@ -348,7 +298,7 @@ export function AdminPanel() {
     });
 
     // Append messages ONLY here; skip if the last stored message already
-    // has the same id (history-replacement vs broadcast race).
+    // has the same id (history-replacement vs live-event race).
     socket.on("message:new", (msg: ChatMessage) => {
       setMessagesMap((prev) => {
         const list = prev[msg.conversationId];
@@ -427,7 +377,7 @@ export function AdminPanel() {
           return next;
         });
         if (isTyping) {
-          // Auto-clear after 8s in case a stop event is missed (AI path).
+          // Auto-clear after 8s in case a stop event is missed.
           timers[conversationId] = setTimeout(() => {
             delete partnerTypingTimersRef.current[conversationId];
             setTypingMap((prev) => {
@@ -493,38 +443,6 @@ export function AdminPanel() {
     return list.filter((c) => c.partner.name.toLowerCase().includes(q));
   }, [conversations, filter, filterTab]);
 
-  /* v5 — SLA: user messages waiting longer than the configured minutes. */
-  const slaMinutes = settings?.slaMinutes ?? 10;
-  const waitingMap = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const c of conversations) {
-      if (c.archived || c.unread === 0) continue;
-      const mins = waitingMinutes(c.lastMessage, ADMIN_ID);
-      if (mins != null && mins >= slaMinutes) map.set(c.id, mins);
-    }
-    return map;
-  }, [conversations, slaMinutes, tick]);
-
-  /* One blip per conversation when it first crosses the SLA threshold. */
-  useEffect(() => {
-    for (const id of waitingMap.keys()) {
-      if (!alertedRef.current.has(id)) {
-        alertedRef.current.add(id);
-        playBlip();
-      }
-    }
-    for (const id of [...alertedRef.current]) {
-      if (!waitingMap.has(id)) alertedRef.current.delete(id);
-    }
-  }, [waitingMap]);
-
-  /* SLA clock — recompute every 30s. */
-  useEffect(() => {
-    if (!authed) return;
-    const t = setInterval(() => setTick((v) => v + 1), 30000);
-    return () => clearInterval(t);
-  }, [authed]);
-
   const activeConversation: ConversationOverview | null = activeId
     ? conversations.find((c) => c.id === activeId) ?? null
     : null;
@@ -548,7 +466,6 @@ export function AdminPanel() {
     atBottomRef.current = true;
     requestAnimationFrame(() => {
       setNewCount(0);
-      setSuggestions([]);
       setReplyTo(null);
       scrollToBottom();
     });
@@ -570,10 +487,6 @@ export function AdminPanel() {
           passwordRef.current = trimmed;
           setAuthed(true);
           setConversations(res.conversations);
-          // Pull the service settings (quick replies need them immediately).
-          socketRef.current?.emit("admin:getsettings", {}, (sres: AckOf<SettingsAck>) => {
-            if (sres.ok) setSettings(sres.settings);
-          });
         } else {
           setAuthError(
             res.error === "UNAUTHORIZED"
@@ -598,7 +511,6 @@ export function AdminPanel() {
     setAuthError(null);
     setInput("");
     setSendError(false);
-    setSettings(null);
     setEditing(null);
     setPinnedMap({});
     setTitleUnread(0);
@@ -673,7 +585,6 @@ export function AdminPanel() {
     );
     setReplyTo(null);
     saveDraft("admin", id, "");
-    alertedRef.current.delete(id);
     return true;
   };
 
@@ -755,89 +666,6 @@ export function AdminPanel() {
     });
   };
 
-  /* v5 — export helpers (CSV + print-to-PDF transcript). */
-  const exportCsv = () => {
-    const id = activeIdRef.current;
-    const socket = socketRef.current;
-    if (!socket || !id) return;
-    socket.emit(
-      "conversation:export",
-      { conversationId: id },
-      (res: AckOf<ExportAck>) => {
-        if (!res.ok) return;
-        const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
-        const rows = res.messages.map((m) => {
-          const time = new Date(m.createdAt).toLocaleString("id-ID");
-          const who = m.senderId === ADMIN_ID ? "Admin" : res.partnerName;
-          const isi = m.deletedAt
-            ? "[dihapus]"
-            : m.type === "image"
-              ? "[Foto]"
-              : m.type === "voice"
-                ? `[Pesan suara${m.transcript ? `: ${m.transcript}` : ""}]`
-                : m.type === "system"
-                  ? `[Sistem] ${m.content}`
-                  : m.type === "broadcast"
-                    ? `[Pengumuman] ${m.content}`
-                    : m.content;
-          return [time, who, isi].map(esc).join(";");
-        });
-        const csv = "\ufeffWaktu;Pengirim;Isi\n" + rows.join("\n");
-        const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `chat-${res.partnerName.replace(/\s+/g, "_")}-${new Date()
-          .toISOString()
-          .slice(0, 10)}.csv`;
-        a.click();
-        URL.revokeObjectURL(url);
-      }
-    );
-  };
-
-  const printTranscript = () => {
-    const id = activeIdRef.current;
-    const socket = socketRef.current;
-    if (!socket || !id) return;
-    socket.emit(
-      "conversation:export",
-      { conversationId: id },
-      (res: AckOf<ExportAck>) => {
-        if (!res.ok) return;
-        const esc = (v: string) =>
-          v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        const body = res.messages
-          .map((m) => {
-            const who = m.senderId === ADMIN_ID ? "Admin" : res.partnerName;
-            const isi = m.deletedAt
-              ? "<i>[pesan dihapus]</i>"
-              : m.type === "image"
-                ? "[Foto]"
-                : m.type === "voice"
-                  ? `[Pesan suara${m.transcript ? `: ${esc(m.transcript)}` : ""}]`
-                  : esc(m.content);
-            return `<div class="row ${m.senderId === ADMIN_ID ? "admin" : "user"}"><span class="when">${new Date(
-              m.createdAt
-            ).toLocaleString("id-ID")}</span><span class="who">${who}</span><span class="what">${isi}</span></div>`;
-          })
-          .join("");
-        const w = window.open("", "_blank", "width=800,height=900");
-        if (!w) return;
-        w.document.write(
-          `<!doctype html><html lang="id"><head><meta charset="utf-8"><title>Chat — ${esc(
-            res.partnerName
-          )}</title><style>body{font-family:system-ui,sans-serif;margin:32px;color:#111}h1{font-size:18px}.row{margin:6px 0;padding:6px 10px;border-radius:8px;background:#f5f5f5;break-inside:avoid}.row.admin{background:#e8f7ef}.who{font-weight:600;margin-right:8px}.when{float:right;color:#777;font-size:11px}.what{white-space:pre-wrap}</style></head><body><h1>Riwayat Chat — ${esc(
-            res.partnerName
-          )}</h1><p>${new Date().toLocaleString(
-            "id-ID"
-          )}</p>${body}<script>window.onload=()=>window.print()</script></body></html>`
-        );
-        w.document.close();
-      }
-    );
-  };
-
   /* v5 — QR / share dialog. */
   const openQr = () => {
     const u = new URL(window.location.href);
@@ -858,27 +686,6 @@ export function AdminPanel() {
 
   const copyQrUrl = () => {
     void navigator.clipboard.writeText(qrUrl).catch(() => {});
-  };
-
-  const sendBroadcast = () => {
-    const socket = socketRef.current;
-    const content = broadcastText.trim();
-    if (!socket || !content || broadcastSending) return;
-    setBroadcastSending(true);
-    setBroadcastResult(null);
-    socket.emit("broadcast:send", { content }, (res: AckOf<BroadcastAck>) => {
-      setBroadcastSending(false);
-      if (res.ok) {
-        setBroadcastResult(`✅ Terkirim ke ${res.sent} percakapan`);
-        setBroadcastText("");
-        setTimeout(() => {
-          setBroadcastOpen(false);
-          setBroadcastResult(null);
-        }, 1200);
-      } else {
-        setBroadcastResult("Gagal mengirim, coba lagi.");
-      }
-    });
   };
 
   const handleImagePick = async (file: File | undefined | null) => {
@@ -956,77 +763,6 @@ export function AdminPanel() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [authed, filteredConversations, handleSelectConversation]);
-
-  const setLabel = (userId: string, label: UserLabel | null) => {
-    socketRef.current?.emit(
-      "admin:updateuser",
-      { userId, label },
-      (res: AckOf<UpdateUserAck>) => {
-        if (res.ok) {
-          setConversations((prev) =>
-            prev.map((c) =>
-              c.partner.id === userId
-                ? { ...c, partner: { ...c.partner, label: res.label } }
-                : c
-            )
-          );
-        }
-      }
-    );
-  };
-
-  const openNote = () => {
-    if (!activeConversation) return;
-    setNoteDraft(activeConversation.partner.note ?? "");
-    setNoteOpen(true);
-    // Fetch the freshest note server-side (the overview doesn't carry it).
-    socketRef.current?.emit(
-      "admin:getnote",
-      { userId: activeConversation.partner.id },
-      (res: { ok: true; userId: string; label: string | null; note: string | null }) => {
-        if (res.ok) setNoteDraft(res.note ?? "");
-      }
-    );
-  };
-
-  const saveNote = () => {
-    const userId = activeConversation?.partner.id;
-    if (!userId) return;
-    socketRef.current?.emit(
-      "admin:updateuser",
-      { userId, note: noteDraft },
-      (res: AckOf<UpdateUserAck>) => {
-        if (res.ok) setNoteOpen(false);
-      }
-    );
-  };
-
-  const loadSuggestions = () => {
-    const id = activeIdRef.current;
-    const socket = socketRef.current;
-    if (!socket || !id || suggestLoading) return;
-    setSuggestLoading(true);
-    socket.emit("ai:suggest", { conversationId: id }, (res: AckOf<SuggestAck>) => {
-      setSuggestLoading(false);
-      if (res.ok) setSuggestions(res.suggestions);
-    });
-  };
-
-  const loadSummary = () => {
-    const id = activeIdRef.current;
-    const socket = socketRef.current;
-    if (!socket || !id || summaryLoading) return;
-    setSummaryLoading(true);
-    socket.emit("ai:summary", { conversationId: id }, (res: AckOf<SummaryAck>) => {
-      setSummaryLoading(false);
-      if (res.ok) {
-        // lightweight inline toast via title badge area — use alert-free UI:
-        setSummaryText(res.summary);
-      }
-    });
-  };
-
-  const [summaryText, setSummaryText] = useState<string | null>(null);
 
   /* ---------------------------------------------------------------- */
   /* Render: login                                                     */
@@ -1148,43 +884,11 @@ export function AdminPanel() {
                     variant="ghost"
                     size="icon"
                     className="size-9 text-muted-foreground hover:text-foreground"
-                    aria-label="Broadcast pengumuman"
-                    title="Kirim pengumuman ke semua pelanggan"
-                    onClick={() => {
-                      setBroadcastText("");
-                      setBroadcastResult(null);
-                      setBroadcastOpen(true);
-                    }}
-                  >
-                    <Megaphone className="size-4" aria-hidden="true" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-9 text-muted-foreground hover:text-foreground"
                     aria-label="Bagikan lewat QR"
                     title="QR code untuk membuka chat"
                     onClick={openQr}
                   >
                     <QrCode className="size-4" aria-hidden="true" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-9 text-muted-foreground hover:text-foreground"
-                    aria-label="Pengaturan layanan"
-                    onClick={() => setSettingsOpen(true)}
-                  >
-                    <Settings className="size-4" aria-hidden="true" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-9 text-muted-foreground hover:text-foreground"
-                    aria-label="Statistik layanan"
-                    onClick={() => setStatsOpen(true)}
-                  >
-                    <BarChart3 className="size-4" aria-hidden="true" />
                   </Button>
                   <ThemeToggle />
                   <Button
@@ -1260,15 +964,13 @@ export function AdminPanel() {
                   ) : (
                     filteredConversations.map((c) => {
                       const isActive = c.id === activeId;
-                      const waiting = waitingMap.get(c.id);
                       return (
                         <button
                           key={c.id}
                           type="button"
                           className={cn(
                             "flex w-full items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-accent",
-                            isActive && "bg-accent",
-                            waiting && "bg-rose-500/5"
+                            isActive && "bg-accent"
                           )}
                           onClick={() => handleSelectConversation(c.id)}
                         >
@@ -1296,23 +998,6 @@ export function AdminPanel() {
                               <span className="truncate text-sm font-semibold">
                                 {c.partner.name}
                               </span>
-                              {c.partner.label && LABEL_META[c.partner.label as UserLabel] ? (
-                                <span
-                                  className={cn(
-                                    "shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-semibold",
-                                    LABEL_META[c.partner.label as UserLabel].className
-                                  )}
-                                >
-                                  {LABEL_META[c.partner.label as UserLabel].text}
-                                </span>
-                              ) : null}
-                              {c.partner.topic ? (
-                                <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[9px] text-muted-foreground">
-                                  {c.partner.topic.length > 14
-                                    ? `${c.partner.topic.slice(0, 14)}…`
-                                    : c.partner.topic}
-                                </span>
-                              ) : null}
                             </span>
                             <span className="block truncate text-xs text-muted-foreground">
                               {typingMap[c.id]
@@ -1334,14 +1019,7 @@ export function AdminPanel() {
                                 ? formatChatTime(c.lastMessage.createdAt)
                                 : formatChatTime(c.lastMessageAt)}
                             </span>
-                            {waiting ? (
-                              <span
-                                className="flex h-5 items-center gap-0.5 rounded-full bg-rose-500 px-1.5 text-[10px] font-semibold text-white"
-                                title={`Menunggu balasan ${waiting} menit (SLA ${slaMinutes} mnt)`}
-                              >
-                                ⏰ {waiting >= 60 ? `${Math.floor(waiting / 60)}j` : `${waiting}m`}
-                              </span>
-                            ) : c.unread > 0 ? (
+                            {c.unread > 0 ? (
                               <Badge className="h-5 min-w-5 rounded-full bg-emerald-600 px-1 text-[10px] text-white">
                                 {c.unread > 99 ? "99+" : c.unread}
                               </Badge>
@@ -1394,22 +1072,9 @@ export function AdminPanel() {
                     />
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <p className="truncate font-semibold leading-tight">
-                        {activeConversation.partner.name}
-                      </p>
-                      {activeConversation.partner.label &&
-                      LABEL_META[activeConversation.partner.label as UserLabel] ? (
-                        <span
-                          className={cn(
-                            "shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-semibold",
-                            LABEL_META[activeConversation.partner.label as UserLabel].className
-                          )}
-                        >
-                          {LABEL_META[activeConversation.partner.label as UserLabel].text}
-                        </span>
-                      ) : null}
-                    </div>
+                    <p className="truncate font-semibold leading-tight">
+                      {activeConversation.partner.name}
+                    </p>
                     <p
                       className={cn(
                         "truncate text-xs",
@@ -1422,57 +1087,6 @@ export function AdminPanel() {
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-0.5">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="size-9 text-muted-foreground hover:text-foreground"
-                      aria-label="Ringkas dengan AI"
-                      disabled={summaryLoading}
-                      onClick={loadSummary}
-                    >
-                      <Sparkles className={cn("size-4", summaryLoading && "animate-pulse")} aria-hidden="true" />
-                    </Button>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="size-9 text-muted-foreground hover:text-foreground"
-                          aria-label="Atur label pelanggan"
-                        >
-                          <Tag className="size-4" aria-hidden="true" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuLabel>Label pelanggan</DropdownMenuLabel>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem onClick={() => setLabel(activeConversation.partner.id, null)}>
-                          <Check
-                            className={cn("mr-2 size-3.5", !activeConversation.partner.label && "opacity-100", activeConversation.partner.label && "opacity-0")}
-                            aria-hidden="true"
-                          />
-                          Tanpa label
-                        </DropdownMenuItem>
-                        {(Object.keys(LABEL_META) as UserLabel[]).map((l) => (
-                          <DropdownMenuItem key={l} onClick={() => setLabel(activeConversation.partner.id, l)}>
-                            <Check
-                              className={cn("mr-2 size-3.5", activeConversation.partner.label === l ? "opacity-100" : "opacity-0")}
-                              aria-hidden="true"
-                            />
-                            {LABEL_META[l].text}
-                          </DropdownMenuItem>
-                        ))}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="size-9 text-muted-foreground hover:text-foreground"
-                      aria-label="Catatan pelanggan"
-                      onClick={openNote}
-                    >
-                      <NotebookPen className="size-4" aria-hidden="true" />
-                    </Button>
                     <Button
                       variant="ghost"
                       size="icon"
@@ -1512,15 +1126,6 @@ export function AdminPanel() {
                             : "Arsipkan percakapan"}
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
-                        <DropdownMenuItem onClick={exportCsv}>
-                          <Download className="mr-2 size-4" aria-hidden="true" />
-                          Ekspor CSV
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={printTranscript}>
-                          <Printer className="mr-2 size-4" aria-hidden="true" />
-                          Cetak / simpan PDF
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
                         <DropdownMenuLabel>Ukuran huruf</DropdownMenuLabel>
                         {FONT_SCALE_LABELS.map((o) => (
                           <DropdownMenuItem
@@ -1539,22 +1144,6 @@ export function AdminPanel() {
                     </DropdownMenu>
                   </div>
                 </div>
-
-                {/* AI summary strip */}
-                {summaryText ? (
-                  <div className="flex items-start gap-2 border-b bg-emerald-600/5 px-3 py-2 text-xs">
-                    <Sparkles className="mt-0.5 size-3.5 shrink-0 text-emerald-600" aria-hidden="true" />
-                    <p className="flex-1 leading-relaxed">{summaryText}</p>
-                    <button
-                      type="button"
-                      aria-label="Tutup ringkasan"
-                      className="text-muted-foreground hover:text-foreground"
-                      onClick={() => setSummaryText(null)}
-                    >
-                      <X className="size-3.5" />
-                    </button>
-                  </div>
-                ) : null}
 
                 {/* Pinned message banner (v5) */}
                 {pinnedMap[activeConversation.id] ? (
@@ -1724,39 +1313,6 @@ export function AdminPanel() {
                   </p>
                 ) : null}
 
-                {/* Quick replies + AI suggestions */}
-                {activeId && (settings?.quickReplies?.length || suggestions.length || suggestLoading) ? (
-                  <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto px-3 pb-1.5 chat-scroll">
-                    {suggestions.map((s, i) => (
-                      <button
-                        key={`ai-${i}`}
-                        type="button"
-                        className="flex shrink-0 items-center gap-1 rounded-full border border-emerald-600/40 bg-emerald-600/5 px-3 py-1 text-xs text-emerald-700 hover:bg-emerald-600/10 dark:text-emerald-400"
-                        onClick={() => {
-                          setInput(s.slice(0, MAX_MESSAGE_LENGTH));
-                          setSuggestions([]);
-                        }}
-                      >
-                        <Sparkles className="size-3" aria-hidden="true" />
-                        {s.length > 42 ? `${s.slice(0, 42)}…` : s}
-                      </button>
-                    ))}
-                    {suggestLoading ? (
-                      <span className="shrink-0 text-xs text-muted-foreground">AI menyusun saran…</span>
-                    ) : null}
-                    {settings?.quickReplies?.map((qr, i) => (
-                      <button
-                        key={`qr-${i}`}
-                        type="button"
-                        className="shrink-0 rounded-full bg-muted px-3 py-1 text-xs hover:bg-accent"
-                        onClick={() => setInput(qr.text.slice(0, MAX_MESSAGE_LENGTH))}
-                      >
-                        {qr.label}
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-
                 {/* Reply chip */}
                 {replyTo ? (
                   <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border-l-2 border-emerald-500 bg-muted/60 px-2 py-1.5 text-xs">
@@ -1918,16 +1474,6 @@ export function AdminPanel() {
                           }
                         }}
                       />
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
-                        aria-label="Saran balasan AI"
-                        disabled={suggestLoading}
-                        onClick={loadSuggestions}
-                      >
-                        <Sparkles className={cn("size-5", suggestLoading && "animate-pulse")} aria-hidden="true" />
-                      </Button>
                       {input.trim() || pendingImage ? (
                         <Button
                           size="icon"
@@ -1983,96 +1529,6 @@ export function AdminPanel() {
         </div>
       </div>
 
-      {/* Note dialog */}
-      <Dialog open={noteOpen} onOpenChange={setNoteOpen}>
-        <DialogContent className="max-w-sm rounded-2xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <NotebookPen className="size-4 text-emerald-600" aria-hidden="true" />
-              Catatan: {activeConversation?.partner.name}
-            </DialogTitle>
-            <DialogDescription>
-              Catatan internal — tidak pernah terlihat oleh pelanggan.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            <Textarea
-              rows={4}
-              value={noteDraft}
-              maxLength={500}
-              placeholder="cth. pelanggan langganan bulanan, suka dihubungi sore…"
-              onChange={(e) => setNoteDraft(e.target.value)}
-            />
-            <Button
-              className="h-10 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
-              onClick={saveNote}
-            >
-              Simpan catatan
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* Settings + stats dialogs — mounted only while open */}
-      {settingsOpen ? (
-        <AdminSettingsDialog
-          open
-          onOpenChange={setSettingsOpen}
-          socketRef={socketRef}
-          onSaved={setSettings}
-        />
-      ) : null}
-      {statsOpen ? (
-        <AdminStatsDialog open onOpenChange={setStatsOpen} socketRef={socketRef} />
-      ) : null}
-
-      {/* Broadcast dialog (v5) — mounted only while open */}
-      {broadcastOpen ? (
-        <Dialog
-          open
-          onOpenChange={(v) => {
-            setBroadcastOpen(v);
-            if (!v) setBroadcastResult(null);
-          }}
-        >
-          <DialogContent className="max-w-md rounded-2xl">
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <Megaphone className="size-4 text-emerald-600" aria-hidden="true" />
-                Broadcast Pengumuman
-              </DialogTitle>
-              <DialogDescription>
-                Pesan ini masuk ke chat SEMUA pelanggan sebagai pengumuman (📢).
-              </DialogDescription>
-            </DialogHeader>
-            <div className="space-y-3">
-              <Textarea
-                rows={4}
-                value={broadcastText}
-                maxLength={MAX_MESSAGE_LENGTH}
-                placeholder="cth. 🎉 Promo akhir pekan! Diskon 20% untuk semua produk Sabtu–Minggu ini."
-                onChange={(e) => {
-                  setBroadcastText(e.target.value);
-                  setBroadcastResult(null);
-                }}
-              />
-              {broadcastResult ? (
-                <p className="text-sm font-medium text-emerald-600">{broadcastResult}</p>
-              ) : null}
-              <Button
-                className="h-10 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
-                disabled={broadcastSending || !broadcastText.trim()}
-                onClick={sendBroadcast}
-              >
-                {broadcastSending
-                  ? "Mengirim…"
-                  : `Kirim ke ${conversations.length} percakapan`}
-              </Button>
-            </div>
-          </DialogContent>
-        </Dialog>
-      ) : null}
-
       {/* QR / share dialog (v5) */}
       {qrOpen ? (
         <Dialog open onOpenChange={setQrOpen}>
@@ -2083,7 +1539,7 @@ export function AdminPanel() {
                 Bagikan Chat
               </DialogTitle>
               <DialogDescription>
-                Pelanggan memindai QR ini (atau buka tautannya) untuk mulai chat dengan Anda.
+                Orang lain dapat memindai QR ini (atau membuka tautannya) untuk mulai chat dengan Anda.
               </DialogDescription>
             </DialogHeader>
             <div className="flex flex-col items-center gap-3">

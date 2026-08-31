@@ -1,42 +1,40 @@
 /**
  * ChatKita chat-service — socket.io mini service (port 3003)
  *
- * Model (v4 — 1-on-1 with Admin, full-featured):
- *   users(role, pin_hash, label, note) ──< conversations ──< messages
+ * Model (v6 — pure private messenger, like WhatsApp/Telegram):
+ *   users(role, pin_hash) ──< conversations ──< messages
  *     messages: type text|image|voice|system, reply_to_id, duration_ms,
  *               transcript (AI speech-to-text), deleted_at (soft delete)
  *   + per-user read state (reads) → ✓✓ receipts broadcast live
- *   + settings table (operating hours, AI assistant, quick replies)
+ *   + settings table (only Web Push VAPID keys are stored server-side)
  *
- * New in v4:
- *   - Media messages: image (data URL) & voice notes (data URL + duration)
- *   - Reply/quote (reply_to_id, snapshot delivered as `replyTo`)
- *   - Delete for everyone (soft delete + content redaction)
- *   - Live read receipts (`read:update` broadcast)
- *   - Optional account PIN (SHA-256) protecting name-only logins
- *   - Admin CRM: per-user label (new|priority|vip) + internal note
- *   - Admin config: operating hours, AI assistant on/off, knowledge base,
- *     quick replies (`admin:settings`)
- *   - AI: auto-reply while admin is offline, reply suggestions,
- *     conversation summary, voice-note transcription (z-ai-web-dev-sdk)
+ * Every person who opens the app logs in with a name and gets a private
+ * 1-on-1 chat with the Admin account (the app owner), like messaging any
+ * contact. The Admin sees ALL conversations in one list, like WhatsApp Web.
  *
- * New in v5:
+ * v6 (pure messenger) feature set:
+ *   - Text | image | voice messages (+ replies, media size caps)
  *   - Emoji reactions (message_reactions, one per user per message)
  *   - Edit own text messages (15-min window, edited_at marker)
- *   - On-demand AI translation (messages.translation, cached)
+ *   - Delete for everyone (soft delete + content redaction)
+ *   - Live ✓✓ read receipts (`read:update` broadcast)
+ *   - Presence (users' online state visible to the admins room ONLY)
+ *   - Typing relay between the two participants
  *   - Pin a message per conversation (banner on both sides)
- *   - Archive / unarchive conversations (admin inbox hygiene; a new user
- *     message auto-unarchives)
- *   - Broadcast announcement to ALL conversations at once
- *   - Conversation export (client renders CSV / print-to-PDF)
- *   - Chatbot menu: direct mapped answers before AI/human
- *   - Pre-chat topic (users.topic, chosen at login) + star ratings
+ *   - Archive / unarchive conversations (a new user message auto-unarchives)
+ *   - Voice-note transcription (z-ai-web-dev-sdk ASR → message:updated)
+ *   - On-demand AI translation (messages.translation, cached)
  *   - Web Push notifications when the recipient has no live socket
  *     (VAPID keys generated once, stored in settings; subscriptions in
  *     push_subscriptions; dead endpoints pruned on 404/410)
+ *   - Optional account PIN (SHA-256) protecting name-only logins
  *
- * Users are isolated from each other: every event is participant-gated
- * and user presence is visible to the `admins` room ONLY (privacy).
+ * Removed in v6 (v4/v5 customer-service tooling, no longer here): CRM
+ * labels/notes, pre-chat topics, operating hours, quick replies, SLA
+ * alerts, chatbot menu, star ratings, broadcast, CSV/print export,
+ * stats, AI auto-reply/suggestions/summary, `public:settings:update`.
+ * Historical SQLite columns (users.label/note/topic, messages.kind) and
+ * the old ratings table are left in existing databases but unused.
  *
  * Persistence: bun:sqlite (WAL mode) at ./chat.db
  * Connection path MUST stay '/' — the Caddy gateway forwards
@@ -45,7 +43,7 @@
 
 import { createServer } from 'http'
 import { join } from 'path'
-import { createHash, randomUUID } from 'crypto'
+import { createHash } from 'crypto'
 import { Database } from 'bun:sqlite'
 import { Server, type Socket as IoSocket } from 'socket.io'
 import ZAI from 'z-ai-web-dev-sdk'
@@ -63,9 +61,6 @@ const MAX_MESSAGE_LENGTH = 1000
 const HISTORY_LIMIT = 500
 /** Max data-URL payload for image/voice messages (base64 chars). */
 const MAX_MEDIA_LENGTH = 2_500_000
-/** Fixed UTC offset of the operating-hours timezone (Asia/Bangkok). */
-const TZ_OFFSET_MS = 7 * 3600_000
-const USER_LABELS = ['new', 'priority', 'vip'] as const
 /** Fixed reaction palette (v5). */
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const
 /** Window in which a sender may edit their own text message. */
@@ -143,15 +138,14 @@ addColumn('messages', 'duration_ms', 'INTEGER')
 addColumn('messages', 'transcript', 'TEXT')
 addColumn('messages', 'deleted_at', 'INTEGER')
 addColumn('users', 'pin_hash', 'TEXT')
-addColumn('users', 'label', 'TEXT')
-addColumn('users', 'note', 'TEXT')
 /* v5 migrations */
 addColumn('messages', 'edited_at', 'INTEGER')
 addColumn('messages', 'translation', 'TEXT')
-addColumn('messages', 'kind', 'TEXT')
 addColumn('conversations', 'archived_at', 'INTEGER')
 addColumn('conversations', 'pinned_message_id', 'INTEGER')
-addColumn('users', 'topic', 'TEXT')
+/* v6 — the CRM columns (users.label/note/topic) and the rating-marker
+ * column (messages.kind) are no longer added, read, nor written. Existing
+ * databases keep the dormant columns; they are never dropped. */
 
 db.run(`
   CREATE TABLE IF NOT EXISTS message_reactions (
@@ -159,16 +153,6 @@ db.run(`
     user_id TEXT NOT NULL,
     emoji TEXT NOT NULL,
     PRIMARY KEY (message_id, user_id)
-  )
-`)
-
-db.run(`
-  CREATE TABLE IF NOT EXISTS ratings (
-    conversation_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    stars INTEGER NOT NULL,
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY (conversation_id, user_id)
   )
 `)
 
@@ -191,9 +175,6 @@ interface UserRow {
   created_at: number
   last_seen_at: number
   pin_hash?: string | null
-  label?: string | null
-  note?: string | null
-  topic?: string | null
 }
 
 interface ConversationRow {
@@ -219,7 +200,6 @@ interface MessageRow {
   deleted_at?: number | null
   edited_at?: number | null
   translation?: string | null
-  kind?: string | null
 }
 
 /* ------------------------------ API types ------------------------------ */
@@ -230,7 +210,7 @@ interface ChatMessageApi {
   senderId: string
   content: string
   createdAt: string
-  type: 'text' | 'image' | 'voice' | 'system' | 'broadcast'
+  type: 'text' | 'image' | 'voice' | 'system'
   replyToId?: number
   replyTo?: { id: number; senderId: string; snippet: string; type: string }
   durationMs?: number
@@ -240,8 +220,6 @@ interface ChatMessageApi {
   translation?: string
   /** Emoji reactions grouped by emoji with the reacting user ids. */
   reactions?: { emoji: string; userIds: string[] }[]
-  /** Marker for special system cards (e.g. rating request/thanks). */
-  kind?: string
 }
 
 interface PartnerInfoApi {
@@ -249,8 +227,6 @@ interface PartnerInfoApi {
   name: string
   online: boolean
   lastSeenAt: string | null
-  label?: string | null
-  topic?: string | null
 }
 
 interface ConversationOverviewApi {
@@ -270,77 +246,15 @@ interface ConversationOverviewApi {
   pinned?: { id: number; senderId: string; snippet: string; type: string } | null
 }
 
-interface ServiceSettings {
-  hours: { enabled: boolean; start: string; end: string; days: number[] }
-  aiEnabled: boolean
-  aiKb: string
-  outsideMsg: string
-  quickReplies: { label: string; text: string }[]
-  /** v5 — SLA: alert the admin when a user waits longer than this. */
-  slaMinutes: number
-  /** v5 — chatbot menu: instant mapped answers before AI/human. */
-  chatMenuEnabled: boolean
-  chatMenuItems: { label: string; answer: string }[]
-  /** v5 — comma-separated topics offered on the login (pre-chat) form. */
-  preChatTopics: string
-}
+/* ------------------- settings helpers (VAPID keys only) ------------------- */
 
-const DEFAULT_SETTINGS: ServiceSettings = {
-  hours: { enabled: true, start: '09:00', end: '17:00', days: [1, 2, 3, 4, 5] },
-  aiEnabled: true,
-  aiKb:
-    'ChatKita adalah aplikasi chat customer service. Admin membalas pada jam kerja ' +
-    '09:00–17:00 Senin–Jumat (waktu Indonesia/Bangkok). Di luar jam kerja asisten AI ' +
-    'membantu menjawab pertanyaan umum. Transaksi, pembayaran, dan pengiriman ' +
-    'dikonfirmasi langsung oleh admin.',
-  outsideMsg:
-    '🌙 Admin sedang tidak online. Pesan Anda sudah masuk — admin akan membalas ' +
-    'saat jam kerja. Asisten AI siap membantu dulu untuk pertanyaan umum.',
-  quickReplies: [
-    { label: 'Salam', text: 'Halo! Terima kasih sudah menghubungi kami 😊 Ada yang bisa dibantu?' },
-    { label: 'Mohon tunggu', text: 'Mohon tunggu sebentar ya, kami cek dulu 🙏' },
-    { label: 'Diterima', text: 'Baik, permintaan Anda sudah kami terima dan segera diproses ✅' },
-    { label: 'Penutup', text: 'Senang bisa membantu! Kalau ada lagi, silakan chat kapan saja 🙏' },
-  ],
-  slaMinutes: 10,
-  chatMenuEnabled: false,
-  chatMenuItems: [
-    { label: 'Jam buka', answer: 'Jam operasional kami Senin–Jumat 09.00–17.00. Di luar jam itu admin akan membalas keesokan harinya 😊' },
-    { label: 'Info produk', answer: 'Silakan tanyakan produk yang Anda maksud — admin akan memberi info lengkap beserta harganya 🙏' },
-    { label: 'Chat admin', answer: 'Baik, pesan Anda saya teruskan ke admin. Mohon tunggu sebentar ya 🙏' },
-  ],
-  preChatTopics: '',
-}
+const getSetting = (key: string): string | undefined =>
+  (db.query('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | null)?.value
 
-let settings: ServiceSettings = loadSettings()
-
-function loadSettings(): ServiceSettings {
-  try {
-    const row = db.query('SELECT value FROM settings WHERE key = ?').get('service') as
-      | { value: string }
-      | null
-    if (!row) return { ...DEFAULT_SETTINGS }
-    const parsed = JSON.parse(row.value) as Partial<ServiceSettings>
-    return {
-      hours: { ...DEFAULT_SETTINGS.hours, ...(parsed.hours ?? {}) },
-      aiEnabled: parsed.aiEnabled ?? DEFAULT_SETTINGS.aiEnabled,
-      aiKb: parsed.aiKb ?? DEFAULT_SETTINGS.aiKb,
-      outsideMsg: parsed.outsideMsg ?? DEFAULT_SETTINGS.outsideMsg,
-      quickReplies: parsed.quickReplies ?? DEFAULT_SETTINGS.quickReplies,
-      slaMinutes: parsed.slaMinutes ?? DEFAULT_SETTINGS.slaMinutes,
-      chatMenuEnabled: parsed.chatMenuEnabled ?? DEFAULT_SETTINGS.chatMenuEnabled,
-      chatMenuItems: parsed.chatMenuItems ?? DEFAULT_SETTINGS.chatMenuItems,
-      preChatTopics: parsed.preChatTopics ?? DEFAULT_SETTINGS.preChatTopics,
-    }
-  } catch {
-    return { ...DEFAULT_SETTINGS }
-  }
-}
-
-function saveSettings() {
+const setSetting = (key: string, value: string) => {
   db.run(
     'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-    ['service', JSON.stringify(settings)]
+    [key, value]
   )
 }
 
@@ -348,8 +262,6 @@ function saveSettings() {
 
 let VAPID_PUBLIC = ''
 try {
-  const getSetting = (key: string) =>
-    (db.query('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | null)?.value
   const pub = getSetting('vapidPublic')
   const priv = getSetting('vapidPrivate')
   if (pub && priv) {
@@ -358,8 +270,8 @@ try {
   } else {
     const keys = webpush.generateVAPIDKeys()
     VAPID_PUBLIC = keys.publicKey
-    db.run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', ['vapidPublic', keys.publicKey])
-    db.run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', ['vapidPrivate', keys.privateKey])
+    setSetting('vapidPublic', keys.publicKey)
+    setSetting('vapidPrivate', keys.privateKey)
     webpush.setVapidDetails('mailto:admin@chatkita.local', keys.publicKey, keys.privateKey)
     console.log('VAPID keys generated and stored')
   }
@@ -414,18 +326,6 @@ const pushNewMessageIfOffline = (recipientId: string, senderName: string, body: 
   })
 }
 
-/** Settings that are safe/needed on the PUBLIC (user) side of the app. */
-const getPublicSettings = () => ({
-  chatMenuEnabled: settings.chatMenuEnabled,
-  chatMenuItems: settings.chatMenuItems,
-  preChatTopics: settings.preChatTopics
-    .split(',')
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0)
-    .slice(0, 12),
-  pushPublicKey: VAPID_PUBLIC,
-})
-
 /* ------------------------------ helpers ------------------------------ */
 
 const now = () => Date.now()
@@ -443,7 +343,6 @@ const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   ...(row.deleted_at ? { deletedAt: new Date(row.deleted_at).toISOString() } : {}),
   ...(row.edited_at ? { editedAt: new Date(row.edited_at).toISOString() } : {}),
   ...(row.translation && !row.deleted_at ? { translation: row.translation } : {}),
-  ...(row.kind ? { kind: row.kind } : {}),
 })
 
 /** Human-readable one-liner for previews and reply quotes. */
@@ -452,8 +351,6 @@ const snippetOf = (row: Pick<MessageRow, 'type' | 'content' | 'deleted_at'>): st
   const type = row.type ?? 'text'
   if (type === 'image') return '📷 Foto'
   if (type === 'voice') return '🎤 Pesan suara'
-  if (type === 'system') return row.content
-  if (type === 'broadcast') return `📢 ${row.content}`
   return row.content
 }
 
@@ -537,7 +434,6 @@ const toPartnerInfo = (user: UserRow): PartnerInfoApi => ({
   name: user.name,
   online: isOnline(user.id),
   lastSeenAt: new Date(user.last_seen_at).toISOString(),
-  ...(user.label ? { label: user.label } : {}),
 })
 
 /** Ordered pair so a conversation between two users is unique. */
@@ -662,8 +558,6 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         CASE WHEN c.user_a_id = $me THEN c.user_b_id ELSE c.user_a_id END AS partner_id,
         p.name AS partner_name,
         p.last_seen_at AS partner_last_seen,
-        p.label AS partner_label,
-        p.topic AS partner_topic,
         lm.id AS last_id,
         lm.sender_id AS last_sender,
         lm.content AS last_content,
@@ -707,8 +601,6 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     partner_id: string
     partner_name: string
     partner_last_seen: number
-    partner_label: string | null
-    partner_topic: string | null
     last_id: number | null
     last_sender: string | null
     last_content: string | null
@@ -731,8 +623,6 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
       name: r.partner_name,
       online: isOnline(r.partner_id),
       lastSeenAt: new Date(r.partner_last_seen).toISOString(),
-      ...(r.partner_label ? { label: r.partner_label } : {}),
-      ...(r.partner_topic ? { topic: r.partner_topic } : {}),
     },
     lastMessage:
       r.last_id != null
@@ -796,53 +686,22 @@ const removeOnlineSocket = (userId: string, socketId: string) => {
 }
 
 /* ------------------------------------------------------------------ */
-/* Operating hours (Asia/Bangkok)                                      */
+/* Message persistence + fan-out (human sends: text / image / voice)   */
 /* ------------------------------------------------------------------ */
 
-const bangkokNow = () => {
-  const d = new Date(Date.now() + TZ_OFFSET_MS)
-  return { day: d.getUTCDay(), minutes: d.getUTCHours() * 60 + d.getUTCMinutes() }
-}
-
-const parseHm = (s: string, fallback: number) => {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(s)
-  if (!m) return fallback
-  return Math.min(24 * 60, Math.max(0, Number(m[1]) * 60 + Number(m[2])))
-}
-
-const isWithinHours = () => {
-  const h = settings.hours
-  if (!h.enabled) return true
-  const { day, minutes } = bangkokNow()
-  if (Array.isArray(h.days) && h.days.length > 0 && !h.days.includes(day)) return false
-  const start = parseHm(h.start, 9 * 60)
-  const end = parseHm(h.end, 17 * 60)
-  return start <= end ? minutes >= start && minutes < end : minutes >= start || minutes < end
-}
-
-/** Epoch ms of the current Bangkok day start (for daily stats). */
-const startOfBangkokDay = () => {
-  const d = new Date(Date.now() + TZ_OFFSET_MS)
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - TZ_OFFSET_MS
-}
-
-/* ------------------------------------------------------------------ */
-/* Message persistence + fan-out (shared by human send / AI / system)  */
-/* ------------------------------------------------------------------ */
-
-type MessageType = 'text' | 'image' | 'voice' | 'system' | 'broadcast'
+type MessageType = 'text' | 'image' | 'voice' | 'system'
 
 const insertAndFanOut = (
   conversation: ConversationRow,
   senderId: string,
   content: string,
   type: MessageType,
-  opts: { replyToId?: number; durationMs?: number; kind?: string } = {}
+  opts: { replyToId?: number; durationMs?: number } = {}
 ): ChatMessageApi => {
   const ts = now()
   const result = db.run(
-    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    [conversation.id, senderId, content, ts, type, opts.replyToId ?? null, opts.durationMs ?? null, opts.kind ?? null]
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [conversation.id, senderId, content, ts, type, opts.replyToId ?? null, opts.durationMs ?? null]
   )
   db.run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [ts, conversation.id])
   const id = Number(result.lastInsertRowid)
@@ -872,7 +731,7 @@ const insertAndFanOut = (
 }
 
 /* ------------------------------------------------------------------ */
-/* AI assistant (z-ai-web-dev-sdk) — best effort, never blocks chat    */
+/* AI helpers (z-ai-web-dev-sdk) — voice transcription + translation   */
 /* ------------------------------------------------------------------ */
 
 let zaiPromise: ReturnType<typeof ZAI.create> | null = null
@@ -928,116 +787,6 @@ const transcribeAsync = async (messageId: number, conversationId: string, dataUr
   io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
   io.to('admins').emit('message:updated', payload)
   console.log(`Transcribed message ${messageId}: "${text.slice(0, 40)}…"`)
-}
-
-/** Recent text conversation as a transcript for LLM context. */
-const recentTranscript = (conversationId: string, limit = 14, maxChars = 4000): string => {
-  const rows = db
-    .query(
-      `SELECT sender_id, content FROM (
-         SELECT id, sender_id, content FROM messages
-         WHERE conversation_id = ? AND type = 'text' AND deleted_at IS NULL
-         ORDER BY id DESC LIMIT ?
-       ) ORDER BY id ASC`
-    )
-    .all(conversationId, limit) as Array<{ sender_id: string; content: string }>
-  let transcript = rows
-    .map((r) => `${r.sender_id === ADMIN_ID ? 'Admin' : 'User'}: ${r.content}`)
-    .join('\n')
-  if (transcript.length > maxChars) transcript = transcript.slice(-maxChars)
-  return transcript
-}
-
-const buildAiSystem = (user: UserRow) => {
-  const labelNote =
-    user.label === 'vip'
-      ? ' — pelanggan VIP, utamakan keluhannya'
-      : user.label === 'priority'
-        ? ' — pelanggan prioritas'
-        : ''
-  return [
-    'Anda adalah "Asisten ChatKita", asisten customer service yang ramah, singkat, dan membantu.',
-    'Aturan wajib: bahasa Indonesia santun; maksimal 3 kalimat; TANPA markdown/format tebal;',
-    'jawab hanya berdasarkan INFO LAYANAN di bawah; jika tidak yakin atau butuh aksi admin,',
-    'sarankan dengan sopan untuk menunggu balasan admin. Jangan mengaruh informasi.',
-    '',
-    '== INFO LAYANAN ==',
-    settings.aiKb,
-    '',
-    `== PELANGGAN == Nama: ${user.name}${labelNote}`,
-  ].join('\n')
-}
-
-const aiBusy = new Set<string>() // one AI reply at a time per conversation
-
-/** Auto-reply as the admin while they are offline. */
-const aiAutoReply = async (conversation: ConversationRow, user: UserRow) => {
-  if (aiBusy.has(conversation.id)) return
-  aiBusy.add(conversation.id)
-  try {
-    if (!settings.aiEnabled || isOnline(ADMIN_ID)) return
-    const history = recentTranscript(conversation.id)
-    if (!history) return
-    io.to(`user:${user.id}`).emit('partner:typing', {
-      conversationId: conversation.id,
-      isTyping: true,
-    })
-    const reply = await llmComplete(
-      buildAiSystem(user),
-      `${history}\n\n(Balas pesan terakhir dari User.)`,
-      700
-    )
-    io.to(`user:${user.id}`).emit('partner:typing', {
-      conversationId: conversation.id,
-      isTyping: false,
-    })
-    if (!reply || isOnline(ADMIN_ID)) return
-    insertAndFanOut(conversation, ADMIN_ID, reply, 'text')
-    console.log(`AI auto-replied in ${conversation.id.slice(0, 8)}`)
-  } catch (err) {
-    console.error('AI auto-reply error:', (err as Error)?.message ?? err)
-  } finally {
-    aiBusy.delete(conversation.id)
-  }
-}
-
-/** Once per 6h per conversation outside operating hours. */
-const maybeOutsideHoursNotice = (conversation: ConversationRow) => {
-  if (isWithinHours()) return
-  const last = db
-    .query(
-      `SELECT created_at FROM messages WHERE conversation_id = ? AND type = 'system' ORDER BY id DESC LIMIT 1`
-    )
-    .get(conversation.id) as { created_at: number } | null
-  if (last && Date.now() - last.created_at < 6 * 3600_000) return
-  insertAndFanOut(conversation, ADMIN_ID, settings.outsideMsg, 'system')
-}
-
-/* ---------------------- chatbot menu (v5) ---------------------- */
-
-const menuListing = (): string | null => {
-  if (settings.chatMenuItems.length === 0) return null
-  return (
-    '📋 Menu layanan — balas dengan angka atau ketuk tombolnya:\n' +
-    settings.chatMenuItems.map((it, i) => `${i + 1}. ${it.label}`).join('\n')
-  )
-}
-
-/**
- * Direct chatbot-menu answer for a user's text, or the menu listing for
- * "menu". Null when the menu is off or nothing matches (falls through to
- * the AI auto-reply). Runs BEFORE the AI so mapped answers are instant.
- */
-const matchChatMenu = (text: string): string | null => {
-  if (!settings.chatMenuEnabled || settings.chatMenuItems.length === 0) return null
-  const t = text.trim().toLowerCase()
-  if (t === 'menu' || t === '0') return menuListing()
-  if (/^\d+$/.test(t)) {
-    const item = settings.chatMenuItems[Number(t) - 1]
-    return item ? item.answer : null
-  }
-  const item = settings.chatMenuItems.find((it) => it.label.trim().toLowerCase() === t)
-  return item ? item.answer : null
 }
 
 /* ------------------------------------------------------------------ */
@@ -1104,75 +853,6 @@ const pushConversationsTo = (userId: string) => {
 const pinHash = (pin: string, userId: string) =>
   createHash('sha256').update(`${userId}:${pin}`).digest('hex')
 
-/* ------------------------------ stats ------------------------------ */
-
-const computeStats = () => {
-  const startDay = startOfBangkokDay()
-  const weekAgo = startDay - 6 * 86400_000
-  const totalUsers =
-    (db.query(`SELECT COUNT(*) AS c FROM users WHERE role = 'user'`).get() as { c: number }).c
-  const totalMessages =
-    (db.query(`SELECT COUNT(*) AS c FROM messages WHERE deleted_at IS NULL`).get() as { c: number }).c
-  const messagesToday =
-    (db
-      .query(`SELECT COUNT(*) AS c FROM messages WHERE created_at >= ? AND deleted_at IS NULL`)
-      .get(startDay) as { c: number }).c
-  const activeToday =
-    (db
-      .query(`SELECT COUNT(*) AS c FROM users WHERE role = 'user' AND last_seen_at >= ?`)
-      .get(startDay) as { c: number }).c
-  const avgRow = db
-    .query(
-      `SELECT AVG(resp) AS avg FROM (
-         SELECT (
-           SELECT MIN(m2.created_at) FROM messages m2
-           WHERE m2.conversation_id = m.conversation_id
-             AND m2.sender_id = 'admin'
-             AND m2.created_at > m.created_at
-             AND m2.deleted_at IS NULL
-         ) - m.created_at AS resp
-         FROM messages m
-         WHERE m.sender_id != 'admin' AND m.created_at >= ? AND m.deleted_at IS NULL
-       ) WHERE resp IS NOT NULL AND resp >= 0 AND resp < 86400000`
-    )
-    .get(weekAgo) as { avg: number | null }
-
-  /* v5 — 7-day activity chart (two-way) + rating summary. */
-  const weekRows = db
-    .query('SELECT created_at, sender_id FROM messages WHERE created_at >= ? AND deleted_at IS NULL')
-    .all(weekAgo) as Array<{ created_at: number; sender_id: string }>
-  const daily: { date: string; user: number; admin: number }[] = []
-  for (let i = 6; i >= 0; i -= 1) {
-    const d = new Date(startDay - i * 86400_000 + TZ_OFFSET_MS)
-    daily.push({
-      date: `${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}`,
-      user: 0,
-      admin: 0,
-    })
-  }
-  for (const r of weekRows) {
-    const idx = 6 - Math.floor((r.created_at - weekAgo) / 86400_000)
-    if (idx < 0 || idx > 6) continue
-    if (r.sender_id === ADMIN_ID) daily[idx].admin += 1
-    else daily[idx].user += 1
-  }
-  const ratingRow = db.query('SELECT AVG(stars) AS avg, COUNT(*) AS c FROM ratings').get() as {
-    avg: number | null
-    c: number
-  }
-
-  return {
-    totalUsers,
-    totalMessages,
-    messagesToday,
-    activeToday,
-    avgResponseMin: avgRow.avg == null ? null : Math.round((avgRow.avg / 60000) * 10) / 10,
-    daily,
-    avgRating: ratingRow.avg == null ? null : Math.round(ratingRow.avg * 10) / 10,
-    ratingCount: ratingRow.c,
-  }
-}
-
 /* ------------------------------------------------------------------ */
 /* Connection                                                          */
 /* ------------------------------------------------------------------ */
@@ -1183,7 +863,9 @@ io.on('connection', (socket) => {
   /* ---------------------- public config (pre-login) ---------------------- */
 
   socket.on('public:settings', handler(socket, (_data, ack) => {
-    ack({ ok: true, publicSettings: getPublicSettings() })
+    // Pre-login Web Push config: just the VAPID public key ("" when push
+    // is unavailable).
+    ack({ ok: true, pushPublicKey: VAPID_PUBLIC })
   }))
 
   /* ---------------------------- auth ---------------------------- */
@@ -1216,12 +898,11 @@ io.on('connection', (socket) => {
       if (!user) {
         const id = crypto.randomUUID()
         const ts = now()
-        const topicRaw = typeof data?.topic === 'string' ? data.topic.trim().slice(0, 60) : ''
         db.run(
-          "INSERT INTO users (id, name, role, created_at, last_seen_at, topic) VALUES (?, ?, 'user', ?, ?, ?)",
-          [id, name, ts, ts, topicRaw || null]
+          "INSERT INTO users (id, name, role, created_at, last_seen_at) VALUES (?, ?, 'user', ?, ?)",
+          [id, name, ts, ts]
         )
-        user = { id, name, role: 'user', created_at: ts, last_seen_at: ts, topic: topicRaw || null }
+        user = { id, name, role: 'user', created_at: ts, last_seen_at: ts }
         console.log(`New user registered: "${name}" (${id})`)
       } else {
         // PIN gate: fresh (name-only) logins must present the PIN.
@@ -1245,12 +926,6 @@ io.on('connection', (socket) => {
           }
         }
         const ts = now()
-        // v5 — remember the optional pre-chat topic if one was chosen.
-        const topicRaw = typeof data?.topic === 'string' ? data.topic.trim().slice(0, 60) : ''
-        if (topicRaw && topicRaw !== (user.topic ?? '')) {
-          db.run('UPDATE users SET topic = ? WHERE id = ?', [topicRaw, user.id])
-          user.topic = topicRaw
-        }
         db.run('UPDATE users SET last_seen_at = ? WHERE id = ?', [ts, user.id])
         user.last_seen_at = ts
       }
@@ -1283,10 +958,10 @@ io.on('connection', (socket) => {
           ? toPartnerInfo(admin)
           : { id: ADMIN_ID, name: ADMIN_NAME, online: false, lastSeenAt: null },
         messages: getMessages(conversation.id),
-        /** How far the admin has read → ✓✓ on my sent messages. */
+        // How far the admin has read → ✓✓ on my sent messages.
         partnerLastReadId: getReadUpTo(conversation.id, ADMIN_ID),
-        // v5 — public service config for the user UI + pinned banner.
-        publicSettings: getPublicSettings(),
+        // VAPID public key for Web Push ("" when push is unavailable).
+        pushPublicKey: VAPID_PUBLIC,
         pinnedMessageId: conversation.pinned_message_id ?? null,
         pinned: pinnedSnapshotOf(conversation),
       })
@@ -1438,20 +1113,6 @@ io.on('connection', (socket) => {
         db.run('UPDATE conversations SET archived_at = NULL WHERE id = ?', [conversation.id])
         conversation.archived_at = null
         pushConversationsTo(ADMIN_ID)
-      }
-
-      // AI hooks only for human user messages (never for the admin).
-      if (me !== ADMIN_ID && type !== 'system') {
-        maybeOutsideHoursNotice(conversation)
-        // v5 — the chatbot menu answers instantly, before the AI kicks in.
-        const menuAnswer = type === 'text' ? matchChatMenu(trimmed) : null
-        if (menuAnswer) {
-          insertAndFanOut(conversation, ADMIN_ID, menuAnswer, 'text')
-          console.log(`Chat menu answered in ${conversation.id.slice(0, 8)}`)
-        } else if (!isOnline(ADMIN_ID) && settings.aiEnabled) {
-          const userRow = findUserById(me)
-          if (userRow) void aiAutoReply(conversation, userRow)
-        }
       }
 
       console.log(
@@ -1672,7 +1333,9 @@ io.on('connection', (socket) => {
         800
       ).then((translation) => {
         if (!translation) {
-          ack({ ok: false, error: 'AI_UNAVAILABLE' })
+          // Soft failure: the contract allows `translation: null` on success
+          // (there is no AI_UNAVAILABLE error code in the shared contract).
+          ack({ ok: true, translation: null })
           return
         }
         db.run('UPDATE messages SET translation = ? WHERE id = ?', [translation, id])
@@ -1685,7 +1348,7 @@ io.on('connection', (socket) => {
     })
   )
 
-  /* ------------------ v5: pin / archive / export / broadcast ------------------ */
+  /* ------------------ v5: pin / archive ------------------ */
 
   socket.on(
     'conversation:pin',
@@ -1756,116 +1419,12 @@ io.on('connection', (socket) => {
         conversationId: conversation.id,
         archived,
       })
-      // v5 — closing a conversation asks the customer for a star rating.
-      if (archived) {
-        insertAndFanOut(
-          conversation,
-          ADMIN_ID,
-          'Chat ditutup. Bagaimana layanan kami hari ini? Nilai dengan ketuk bintang di bawah 🙏',
-          'system',
-          { kind: 'rating_request' }
-        )
-      }
       pushConversationsTo(ADMIN_ID)
       console.log(`Conversation ${conversation.id.slice(0, 8)} ${archived ? 'archived' : 'unarchived'}`)
     })
   )
 
-  socket.on(
-    'conversation:export',
-    handler(socket, (data, ack) => {
-      const me = authedUserId(socket)
-      if (!me || me !== ADMIN_ID) {
-        ack({ ok: false, error: 'UNAUTHORIZED' })
-        return
-      }
-      const conversation =
-        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
-      if (!conversation) {
-        ack({ ok: false, error: 'NOT_FOUND' })
-        return
-      }
-      const partner = getPartnerUser(conversation, me)
-      ack({
-        ok: true,
-        conversationId: conversation.id,
-        partnerName: partner.name,
-        messages: getMessages(conversation.id),
-      })
-    })
-  )
-
-  socket.on(
-    'broadcast:send',
-    handler(socket, (data, ack) => {
-      const me = authedUserId(socket)
-      if (!me || me !== ADMIN_ID) {
-        ack({ ok: false, error: 'UNAUTHORIZED' })
-        return
-      }
-      const content = typeof data?.content === 'string' ? data.content.trim() : ''
-      if (content.length < 1 || content.length > MAX_MESSAGE_LENGTH) {
-        ack({ ok: false, error: 'INVALID_MESSAGE' })
-        return
-      }
-      const rows = db
-        .query(
-          `SELECT c.* FROM conversations c
-           JOIN users u ON u.id = (CASE WHEN c.user_a_id = 'admin' THEN c.user_b_id ELSE c.user_a_id END)
-           WHERE u.role = 'user'`
-        )
-        .all() as ConversationRow[]
-      let sent = 0
-      for (const conversation of rows) {
-        try {
-          insertAndFanOut(conversation, ADMIN_ID, content, 'broadcast')
-          sent += 1
-        } catch (err) {
-          console.error('Broadcast insert failed:', (err as Error)?.message ?? err)
-        }
-      }
-      ack({ ok: true, sent })
-      console.log(`Broadcast sent to ${sent} conversations`)
-    })
-  )
-
-  /* ------------------------- v5: rating + web push ------------------------- */
-
-  socket.on(
-    'rating:submit',
-    handler(socket, (data, ack) => {
-      const me = authedUserId(socket)
-      if (!me || me === ADMIN_ID) {
-        ack({ ok: false, error: 'UNAUTHORIZED' })
-        return
-      }
-      const stars = Number(data?.stars)
-      if (!Number.isInteger(stars) || stars < 1 || stars > 5) {
-        ack({ ok: false, error: 'INVALID_MESSAGE' })
-        return
-      }
-      const conversation =
-        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
-      if (!conversation || !isParticipant(conversation, me)) {
-        ack({ ok: false, error: 'FORBIDDEN' })
-        return
-      }
-      db.run(
-        `INSERT INTO ratings (conversation_id, user_id, stars, created_at) VALUES (?, ?, ?, ?)
-         ON CONFLICT(conversation_id, user_id) DO UPDATE SET stars = excluded.stars, created_at = excluded.created_at`,
-        [conversation.id, me, stars, now()]
-      )
-      ack({ ok: true, stars })
-      insertAndFanOut(
-        conversation,
-        ADMIN_ID,
-        '⭐ Terima kasih atas penilaian Anda! Masukan ini membantu kami melayani lebih baik.',
-        'system',
-        { kind: 'rating_thanks' }
-      )
-      console.log(`Rating ${String(stars)}★ from ${me.slice(0, 8)}`)
-    })
-  )
+  /* ------------------------- v5: web push ------------------------- */
 
   socket.on(
     'push:subscribe',
@@ -1910,236 +1469,6 @@ io.on('connection', (socket) => {
       db.run('UPDATE users SET pin_hash = ? WHERE id = ?', [pinHash(pin, me), me])
       console.log(`PIN set for ${me.slice(0, 8)}`)
       ack({ ok: true, hasPin: true })
-    })
-  )
-
-  /* ------------------------- admin CRM & config ------------------------ */
-
-  socket.on(
-    'admin:updateuser',
-    handler(socket, (data, ack) => {
-      const me = authedUserId(socket)
-      if (!me || me !== ADMIN_ID) {
-        ack({ ok: false, error: 'UNAUTHORIZED' })
-        return
-      }
-      const userId = typeof data?.userId === 'string' ? data.userId : ''
-      const target = userId ? findUserByRoleAndId(userId, 'user') : null
-      if (!target) {
-        ack({ ok: false, error: 'NOT_FOUND' })
-        return
-      }
-      let { label, note } = data ?? {}
-      if (label !== null && label !== undefined) {
-        if (typeof label !== 'string' || !(USER_LABELS as readonly string[]).includes(label)) {
-          ack({ ok: false, error: 'INVALID_LABEL' })
-          return
-        }
-      } else label = null
-      if (note !== null && note !== undefined) {
-        if (typeof note !== 'string') {
-          ack({ ok: false, error: 'INVALID_NOTE' })
-          return
-        }
-        note = note.trim().slice(0, 500)
-      } else note = null
-      db.run('UPDATE users SET label = ?, note = ? WHERE id = ?', [label, note, target.id])
-      ack({ ok: true, userId: target.id, label, note })
-      pushConversationsTo(ADMIN_ID)
-    })
-  )
-
-  socket.on(
-    'admin:getnote',
-    handler(socket, (data, ack) => {
-      const me = authedUserId(socket)
-      if (!me || me !== ADMIN_ID) {
-        ack({ ok: false, error: 'UNAUTHORIZED' })
-        return
-      }
-      const userId = typeof data?.userId === 'string' ? data.userId : ''
-      const target = userId ? findUserByRoleAndId(userId, 'user') : null
-      if (!target) {
-        ack({ ok: false, error: 'NOT_FOUND' })
-        return
-      }
-      ack({ ok: true, userId: target.id, label: target.label ?? null, note: target.note ?? null })
-    })
-  )
-
-  socket.on(
-    'admin:settings',
-    handler(socket, (data, ack) => {
-      const me = authedUserId(socket)
-      if (!me || me !== ADMIN_ID) {
-        ack({ ok: false, error: 'UNAUTHORIZED' })
-        return
-      }
-      const s = data?.settings ?? {}
-      if (s.hours && typeof s.hours === 'object') {
-        const h = s.hours
-        const next = { ...settings.hours }
-        if (typeof h.enabled === 'boolean') next.enabled = h.enabled
-        if (typeof h.start === 'string' && /^\d{1,2}:\d{2}$/.test(h.start)) next.start = h.start
-        if (typeof h.end === 'string' && /^\d{1,2}:\d{2}$/.test(h.end)) next.end = h.end
-        if (Array.isArray(h.days)) {
-          const days = [...new Set(h.days.filter((d: unknown) => typeof d === 'number' && d >= 0 && d <= 6))]
-          if (days.length > 0) next.days = days.sort()
-        }
-        settings.hours = next
-      }
-      if (typeof s.aiEnabled === 'boolean') settings.aiEnabled = s.aiEnabled
-      if (typeof s.aiKb === 'string') settings.aiKb = s.aiKb.trim().slice(0, 4000) || DEFAULT_SETTINGS.aiKb
-      if (typeof s.outsideMsg === 'string')
-        settings.outsideMsg = s.outsideMsg.trim().slice(0, 300) || DEFAULT_SETTINGS.outsideMsg
-      if (Array.isArray(s.quickReplies)) {
-        const valid = s.quickReplies
-          .filter(
-            (q: unknown) =>
-              !!q &&
-              typeof (q as { label?: unknown }).label === 'string' &&
-              typeof (q as { text?: unknown }).text === 'string'
-          )
-          .map((q: { label: string; text: string }) => ({
-            label: q.label.trim().slice(0, 40),
-            text: q.text.trim().slice(0, 300),
-          }))
-          .filter((q) => q.label && q.text)
-          .slice(0, 20)
-        settings.quickReplies = valid
-      }
-      /* v5 fields */
-      if (typeof s.slaMinutes === 'number' && Number.isFinite(s.slaMinutes)) {
-        settings.slaMinutes = Math.min(240, Math.max(1, Math.round(s.slaMinutes)))
-      }
-      if (typeof s.chatMenuEnabled === 'boolean') settings.chatMenuEnabled = s.chatMenuEnabled
-      if (Array.isArray(s.chatMenuItems)) {
-        const valid = s.chatMenuItems
-          .filter(
-            (m: unknown) =>
-              !!m &&
-              typeof (m as { label?: unknown }).label === 'string' &&
-              typeof (m as { answer?: unknown }).answer === 'string'
-          )
-          .map((m: { label: string; answer: string }) => ({
-            label: m.label.trim().slice(0, 60),
-            answer: m.answer.trim().slice(0, 500),
-          }))
-          .filter((m) => m.label && m.answer)
-          .slice(0, 12)
-        settings.chatMenuItems = valid
-      }
-      if (typeof s.preChatTopics === 'string') settings.preChatTopics = s.preChatTopics.slice(0, 300)
-      saveSettings()
-      console.log('Settings updated by admin')
-      ack({ ok: true, settings })
-      // v5 — push fresh public config to every connected user right away
-      // (chatbot menu chips / topics appear without a reload).
-      io.emit('public:settings:update', getPublicSettings())
-    })
-  )
-
-  socket.on(
-    'admin:getsettings',
-    handler(socket, (data, ack) => {
-      const me = authedUserId(socket)
-      if (!me || me !== ADMIN_ID) {
-        ack({ ok: false, error: 'UNAUTHORIZED' })
-        return
-      }
-      ack({ ok: true, settings })
-    })
-  )
-
-  socket.on(
-    'admin:stats',
-    handler(socket, (data, ack) => {
-      const me = authedUserId(socket)
-      if (!me || me !== ADMIN_ID) {
-        ack({ ok: false, error: 'UNAUTHORIZED' })
-        return
-      }
-      ack({ ok: true, stats: computeStats() })
-    })
-  )
-
-  /* ------------------------------ AI admin ----------------------------- */
-
-  socket.on(
-    'ai:suggest',
-    handler(socket, (data, ack) => {
-      const me = authedUserId(socket)
-      if (!me || me !== ADMIN_ID) {
-        ack({ ok: false, error: 'UNAUTHORIZED' })
-        return
-      }
-      const conversation =
-        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
-      if (!conversation) {
-        ack({ ok: false, error: 'NOT_FOUND' })
-        return
-      }
-      const history = recentTranscript(conversation.id, 12)
-      if (!history) {
-        ack({ ok: false, error: 'AI_UNAVAILABLE' })
-        return
-      }
-      llmComplete(
-        'Anda asisten admin customer service ChatKita. Buat TIGA opsi balasan singkat ' +
-          '(masing-masing maksimal 120 karakter) untuk pesan user terakhir dalam riwayat. ' +
-          'Gaya: ramah, natural, sesuai isi chat. Jawab HANYA tiga baris bernomor, ' +
-          'tanpa teks pembuka/penutup, tanpa markdown, tanpa tanda kutip. Contoh bentuk:\n' +
-          '1. Halo! Terima kasih, pesanan sedang kami proses ya.\n' +
-          '2. Baik, mohon tunggu sebentar, admin cek dulu.\n' +
-          '3. Siap, akan kami informasikan setelah diproses.',
-        history,
-        600
-      ).then((text) => {
-        if (!text) {
-          ack({ ok: false, error: 'AI_UNAVAILABLE' })
-          return
-        }
-        const suggestions = text
-          .split('\n')
-          .map((line) => /^\s*\d+[.)]\s*(.+)$/.exec(line)?.[1]?.trim())
-          .filter((s): s is string => !!s && s.length > 0)
-          .slice(0, 3)
-        ack({ ok: true, suggestions })
-      })
-    })
-  )
-
-  socket.on(
-    'ai:summary',
-    handler(socket, (data, ack) => {
-      const me = authedUserId(socket)
-      if (!me || me !== ADMIN_ID) {
-        ack({ ok: false, error: 'UNAUTHORIZED' })
-        return
-      }
-      const conversation =
-        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
-      if (!conversation) {
-        ack({ ok: false, error: 'NOT_FOUND' })
-        return
-      }
-      const history = recentTranscript(conversation.id, 30)
-      if (!history) {
-        ack({ ok: false, error: 'AI_UNAVAILABLE' })
-        return
-      }
-      llmComplete(
-        'Anda asisten admin customer service. Ringkas percakapan berikut dalam 1–2 kalimat ' +
-          'bahasa Indonesia: kebutuhan/keluhan user dan status terakhirnya. Tanpa markdown.',
-        history,
-        400
-      ).then((summary) => {
-        if (!summary) {
-          ack({ ok: false, error: 'AI_UNAVAILABLE' })
-          return
-        }
-        ack({ ok: true, summary })
-      })
     })
   )
 
@@ -2188,7 +1517,7 @@ ensureAdmin()
 
 httpServer.listen(PORT, () => {
   console.log(
-    `ChatKita chat-service v5 listening on port ${PORT} (path: '/', ai: ${settings.aiEnabled ? 'on' : 'off'}, push: ${VAPID_PUBLIC ? 'on' : 'off'})`
+    `ChatKita chat-service v6 listening on port ${PORT} (path: '/', push: ${VAPID_PUBLIC ? 'on' : 'off'})`
   )
 })
 

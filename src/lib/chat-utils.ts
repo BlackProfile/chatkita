@@ -113,23 +113,6 @@ export function messagePreview(
   if (deleted) return "🚫 Pesan ini dihapus";
   if (type === "image") return "📷 Foto";
   if (type === "voice") return "🎤 Pesan suara";
-  if (type === "broadcast") return `📢 ${content}`;
   if (type === "system") return content;
   return content;
-}
-
-/**
- * SLA (v5): human minutes a user message has been waiting for an admin
- * reply, or null when the last message does not need one.
- */
-export function waitingMinutes(
-  lastMessage: { senderId: string; type: string; createdAt: string } | null | undefined,
-  adminId: string
-): number | null {
-  if (!lastMessage) return null;
-  if (lastMessage.senderId === adminId) return null;
-  if (lastMessage.type === "system" || lastMessage.type === "broadcast") return null;
-  const ts = Date.parse(lastMessage.createdAt);
-  if (Number.isNaN(ts)) return null;
-  return Math.max(0, Math.floor((Date.now() - ts) / 60000));
 }
