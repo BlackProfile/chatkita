@@ -57,8 +57,9 @@
  */
 
 import { createServer } from 'http'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { createHash } from 'crypto'
+import { readFileSync, unlinkSync } from 'node:fs'
 import { Database } from 'bun:sqlite'
 import { Server, type Socket as IoSocket } from 'socket.io'
 import ZAI from 'z-ai-web-dev-sdk'
@@ -73,12 +74,27 @@ const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
 const MAX_NAME_LENGTH = 40
 const MAX_MESSAGE_LENGTH = 1000
-const HISTORY_LIMIT = 500
-/** Max data-URL payload for image/voice messages (base64 chars). */
+/** v8 — messages per history page (auth/history/older); older pages load
+ *  on demand via `messages:older` instead of one huge payload. */
+const HISTORY_PAGE_SIZE = 50
+/** Max data-URL payload for LEGACY image/voice messages (base64 chars).
+ *  v8 clients upload to /api/upload instead; data URLs still accepted. */
 const MAX_MEDIA_LENGTH = 2_500_000
 /** v7 — max size of out-of-band file messages in bytes (25 MiB). The
  * /api/upload route enforces the same cap; this is the message-side check. */
 const MAX_FILE_BYTES = 26_214_400
+/** v8 — per-account media retention: disk media older than this is swept
+ *  (payload redacted → "media kedaluwarsa" tombstone). Days, env-overridable. */
+const RETENTION_MS =
+  Math.min(365, Math.max(1, Number(process.env.MEDIA_RETENTION_DAYS) || 30)) * 86_400_000
+/** v8 — per-account storage quota for disk media (sum of messages.file_size). */
+const QUOTA_BYTES = 268_435_456 // 250 MiB
+/** v8 — per-account send rate limits (sliding 1-minute window). */
+const RATE_TEXT_PER_MIN = 30
+const RATE_MEDIA_PER_MIN = 12
+/** v8 — media directory shared with the Next.js /api/upload + /api/media
+ *  routes (project-root relative so the sweeper can free disk space). */
+const MEDIA_DIR = resolve(import.meta.dir, '../../db/media')
 /** v7 — file messages: `content` must be the bare /api/media/<name> URL
  * path returned by POST /api/upload (no protocol/host, no whitespace). */
 const FILE_URL_PATTERN = /^\/api\/media\/[A-Za-z0-9._-]{1,120}$/
@@ -175,6 +191,9 @@ addColumn('conversations', 'pinned_message_id', 'INTEGER')
 addColumn('messages', 'file_name', 'TEXT')
 addColumn('messages', 'file_size', 'INTEGER')
 addColumn('messages', 'mime_type', 'TEXT')
+/* v8 migrations — server lightening (thumbnails + retention tombstones) */
+addColumn('messages', 'thumb_url', 'TEXT')
+addColumn('messages', 'media_expired_at', 'INTEGER')
 
 db.run(`
   CREATE TABLE IF NOT EXISTS message_reactions (
@@ -233,6 +252,9 @@ interface MessageRow {
   file_name?: string | null
   file_size?: number | null
   mime_type?: string | null
+  /* v8 — tiny preview URL for photos/videos; retention tombstone stamp. */
+  thumb_url?: string | null
+  media_expired_at?: number | null
 }
 
 /* ------------------------------ API types ------------------------------ */
@@ -257,6 +279,10 @@ interface ChatMessageApi {
   fileSize?: number
   /** file messages: MIME type (e.g. application/pdf, video/mp4). */
   mimeType?: string
+  /** v8 — tiny preview image (<30 KB) for photos & videos. */
+  thumbUrl?: string
+  /** v8 — media was removed by the retention sweeper (tombstone). */
+  mediaExpiredAt?: string
   /** Emoji reactions grouped by emoji with the reacting user ids. */
   reactions?: { emoji: string; userIds: string[] }[]
 }
@@ -272,7 +298,16 @@ interface ConversationOverviewApi {
   id: string
   partner: PartnerInfoApi
   lastMessage:
-    | { id: number; senderId: string; content: string; createdAt: string; type: string; deleted: boolean }
+    | {
+        id: number
+        senderId: string
+        content: string
+        createdAt: string
+        type: string
+        deleted: boolean
+        fileName?: string
+        mediaExpired?: boolean
+      }
     | null
   lastMessageAt: string
   unread: number
@@ -386,11 +421,21 @@ const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   ...(row.file_name && !row.deleted_at ? { fileName: row.file_name } : {}),
   ...(typeof row.file_size === 'number' && !row.deleted_at ? { fileSize: row.file_size } : {}),
   ...(row.mime_type && !row.deleted_at ? { mimeType: row.mime_type } : {}),
+  // v8 — thumbnail + retention tombstone (never emitted after delete).
+  ...(row.thumb_url && !row.deleted_at && !row.media_expired_at
+    ? { thumbUrl: row.thumb_url }
+    : {}),
+  ...(row.media_expired_at && !row.deleted_at
+    ? { mediaExpiredAt: new Date(row.media_expired_at).toISOString() }
+    : {}),
 })
 
 /** Human-readable one-liner for previews and reply quotes. */
-const snippetOf = (row: Pick<MessageRow, 'type' | 'content' | 'deleted_at' | 'file_name'>): string => {
+const snippetOf = (
+  row: Pick<MessageRow, 'type' | 'content' | 'deleted_at' | 'file_name' | 'media_expired_at'>
+): string => {
   if (row.deleted_at) return 'Pesan ini dihapus'
+  if (row.media_expired_at) return '⏳ Media kedaluwarsa'
   const type = row.type ?? 'text'
   if (type === 'image') return '📷 Foto'
   if (type === 'voice') return '🎤 Pesan suara'
@@ -463,9 +508,11 @@ const attachReplyPreviews = (rows: MessageRow[], messages: ChatMessageApi[]) => 
   if (ids.length === 0) return
   const placeholders = ids.map(() => '?').join(',')
   const originals = db
-    .query(`SELECT id, sender_id, content, type, deleted_at, file_name FROM messages WHERE id IN (${placeholders})`)
+    .query(
+      `SELECT id, sender_id, content, type, deleted_at, file_name, media_expired_at FROM messages WHERE id IN (${placeholders})`
+    )
     .all(...ids) as Array<
-    Pick<MessageRow, 'id' | 'sender_id' | 'content' | 'type' | 'deleted_at' | 'file_name'>
+    Pick<MessageRow, 'id' | 'sender_id' | 'content' | 'type' | 'deleted_at' | 'file_name' | 'media_expired_at'>
   >
   const byId = new Map(originals.map((o) => [o.id, o]))
   for (const m of messages) {
@@ -538,19 +585,43 @@ const getPartnerUser = (conversation: ConversationRow, userId: string): UserRow 
   return partner
 }
 
-const getMessages = (conversationId: string): ChatMessageApi[] => {
-  const rows = db
-    .query(
-      `SELECT * FROM (
-         SELECT * FROM messages WHERE conversation_id = ?
-         ORDER BY id DESC LIMIT ${HISTORY_LIMIT}
-       ) ORDER BY id ASC`
-    )
-    .all(conversationId) as MessageRow[]
+/**
+ * One history page (v8): the newest `limit` messages of `conversationId`,
+ * optionally ending just before `beforeId` (exclusive), ascending. Reply
+ * previews + reactions are attached and `hasMore` reports whether even
+ * older pages exist — clients load them via `messages:older` on demand.
+ */
+const getMessagesPage = (
+  conversationId: string,
+  beforeId?: number,
+  limit = HISTORY_PAGE_SIZE
+): { messages: ChatMessageApi[]; hasMore: boolean } => {
+  const fetched = (
+    beforeId
+      ? (db
+          .query(
+            `SELECT * FROM (
+               SELECT * FROM messages WHERE conversation_id = ? AND id < ?
+               ORDER BY id DESC LIMIT ?
+             ) ORDER BY id ASC`
+          )
+          .all(conversationId, beforeId, limit + 1) as MessageRow[])
+      : (db
+          .query(
+            `SELECT * FROM (
+               SELECT * FROM messages WHERE conversation_id = ?
+               ORDER BY id DESC LIMIT ?
+             ) ORDER BY id ASC`
+          )
+          .all(conversationId, limit + 1) as MessageRow[])
+  )
+  const hasMore = fetched.length > limit
+  // The extra row is the OLDEST of the DESC fetch → drop it (ASC order).
+  const rows = hasMore ? fetched.slice(1) : fetched
   const messages = rows.map(toChatMessage)
   attachReplyPreviews(rows, messages)
   attachReactions(rows, messages)
-  return messages
+  return { messages, hasMore }
 }
 
 /** Current last_read_message_id for (conversation, user). */
@@ -611,6 +682,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         lm.type AS last_type,
         lm.deleted_at AS last_deleted,
         lm.file_name AS last_file_name,
+        lm.media_expired_at AS last_media_expired,
         pm.id AS pin_id,
         pm.sender_id AS pin_sender,
         pm.content AS pin_content,
@@ -656,6 +728,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     last_type: string | null
     last_deleted: number | null
     last_file_name: string | null
+    last_media_expired: number | null
     pin_id: number | null
     pin_sender: string | null
     pin_content: string | null
@@ -685,6 +758,9 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
             deleted: !!r.last_deleted,
             ...(r.last_file_name && !r.last_deleted
               ? { fileName: r.last_file_name }
+              : {}),
+            ...(r.last_media_expired != null && !r.last_deleted
+              ? { mediaExpired: true }
               : {}),
           }
         : null,
@@ -745,6 +821,36 @@ const removeOnlineSocket = (userId: string, socketId: string) => {
 
 type MessageType = 'text' | 'image' | 'voice' | 'file' | 'system'
 
+/* ------------------------------------------------------------------ */
+/* v8 guards — per-account rate limits + storage quota                 */
+/* ------------------------------------------------------------------ */
+
+/** Sliding 1-minute windows per user + bucket ("text" / "media"). */
+const rateBuckets = new Map<string, number[]>()
+const rateAllowed = (userId: string, bucket: string, max: number): boolean => {
+  const key = `${bucket}:${userId}`
+  const cutoff = now() - 60_000
+  const stamps = (rateBuckets.get(key) ?? []).filter((t) => t > cutoff)
+  if (stamps.length >= max) {
+    rateBuckets.set(key, stamps) // keep pruned list even when rejected
+    return false
+  }
+  stamps.push(now())
+  rateBuckets.set(key, stamps)
+  if (rateBuckets.size > 5000) rateBuckets.clear() // crude memory cap
+  return true
+}
+
+/** Total bytes of live disk media owned by `userId` (v8 storage quota). */
+const storedMediaBytes = (userId: string): number =>
+  ((db
+    .query(
+      `SELECT COALESCE(SUM(file_size), 0) AS total FROM messages
+       WHERE sender_id = ? AND file_size IS NOT NULL
+         AND deleted_at IS NULL AND media_expired_at IS NULL`
+    )
+    .get(userId) as { total: number | null })?.total ?? 0)
+
 const insertAndFanOut = (
   conversation: ConversationRow,
   senderId: string,
@@ -753,16 +859,18 @@ const insertAndFanOut = (
   opts: {
     replyToId?: number
     durationMs?: number
-    /* v7 — file-message metadata (type 'file' only, stored as-is). */
+    /* v7/v8 — media metadata (file always; image/voice when disk-backed). */
     fileName?: string
     fileSize?: number
     mimeType?: string
+    /* v8 — tiny preview URL for photos/videos. */
+    thumbUrl?: string
   } = {}
 ): ChatMessageApi => {
   const ts = now()
-  const isFile = type === 'file'
+  const hasMediaMeta = type === 'file' || type === 'image' || type === 'voice'
   const result = db.run(
-    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     [
       conversation.id,
       senderId,
@@ -771,9 +879,10 @@ const insertAndFanOut = (
       type,
       opts.replyToId ?? null,
       opts.durationMs ?? null,
-      isFile ? (opts.fileName ?? null) : null,
-      isFile && typeof opts.fileSize === 'number' ? opts.fileSize : null,
-      isFile ? (opts.mimeType ?? null) : null,
+      hasMediaMeta ? (opts.fileName ?? null) : null,
+      hasMediaMeta && typeof opts.fileSize === 'number' ? opts.fileSize : null,
+      hasMediaMeta ? (opts.mimeType ?? null) : null,
+      opts.thumbUrl ?? null,
     ]
   )
   db.run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [ts, conversation.id])
@@ -848,8 +957,36 @@ const asrTranscribe = async (dataUrl: string): Promise<string | null> => {
   }
 }
 
+/**
+ * Resolve voice-message content into a data URL for the ASR engine.
+ * Legacy rows carry data URLs directly; v8 rows point at db/media files,
+ * whose bytes are read from the SHARED media directory on demand.
+ */
+const voiceDataUrlOf = (content: string): string | null => {
+  if (content.startsWith('data:')) return content
+  const m = /^\/api\/media\/([A-Za-z0-9._-]{1,120})$/.exec(content)
+  if (!m) return null
+  try {
+    const bytes = readFileSync(join(MEDIA_DIR, m[1]))
+    if (bytes.length === 0 || bytes.length > 25_000_000) return null
+    const name = m[1]
+    const mime = /\.(ogg|oga|opus)$/.test(name)
+      ? 'audio/ogg'
+      : /\.(mp4|m4a)$/.test(name)
+        ? 'audio/mp4'
+        : /\.wav$/.test(name)
+          ? 'audio/wav'
+          : 'audio/webm'
+    return `data:${mime};base64,${bytes.toString('base64')}`
+  } catch {
+    return null
+  }
+}
+
 /** Best-effort voice-note transcription → `message:updated` broadcast. */
-const transcribeAsync = async (messageId: number, conversationId: string, dataUrl: string) => {
+const transcribeVoice = async (messageId: number, conversationId: string, content: string) => {
+  const dataUrl = voiceDataUrlOf(content)
+  if (!dataUrl) return
   const text = await asrTranscribe(dataUrl)
   if (!text) return
   db.run('UPDATE messages SET transcript = ? WHERE id = ? AND deleted_at IS NULL', [text, messageId])
@@ -860,6 +997,98 @@ const transcribeAsync = async (messageId: number, conversationId: string, dataUr
   io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
   io.to('admins').emit('message:updated', payload)
   console.log(`Transcribed message ${messageId}: "${text.slice(0, 40)}…"`)
+}
+
+/* ------------------------------------------------------------------ */
+/* v8 — retention sweeper (media aging) + SQLite housekeeping          */
+/* ------------------------------------------------------------------ */
+
+/** Stored media file name from a /api/media/<name> URL (null otherwise). */
+const mediaNameOf = (content: string | null | undefined): string | null => {
+  if (!content) return null
+  const m = /^\/api\/media\/([A-Za-z0-9._-]{1,120})$/.exec(content)
+  return m ? m[1] : null
+}
+
+/** Live references (content or thumb_url) to a stored media file. */
+const mediaRefCount = (name: string): number =>
+  ((db
+    .query(
+      `SELECT
+        (SELECT COUNT(*) FROM messages
+          WHERE content = ? AND deleted_at IS NULL AND media_expired_at IS NULL) +
+        (SELECT COUNT(*) FROM messages
+          WHERE thumb_url = ? AND deleted_at IS NULL AND media_expired_at IS NULL)
+       AS refs`
+    )
+    .get(`/api/media/${name}`, `/api/media/${name}`) as { refs: number } | null)?.refs ?? 0)
+
+/** Delete the disk file when nothing references it anymore (SHA-256 dedup
+ *  means several messages may share one file — never delete shared copies). */
+const releaseMediaFile = (name: string | null) => {
+  if (!name) return
+  try {
+    if (mediaRefCount(name) === 0) {
+      unlinkSync(join(MEDIA_DIR, name))
+      console.log(`[retensi] file media dihapus: ${name}`)
+    }
+  } catch {
+    /* missing file or still referenced — fine */
+  }
+}
+
+/**
+ * Expire media older than RETENTION_MS: redact payloads (content, thumb,
+ * metadata), keep the message + text transcript as a "kedaluwarsa"
+ * tombstone, free disk space, and notify both sides live.
+ */
+const sweepExpiredMedia = () => {
+  const cutoff = now() - RETENTION_MS
+  const rows = db
+    .query(
+      `SELECT id, conversation_id, content, thumb_url FROM messages
+       WHERE media_expired_at IS NULL AND deleted_at IS NULL
+         AND type IN ('image', 'voice', 'file') AND created_at < ?`
+    )
+    .all(cutoff) as Array<Pick<MessageRow, 'id' | 'conversation_id' | 'content' | 'thumb_url'>>
+  if (rows.length === 0) return
+  const ts = now()
+  for (const row of rows) {
+    // Redact FIRST so the row's own reference no longer counts in
+    // mediaRefCount() — otherwise a single-message file is never freed.
+    db.run(
+      `UPDATE messages SET content = '', thumb_url = NULL, file_name = NULL,
+         file_size = NULL, mime_type = NULL, media_expired_at = ? WHERE id = ?`,
+      [ts, row.id]
+    )
+    const conv = getConversation(row.conversation_id)
+    if (conv) {
+      const payload = {
+        id: row.id,
+        conversationId: row.conversation_id,
+        content: '',
+        mediaExpiredAt: new Date(ts).toISOString(),
+      }
+      io.to(`user:${conv.user_a_id}`).emit('message:updated', payload)
+      io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
+      io.to('admins').emit('message:updated', payload)
+    }
+    // Then free the disk files when nothing live references them anymore.
+    releaseMediaFile(mediaNameOf(row.content))
+    releaseMediaFile(mediaNameOf(row.thumb_url))
+  }
+  console.log(`[retensi] ${rows.length} media kedaluwarsa dibersihkan`)
+}
+
+/** WAL checkpoint + VACUUM — return disk space and keep the DB lean. */
+const dbMaintenance = () => {
+  try {
+    db.run('PRAGMA wal_checkpoint(TRUNCATE)')
+    db.run('VACUUM')
+    console.log('[maintenance] wal_checkpoint + VACUUM selesai')
+  } catch (err) {
+    console.error('[maintenance] gagal:', (err as Error)?.message ?? err)
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1024,6 +1253,7 @@ io.on('connection', (socket) => {
 
       console.log(`User "${user.name}" authenticated (socket ${socket.id})`)
       const admin = findUserById(ADMIN_ID) // seeded on boot — always exists
+      const page = getMessagesPage(conversation.id)
       ack({
         ok: true,
         user: { id: user.id, name: user.name, hasPin: !!user.pin_hash },
@@ -1031,7 +1261,9 @@ io.on('connection', (socket) => {
         partner: admin
           ? toPartnerInfo(admin)
           : { id: ADMIN_ID, name: ADMIN_NAME, online: false, lastSeenAt: null },
-        messages: getMessages(conversation.id),
+        messages: page.messages,
+        // v8 — older pages load on demand via `messages:older`.
+        hasMore: page.hasMore,
         // How far the admin has read → ✓✓ on my sent messages.
         partnerLastReadId: getReadUpTo(conversation.id, ADMIN_ID),
         // VAPID public key for Web Push ("" when push is unavailable).
@@ -1093,9 +1325,12 @@ io.on('connection', (socket) => {
       const readUpTo = markRead(conversation.id, me)
       broadcastRead(conversation, me, readUpTo)
       const partner = getPartnerUser(conversation, me)
+      const page = getMessagesPage(conversation.id)
       ack({
         ok: true,
-        messages: getMessages(conversation.id),
+        messages: page.messages,
+        // v8 — older pages load on demand via `messages:older`.
+        hasMore: page.hasMore,
         partner: toPartnerInfo(partner),
         partnerLastReadId: getReadUpTo(conversation.id, partner.id),
         // v5 — where I had read BEFORE this call → "new messages" divider.
@@ -1104,6 +1339,35 @@ io.on('connection', (socket) => {
         pinned: pinnedSnapshotOf(conversation),
       })
       pushConversationsTo(me)
+    })
+  )
+
+  // v8 — pagination: load one OLDER history page ("Muat pesan lama").
+  socket.on(
+    'messages:older',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const conversation =
+        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+      if (!conversation) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      if (!isParticipant(conversation, me)) {
+        ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      const beforeId = Number(data?.beforeId)
+      if (!Number.isInteger(beforeId) || beforeId <= 0) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      // Read state is intentionally NOT touched by paging through history.
+      ack({ ok: true, ...getMessagesPage(conversation.id, beforeId) })
     })
   )
 
@@ -1130,6 +1394,7 @@ io.on('connection', (socket) => {
       const content = typeof data?.content === 'string' ? data.content : ''
       let trimmed: string
       let fileMeta: { fileName: string; fileSize: number; mimeType: string } | null = null
+      let thumbUrlRef: string | undefined
 
       if (type === 'text') {
         trimmed = content.trim()
@@ -1137,46 +1402,58 @@ io.on('connection', (socket) => {
           ack({ ok: false, error: 'INVALID_MESSAGE' })
           return
         }
-      } else if (type === 'image' || type === 'voice') {
+      } else if (type === 'image' || type === 'voice' || type === 'file') {
         trimmed = content
-        const pattern =
+        const legacyPattern =
           type === 'image'
             ? /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/
-            : /^data:audio\/(webm|ogg|mp4|mpeg|wav);base64,[A-Za-z0-9+/=]+$/
-        if (!pattern.test(trimmed) || trimmed.length > MAX_MEDIA_LENGTH) {
-          ack({ ok: false, error: 'INVALID_MESSAGE' })
-          return
+            : type === 'voice'
+              ? /^data:audio\/(webm|ogg|mp4|mpeg|wav);base64,[A-Za-z0-9+/=]+$/
+              : null
+        if (legacyPattern?.test(trimmed)) {
+          // v7 legacy in-band data URL — still accepted, size-capped.
+          if (trimmed.length > MAX_MEDIA_LENGTH) {
+            ack({ ok: false, error: 'INVALID_MESSAGE' })
+            return
+          }
+        } else {
+          // v8 — disk media produced by POST /api/upload: URL + REQUIRED
+          // metadata; bytes live in db/media, only metadata rides the socket.
+          if (!FILE_URL_PATTERN.test(trimmed)) {
+            ack({ ok: false, error: 'INVALID_MESSAGE' })
+            return
+          }
+          const fileName = typeof data?.fileName === 'string' ? data.fileName.trim() : ''
+          if (fileName.length < 1 || fileName.length > MAX_FILE_NAME_LENGTH) {
+            ack({ ok: false, error: 'INVALID_MESSAGE' })
+            return
+          }
+          const mimeType = typeof data?.mimeType === 'string' ? data.mimeType : ''
+          if (mimeType.length > 100 || !MIME_TYPE_PATTERN.test(mimeType)) {
+            ack({ ok: false, error: 'INVALID_MESSAGE' })
+            return
+          }
+          const fileSize = data?.fileSize
+          if (
+            typeof fileSize !== 'number' ||
+            !Number.isInteger(fileSize) ||
+            fileSize < 0 ||
+            fileSize > MAX_FILE_BYTES
+          ) {
+            ack({ ok: false, error: 'INVALID_MESSAGE' })
+            return
+          }
+          fileMeta = { fileName, fileSize, mimeType }
+          // v8 — optional tiny preview image for photos/videos.
+          const thumbUrl = typeof data?.thumbUrl === 'string' ? data.thumbUrl : ''
+          if (thumbUrl) {
+            if (!FILE_URL_PATTERN.test(thumbUrl)) {
+              ack({ ok: false, error: 'INVALID_MESSAGE' })
+              return
+            }
+            thumbUrlRef = thumbUrl
+          }
         }
-      } else if (type === 'file') {
-        // v7 — content is the public URL path returned by POST /api/upload;
-        // the bytes themselves were uploaded out-of-band and never pass
-        // through this service. Only the metadata rides on the socket.
-        trimmed = content
-        if (!FILE_URL_PATTERN.test(trimmed)) {
-          ack({ ok: false, error: 'INVALID_MESSAGE' })
-          return
-        }
-        const fileName = typeof data?.fileName === 'string' ? data.fileName.trim() : ''
-        if (fileName.length < 1 || fileName.length > MAX_FILE_NAME_LENGTH) {
-          ack({ ok: false, error: 'INVALID_MESSAGE' })
-          return
-        }
-        const mimeType = typeof data?.mimeType === 'string' ? data.mimeType : ''
-        if (mimeType.length > 100 || !MIME_TYPE_PATTERN.test(mimeType)) {
-          ack({ ok: false, error: 'INVALID_MESSAGE' })
-          return
-        }
-        const fileSize = data?.fileSize
-        if (
-          typeof fileSize !== 'number' ||
-          !Number.isInteger(fileSize) ||
-          fileSize < 0 ||
-          fileSize > MAX_FILE_BYTES
-        ) {
-          ack({ ok: false, error: 'INVALID_MESSAGE' })
-          return
-        }
-        fileMeta = { fileName, fileSize, mimeType }
       } else {
         ack({ ok: false, error: 'INVALID_MESSAGE' })
         return
@@ -1204,17 +1481,30 @@ io.on('connection', (socket) => {
           ? Math.min(300000, Math.max(0, Math.round(Number(data.durationMs))))
           : undefined
 
-      const message = fileMeta
-        ? insertAndFanOut(conversation, me, trimmed, type, {
-            replyToId,
-            durationMs,
-            ...fileMeta,
-          })
-        : insertAndFanOut(conversation, me, trimmed, type, { replyToId, durationMs })
+      // v8 guards — per-account flood & storage protection.
+      if (type === 'text') {
+        if (!rateAllowed(me, 'text', RATE_TEXT_PER_MIN)) {
+          ack({ ok: false, error: 'RATE_LIMITED' })
+          return
+        }
+      } else if (!rateAllowed(me, 'media', RATE_MEDIA_PER_MIN)) {
+        ack({ ok: false, error: 'RATE_LIMITED' })
+        return
+      } else if (fileMeta && storedMediaBytes(me) + fileMeta.fileSize > QUOTA_BYTES) {
+        ack({ ok: false, error: 'QUOTA_EXCEEDED' })
+        return
+      }
+
+      const message = insertAndFanOut(conversation, me, trimmed, type, {
+        replyToId,
+        durationMs,
+        ...(fileMeta ?? {}),
+        ...(thumbUrlRef ? { thumbUrl: thumbUrlRef } : {}),
+      })
       ack({ ok: true, message })
 
-      // Voice notes: transcribe in the background.
-      if (type === 'voice') void transcribeAsync(message.id, conversation.id, trimmed)
+      // Voice notes: transcribe in the background (data URL or db/media file).
+      if (type === 'voice') void transcribeVoice(message.id, conversation.id, trimmed)
 
       // v5 — a new user message pulls the conversation out of the archive.
       if (me !== ADMIN_ID && conversation.archived_at != null) {
@@ -1225,12 +1515,8 @@ io.on('connection', (socket) => {
 
       console.log(
         `[${me.slice(0, 8)}] -> ${conversation.id.slice(0, 8)} (${type}): ${
-          type === 'text'
-            ? trimmed.slice(0, 60)
-            : type === 'file'
-              ? (fileMeta?.fileName ?? trimmed)
-              : `${trimmed.length}b`
-        }`
+          type === 'text' ? trimmed.slice(0, 60) : (fileMeta?.fileName ?? trimmed.slice(0, 60))
+        }${fileMeta ? ` (${fileMeta.fileSize}b)` : ''}`
       )
     })
   )
@@ -1630,9 +1916,23 @@ const ensureAdmin = () => {
 }
 ensureAdmin()
 
+// v8 — periodic server-lightening: expire old media (frees disk) + WAL
+// checkpoint/VACUUM (keeps the DB lean). First pass shortly after boot,
+// then every 6 hours.
+const maintenanceCycle = () => {
+  try {
+    sweepExpiredMedia()
+  } catch (err) {
+    console.error('[retensi] error:', (err as Error)?.message ?? err)
+  }
+  dbMaintenance()
+}
+setTimeout(maintenanceCycle, 5_000)
+setInterval(maintenanceCycle, 6 * 60 * 60_000)
+
 httpServer.listen(PORT, () => {
   console.log(
-    `ChatKita chat-service v7 listening on port ${PORT} (path: '/', push: ${VAPID_PUBLIC ? 'on' : 'off'})`
+    `ChatKita chat-service v8 listening on port ${PORT} (path: '/', push: ${VAPID_PUBLIC ? 'on' : 'off'}, retensi: ${RETENTION_MS / 86_400_000} hari)`
   )
 })
 

@@ -7,6 +7,8 @@ import {
   CheckCheck,
   Copy,
   Download,
+  Hourglass,
+  Image as ImageIcon,
   Languages,
   Pause,
   Pencil,
@@ -43,6 +45,12 @@ interface ChatBubbleProps {
   fileName?: string;
   fileSize?: number;
   mimeType?: string;
+  /** v8 — thumbnail kecil (<30 KB) untuk foto/video; bubble memuat ini. */
+  thumbUrl?: string;
+  /** v8 — media sudah dihapus pembersih retensi (tombstone). */
+  mediaExpired?: boolean;
+  /** v8 — mode hemat data: media berat tanpa thumbnail tidak dimuat otomatis. */
+  dataSaver?: boolean;
   /** Partner has read up to this message → ✓✓ on own bubbles. */
   read?: boolean;
   replyTo?: ReplyPreview;
@@ -116,7 +124,7 @@ function VoicePlayer({
       <audio
         ref={audioRef}
         src={src}
-        preload="metadata"
+        preload="none"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => {
@@ -191,6 +199,9 @@ export function ChatBubble({
   fileName,
   fileSize,
   mimeType,
+  thumbUrl,
+  mediaExpired = false,
+  dataSaver = false,
   reactions,
   myUserId,
   edited = false,
@@ -210,6 +221,7 @@ export function ChatBubble({
   const [actionsOpen, setActionsOpen] = useState(false);
   const [reactOpen, setReactOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [mediaRevealed, setMediaRevealed] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(
@@ -246,6 +258,11 @@ export function ChatBubble({
   /* file messages: kategori dari mimeType (+ fallback ekstensi nama). */
   const fileKind = type === "file" ? resolveFileKind(mimeType, fileName) : null;
   const isFileImage = type === "image" || (type === "file" && fileKind === "image");
+  /* v8 — sumber gambar di bubble: thumbnail bila ada (ringan); tanpa
+   * thumbnail, mode hemat data menunda pemuatan full sampai diketuk. */
+  const imageSrc = mediaExpired
+    ? null
+    : (thumbUrl ?? (!dataSaver || mediaRevealed ? content : null));
   const fileDownloadUrl =
     type === "file" && content.startsWith("/api/media/")
       ? `${content}?download=1${fileName ? `&name=${encodeURIComponent(fileName)}` : ""}`
@@ -315,9 +332,33 @@ export function ChatBubble({
               <Trash2 className="size-3.5" aria-hidden="true" />
               Pesan ini dihapus
             </p>
-          ) : isFileImage ? (
+          ) : mediaExpired ? (
+            /* v8 — media dibersihkan pembersih retensi (teks/transkrip tetap). */
+            <p className="flex items-center gap-1.5 py-0.5 text-sm italic opacity-70">
+              <Hourglass className="size-3.5" aria-hidden="true" />
+              Media kedaluwarsa
+            </p>
+          ) : isFileImage && !imageSrc ? (
+            /* v8 — hemat data: foto tanpa thumbnail menunggu ketukan. */
+            <button
+              type="button"
+              className={cn(
+                "flex min-w-44 items-center gap-2 rounded-xl p-2.5 text-sm font-medium transition-colors",
+                isRight ? "bg-white/15 hover:bg-white/25" : "bg-muted/70 hover:bg-muted"
+              )}
+              onClick={(e) => {
+                e.stopPropagation();
+                setMediaRevealed(true);
+              }}
+            >
+              <ImageIcon className="size-4 shrink-0" aria-hidden="true" />
+              <span className="flex-1 break-words text-left leading-snug">
+                {fileName ?? "Foto"} · ketuk untuk memuat
+              </span>
+            </button>
+          ) : isFileImage && imageSrc ? (
             <img
-              src={content}
+              src={imageSrc}
               alt={fileName ?? "Foto yang dikirim"}
               className="max-h-64 w-auto cursor-zoom-in rounded-xl object-cover"
               loading="lazy"
@@ -341,11 +382,13 @@ export function ChatBubble({
               ) : null}
             </div>
           ) : type === "file" && fileKind === "video" ? (
-            /* Permukaan video tidak men-toggle baris aksi (stopPropagation). */
+            /* Permukaan video tidak men-toggle baris aksi (stopPropagation).
+             * v8 — poster thumbnail + preload hemat (none saat data saver). */
             <video
               src={content}
+              poster={thumbUrl}
               controls
-              preload="metadata"
+              preload={dataSaver ? "none" : "metadata"}
               className="max-h-64 w-auto rounded-xl"
               onClick={(e) => e.stopPropagation()}
             />
@@ -362,7 +405,7 @@ export function ChatBubble({
               <audio
                 src={content}
                 controls
-                preload="metadata"
+                preload="none"
                 className="w-56 max-w-full"
               />
             </div>

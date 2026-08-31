@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowDown,
+  ChevronUp,
+  Leaf,
   Loader2,
   LogOut,
   MessageCircleMore,
@@ -66,6 +68,7 @@ import {
   type HistoryAck,
   type MessageAck,
   type MessageUpdatePayload,
+  type OlderMessagesAck,
   type PartnerInfo,
   type PinUpdatePayload,
   type PublicSettingsAck,
@@ -76,12 +79,18 @@ import {
 import {
   avatarColorClass,
   canEditMessage,
+  compressImageToBlobs,
   FONT_SCALES,
   formatFileSize,
   formatLastSeen,
   initials,
+  readDataSaver,
   readFontScale,
+  resolveFileKind,
+  saveDataSaver,
   saveFontScale,
+  uploadMedia,
+  videoPosterBlob,
   type FontScale,
 } from "@/lib/chat-utils";
 import { cn } from "@/lib/utils";
@@ -156,42 +165,8 @@ function saveDraft(scope: string, id: string, value: string): void {
   }
 }
 
-/** Downscale + compress an image file to a JPEG data URL the server accepts. */
-async function fileToDataUrl(file: File): Promise<string> {
-  if (file.size > 6 * 1024 * 1024) throw new Error("too-large");
-  const bitmap = await createImageBitmap(file);
-  const max = 1280;
-  const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.round(bitmap.width * scale);
-  canvas.height = Math.round(bitmap.height * scale);
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("canvas");
-  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  bitmap.close();
-  return canvas.toDataURL("image/jpeg", 0.82);
-}
-
 /** Ukuran maksimum lampiran dokumen (mirror POST /api/upload + chat-service). */
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MiB
-
-/**
- * Unggah file ke POST /api/upload (multipart, field `file`) → URL publik
- * /api/media/<nama> + metadata. Dilempar error bila respons tidak ok.
- */
-async function uploadFile(
-  file: File
-): Promise<{ url: string; fileName: string; mimeType: string; size: number }> {
-  const body = new FormData();
-  body.append("file", file);
-  const res = await fetch("/api/upload", { method: "POST", body });
-  const data = (await res.json().catch(() => null)) as
-    | { ok: true; url: string; fileName: string; mimeType: string; size: number }
-    | { ok: false; error: string }
-    | null;
-  if (!res.ok || !data || data.ok !== true) throw new Error("upload-failed");
-  return data;
-}
 
 const fmtTimer = (ms: number) => {
   const total = Math.floor(ms / 1000);
@@ -346,12 +321,23 @@ export function Messenger() {
   const [adminReadId, setAdminReadId] = useState(0);
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
   const [emojiOpen, setEmojiOpen] = useState(false);
-  const [pendingImage, setPendingImage] = useState<string | null>(null);
+  // v8 — foto menunggu kirim: blob full terkompresi + thumbnail + pratinjau.
+  const [pendingImage, setPendingImage] = useState<{
+    previewUrl: string;
+    full: Blob;
+    thumb: Blob;
+  } | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
   // Lampiran dokumen/video/audio: file terpilih → dialog konfirmasi → upload.
   const [pendingFile, setPendingFile] = useState<{ file: File } | null>(null);
   const [uploading, setUploading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
+  // v8 — pagination riwayat + mode hemat data.
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [dataSaver, setDataSaver] = useState(false);
+  // v8 — pesan kesalahan kirim yang lebih spesifik (rate limit / kuota).
+  const [sendErrorDetail, setSendErrorDetail] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [showJump, setShowJump] = useState(false);
@@ -383,6 +369,18 @@ export function Messenger() {
 
   const recorder = useVoiceRecorder();
 
+  // v8 — mode hemat data dibaca sekali saat mount (localStorage).
+  useEffect(() => {
+    setDataSaver(readDataSaver());
+  }, []);
+
+  const toggleDataSaver = () =>
+    setDataSaver((v) => {
+      const next = !v;
+      saveDataSaver(next);
+      return next;
+    });
+
   const scrollToBottom = useCallback((smooth = false) => {
     const el = scrollRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
@@ -407,6 +405,7 @@ export function Messenger() {
           if (res.ok) {
             setPartner(res.partner);
             setMessages(res.messages);
+            setHasMore(res.hasMore);
             setAdminReadId(res.partnerLastReadId);
             setPinnedMsg(res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null);
             socketRef.current?.emit("messages:read", { conversationId: id });
@@ -446,6 +445,7 @@ export function Messenger() {
             setConversationId(res.conversationId);
             setPartner(res.partner);
             setMessages(res.messages);
+            setHasMore(res.hasMore);
             setAdminReadId(res.partnerLastReadId);
             // Push opt-in + pinned banner + draft (the ack carries the
             // VAPID key directly in the v6 contract).
@@ -699,6 +699,9 @@ export function Messenger() {
     setConversationId(null);
     setPartner(null);
     setMessages([]);
+    setHasMore(false);
+    setLoadingOlder(false);
+    setSendErrorDetail(null);
     setPartnerTyping(false);
     setAuthError(null);
     setInput("");
@@ -707,6 +710,7 @@ export function Messenger() {
     setEditing(null);
     setPinnedMsg(null);
     setPushPublicKey(null);
+    if (pendingImage) URL.revokeObjectURL(pendingImage.previewUrl);
     setPendingImage(null);
     setPendingFile(null);
     setUploading(false);
@@ -727,7 +731,13 @@ export function Messenger() {
   const emitMessage = (
     content: string,
     type: "text" | "image" | "voice" | "file",
-    extra: { durationMs?: number; fileName?: string; mimeType?: string; fileSize?: number } = {}
+    extra: {
+      durationMs?: number;
+      fileName?: string;
+      mimeType?: string;
+      fileSize?: number;
+      thumbUrl?: string;
+    } = {}
   ) => {
     const socket = socketRef.current;
     const id = conversationIdRef.current;
@@ -742,7 +752,16 @@ export function Messenger() {
         ...extra,
       },
       (res: AckOf<MessageAck>) => {
-        if (!res.ok) setSendError(true);
+        if (!res.ok) {
+          setSendError(true);
+          setSendErrorDetail(
+            res.error === "RATE_LIMITED"
+              ? "Terlalu sering mengirim — tunggu sebentar."
+              : res.error === "QUOTA_EXCEEDED"
+                ? "Kuota penyimpanan akun penuh (250 MB)."
+                : null
+          );
+        }
       }
     );
     setReplyTo(null);
@@ -810,32 +829,90 @@ export function Messenger() {
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
 
+  /* v8 — pagination: muat satu halaman riwayat yang lebih lama, lalu
+   * kembalikan posisi scroll ke pesan yang sama (tanpa lompat). */
+  const loadOlder = () => {
+    const first = messages[0];
+    const id = conversationIdRef.current;
+    if (!first || !id || loadingOlder) return;
+    setLoadingOlder(true);
+    const container = scrollRef.current;
+    const prevHeight = container?.scrollHeight ?? 0;
+    socketRef.current?.emit(
+      "messages:older",
+      { conversationId: id, beforeId: first.id },
+      (res: AckOf<OlderMessagesAck>) => {
+        setLoadingOlder(false);
+        if (!res.ok) return;
+        setHasMore(res.hasMore);
+        setMessages((prev) => {
+          const seen = new Set(prev.map((m) => m.id));
+          const older = res.messages.filter((m) => !seen.has(m.id));
+          return older.length > 0 ? [...older, ...prev] : prev;
+        });
+        requestAnimationFrame(() => {
+          const el = scrollRef.current;
+          if (el) el.scrollTop = el.scrollHeight - prevHeight;
+        });
+      }
+    );
+  };
+
+  /* v8 — foto: kompres di browser (full ≤1600px + thumb ≤320px), keduanya
+   * diunggah ke disk; pesan hanya membawa URL + metadata (DB tetap ramping).
+   * Gagal decode (mis. HEIC) → unggah file asli via jalur lampiran. */
   const handleImagePick = async (file: File | undefined | null) => {
     if (!file) return;
     setImageError(null);
     try {
-      const dataUrl = await fileToDataUrl(file);
-      setPendingImage(dataUrl);
-    } catch (err) {
-      setImageError(
-        err instanceof Error && err.message === "too-large"
-          ? "Foto terlalu besar (maks 6MB)."
-          : "Foto tidak bisa dibaca."
-      );
+      const blobs = await compressImageToBlobs(file);
+      setPendingImage({ ...blobs, previewUrl: URL.createObjectURL(blobs.thumb) });
+    } catch {
+      if (file.size <= MAX_FILE_SIZE) {
+        setPendingFile({ file });
+      } else {
+        setImageError("Foto terlalu besar (maks 25 MB).");
+      }
     }
   };
 
-  const sendImage = () => {
-    if (!pendingImage) return;
-    if (emitMessage(pendingImage, "image")) setPendingImage(null);
+  const sendImage = async () => {
+    const target = pendingImage;
+    if (!target || uploading) return;
+    setUploading(true);
+    setImageError(null);
+    try {
+      const stamp = Date.now();
+      const [fullMeta, thumbMeta] = await Promise.all([
+        uploadMedia(new File([target.full], `foto-${stamp}.jpg`, { type: "image/jpeg" })),
+        uploadMedia(new File([target.thumb], `foto-${stamp}-thumb.jpg`, { type: "image/jpeg" })),
+      ]);
+      if (
+        emitMessage(fullMeta.url, "image", {
+          fileName: fullMeta.fileName,
+          mimeType: fullMeta.mimeType,
+          fileSize: fullMeta.size,
+          thumbUrl: thumbMeta.url,
+        })
+      ) {
+        URL.revokeObjectURL(target.previewUrl);
+        setPendingImage(null);
+      } else {
+        setImageError(sendErrorDetail ?? "Pesan gagal terkirim, coba lagi.");
+      }
+    } catch {
+      setImageError("Gagal mengunggah foto.");
+    } finally {
+      setUploading(false);
+    }
   };
 
-  /* Satu tombol lampiran: foto ≤6MB → alur foto (kompresi); foto besar &
-   * jenis lainnya → dialog unggah (maks 25MB, tetap tampil sebagai gambar). */
+  /* Satu tombol lampiran: semua jenis file. Foto → alur kompres+thumbnail;
+   * sisanya → dialog unggah (maks 25MB), video ikut dibuatkan poster. */
   const handleFilePick = (file: File | undefined | null) => {
     if (!file) return;
     setFileError(null);
-    if (file.type.startsWith("image/") && file.size <= 6 * 1024 * 1024) {
+    if (file.type.startsWith("image/")) {
       void handleImagePick(file);
       return;
     }
@@ -848,18 +925,34 @@ export function Messenger() {
 
   const sendFile = async () => {
     const target = pendingFile;
-    if (!target) return;
+    if (!target || uploading) return;
     setUploading(true);
     setFileError(null);
     try {
-      const meta = await uploadFile(target.file);
+      const meta = await uploadMedia(target.file);
+      // Poster video (best-effort — kegagalan tidak memblokir pengiriman).
+      let thumbUrl: string | undefined;
+      if (resolveFileKind(meta.mimeType, meta.fileName) === "video") {
+        try {
+          const poster = await videoPosterBlob(target.file);
+          if (poster) {
+            const posterMeta = await uploadMedia(
+              new File([poster], `${meta.fileName}-thumb.jpg`, { type: "image/jpeg" })
+            );
+            thumbUrl = posterMeta.url;
+          }
+        } catch {
+          /* abaikan — pesan tetap terkirim tanpa poster */
+        }
+      }
       const sent = emitMessage(meta.url, "file", {
         fileName: meta.fileName,
         mimeType: meta.mimeType,
         fileSize: meta.size,
+        ...(thumbUrl ? { thumbUrl } : {}),
       });
       if (sent) setPendingFile(null);
-      else setFileError("Pesan gagal terkirim, coba lagi.");
+      else setFileError(sendErrorDetail ?? "Pesan gagal terkirim, coba lagi.");
     } catch {
       setFileError("Gagal mengunggah file.");
     } finally {
@@ -867,9 +960,30 @@ export function Messenger() {
     }
   };
 
+  /* v8 — pesan suara direkam 24 kbps mono lalu DIUNGGAH ke disk; server
+   * membaca file dari db/media untuk transkripsi. */
   const sendVoice = async () => {
     const result = await recorder.stop();
-    if (result) emitMessage(result.dataUrl, "voice", { durationMs: result.durationMs });
+    if (!result) return;
+    try {
+      const stamp = Date.now();
+      const ext = result.mimeType.includes("mp4")
+        ? "m4a"
+        : result.mimeType.includes("ogg")
+          ? "ogg"
+          : "webm";
+      const meta = await uploadMedia(
+        new File([result.blob], `pesan-suara-${stamp}.${ext}`, { type: result.mimeType })
+      );
+      emitMessage(meta.url, "voice", {
+        durationMs: result.durationMs,
+        fileName: meta.fileName,
+        mimeType: meta.mimeType,
+        fileSize: meta.size,
+      });
+    } catch {
+      setSendError(true);
+    }
   };
 
   const handleDelete = (msg: ChatMessage) => {
@@ -1124,6 +1238,20 @@ export function Messenger() {
               size="icon"
               className={cn(
                 "size-9",
+                dataSaver ? "text-emerald-600" : "text-muted-foreground hover:text-foreground"
+              )}
+              aria-pressed={dataSaver}
+              aria-label={dataSaver ? "Matikan hemat data" : "Aktifkan hemat data"}
+              title="Hemat data: media berat dimuat manual"
+              onClick={toggleDataSaver}
+            >
+              <Leaf className="size-4" aria-hidden="true" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className={cn(
+                "size-9",
                 hasPin ? "text-emerald-600" : "text-muted-foreground hover:text-foreground"
               )}
               aria-label="Kunci akun dengan PIN"
@@ -1209,6 +1337,25 @@ export function Messenger() {
             className="flex w-full flex-col gap-2 p-3 sm:p-4 md:p-6"
             style={{ fontSize: FONT_SCALES[fontScale] }}
           >
+            {/* v8 — pagination: muat pesan lebih lama saat ada halaman sebelumnya */}
+            {hasMore && visibleMessages.length > 0 ? (
+              <div className="flex justify-center pb-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 rounded-full text-xs text-muted-foreground"
+                  disabled={loadingOlder}
+                  onClick={loadOlder}
+                >
+                  {loadingOlder ? (
+                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <ChevronUp className="size-4" aria-hidden="true" />
+                  )}
+                  Muat pesan lama
+                </Button>
+              </div>
+            ) : null}
             {visibleMessages.length === 0 ? (
               query ? (
                 <p className="py-10 text-center text-sm text-muted-foreground">
@@ -1232,6 +1379,9 @@ export function Messenger() {
                   fileName={m.fileName}
                   fileSize={m.fileSize}
                   mimeType={m.mimeType}
+                  thumbUrl={m.thumbUrl}
+                  mediaExpired={!!m.mediaExpiredAt}
+                  dataSaver={dataSaver}
                   read={m.senderId === me.userId && m.id <= adminReadId}
                   replyTo={m.replyTo}
                   replyAuthor={m.replyTo?.senderId === me.userId ? "Anda" : partner?.name}
@@ -1290,7 +1440,7 @@ export function Messenger() {
         {/* Send / image / file errors */}
         {sendError || imageError || fileError ? (
           <p className="px-4 pb-1 text-xs text-destructive">
-            {fileError ?? imageError ?? "Pesan gagal terkirim, coba lagi."}
+            {fileError ?? imageError ?? sendErrorDetail ?? "Pesan gagal terkirim, coba lagi."}
           </p>
         ) : null}
 
@@ -1346,7 +1496,7 @@ export function Messenger() {
         {pendingImage ? (
           <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border bg-muted/60 px-2 py-1.5">
             <img
-              src={pendingImage}
+              src={pendingImage.previewUrl}
               alt="Pratinjau foto"
               className="size-10 rounded-md object-cover"
             />
@@ -1355,7 +1505,10 @@ export function Messenger() {
               type="button"
               aria-label="Batal kirim foto"
               className="text-muted-foreground hover:text-foreground"
-              onClick={() => setPendingImage(null)}
+              onClick={() => {
+                URL.revokeObjectURL(pendingImage.previewUrl);
+                setPendingImage(null);
+              }}
             >
               <X className="size-4" />
             </button>
@@ -1462,8 +1615,11 @@ export function Messenger() {
                   size="icon"
                   className="size-11 shrink-0 bg-emerald-600 text-white hover:bg-emerald-600/90"
                   aria-label="Kirim"
-                  disabled={!connected || (!input.trim() && !pendingImage)}
-                  onClick={() => (pendingImage ? sendImage() : handleSend())}
+                  disabled={!connected || uploading || (!input.trim() && !pendingImage)}
+                  onClick={() => {
+                    if (pendingImage) void sendImage();
+                    else handleSend();
+                  }}
                 >
                   <SendHorizonal className="size-4" aria-hidden="true" />
                 </Button>

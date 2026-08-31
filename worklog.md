@@ -549,3 +549,49 @@ Stage Summary:
 - Foto besar (>6MB) tidak lagi gagal — otomatis masuk jalur unggah dan tetap tampil sebagai gambar.
 - Pratinjau daftar percakapan admin menampilkan nama file asli setelah pesan file ("📎 <nama>").
 - Kontrak v6/v7 bertambah 1 field opsional (lastMessage.fileName) — kompatibel mundur (frontend sudah opportunistic sejak awal).
+
+---
+Task ID: 2-b
+Agent: general-purpose (sub-agent 2-b)
+Task: API routes v8 — Range/ETag/304 di /api/media + dedup SHA-256 di /api/upload
+
+Work Log:
+- Read worklog.md (last sections: 2-a, 6-b, 6), both target route files, tsconfig.json + eslint.config.mjs. Touched ONLY src/app/api/media/[name]/route.ts and src/app/api/upload/route.ts (plus append here). No dev server / build run.
+- src/app/api/media/[name]/route.ts — restructured GET to stat-first, behavior otherwise identical (404/traversal/disposition/mime-map logic byte-for-byte preserved):
+  - fs.stat(filePath) now happens before any read (stat throw → 404 JSON; added explicit stat.isFile() → 404 so directories keep the old EISDIR→404 outcome explicitly); new `import { promises as fs, type Stats } from "node:fs"`.
+  - ETag: strong `"${size.toString(16)}-${mtime.getTime().toString(16)}"` (quoted hex pair) — stable because stored media is immutable (v8 dedup). Added to every 200 AND 206 response.
+  - 304: if `If-None-Match` header contains that exact ETag string → `new NextResponse(null, { status: 304, headers: { ETag, "Cache-Control": CACHE_IMMUTABLE } })` — answered BEFORE reading the file (server-load win). `CACHE_IMMUTABLE = "private, max-age=31536000, immutable"` hoisted to a const shared by 200/206/304.
+  - Range: header parsed ONLY via /^bytes=(\d*)-(\d*)$/ (comma/multi-range, other units, "bytes=-", whitespace forms → header ignored → full 200). Suffix `bytes=-N` → start=max(0,size-N), end=size-1 (N>size → whole file as 206; `bytes=-0` with size>0 → 416); normal `bytes=S-E` → start=S, end=min(E,size-1), `bytes=S-` → end=size-1. start>=size (size>0) → 416 `new NextResponse(null, {status:416, headers:{"Content-Range":"bytes */<size>"}})`; start>end garbage (e.g. "100-50", and everything on a size-0 file) → ignored → 200.
+  - 206: body = `new Uint8Array(bytes.subarray(start, end+1))` (full readFile then subarray — files ≤ 25 MiB per task), headers Content-Range `bytes <start>-<end>/<size>`, Accept-Ranges: bytes, ETag, Content-Type, Content-Length (slice length), Cache-Control immutable, nosniff, SAME Content-Disposition as 200. 200 responses now also carry Accept-Ranges: bytes + ETag.
+  - Content-Disposition string hoisted into a `contentDisposition` const (shared by 200/206) — exact same ascii + UTF-8'' dual form as before.
+  - GOTCHA fixed: my first doc-comment draft contained the literal `*/<size>` inside the /** */ block — `*/` terminated the comment early and ESLint failed with a misleading "Parsing error: ':' expected" at the (unchanged!) attachmentName ternary. Bisected via temp copies + sed; rewrote the doc line to avoid `*/` in comments (the literal format string lives safely in the 416/206 code).
+- src/app/api/upload/route.ts — SHA-256 content dedup, response shape untouched:
+  - Import swapped `randomUUID` → `createHash` (node:crypto); `randomUUID` no longer used.
+  - After `bytes` is read: `const hash = createHash("sha256").update(bytes).digest("hex")`; stored name = `${hash.slice(0,32)}.${safeExtension(originalName)}` (32 hex + ".ext", ≤ 41 chars → still satisfies chat-service FILE_URL_PATTERN ^\/api\/media\/[A-Za-z0-9._-]{1,120}$; verified programmatically).
+  - Dedup: `fs.stat(targetPath)` in try/catch — exists → SKIP mkdir/writeFile entirely (existing copy reused); not exists → mkdir -p + writeFile as before (write failure → same 500 JSON "Gagal menyimpan file."; read failure split into its own catch, same client-facing error, log message now "gagal membaca file").
+  - Top doc comment rewritten: dedup explained (byte-identical uploads share ONE disk file; second upload skips writing; chat-service retention sweeper reference-counts before deleting), "UUID" wording replaced with "hash SHA-256 + ekstensi tersanitasi".
+- Verification: `bun run lint` → 0 errors, 0 warnings (after the comment fix). `bunx tsc --noEmit 2>&1 | grep "src/app/api"` → NO matches (0 errors for both route files); remaining tsc errors are the pre-existing mini-services (bun:sqlite/import.meta.dir) + skills ones, untouched.
+- Extra (pure-logic sanity, no server): ran an isolated bun script mirroring the route's range/etag/dedup math — 19/19 range cases pass (normal/suffix/open/comma/garbage/oversize/size-0), ETag matches ^"[0-9a-f]+-[0-9a-f]+"$, subarray slice length correct, hash-based URL passes the server-side pattern.
+
+Stage Summary:
+- /api/media v8: conditional GET (ETag "sizeHex-mtimeHex" + If-None-Match → 304 no-body with immutable Cache-Control, zero file reads on revalidation) + single-range HTTP Range support (Accept-Ranges on 200, 206 + Content-Range slices for video/audio seeking, 416 + "bytes */<size>" for unsatisfiable, malformed/multi-range safely ignored → 200). All old behavior (strict name/traversal 404s, mime map, inline vs ?download=1 attachment, html/svg forced attachment, nosniff, immutable cache) preserved byte-for-byte.
+- /api/upload v8: stored name = first-32-hex of SHA-256(content) + sanitized ext → byte-identical uploads (re-sends, retries, multi-device) reuse one disk file, second upload writes nothing; response JSON {ok,url,fileName,mimeType,size} unchanged, url still matches the chat-service file-URL contract.
+- Lint clean, tsc clean for src/app/api; no other files modified; dev server intentionally not restarted — changes are picked up on next dev/prod run.
+
+---
+Task ID: 7
+Agent: Z.ai Code (main)
+Task: v8 "memperingan server" — terapkan 11 ide penghematan (user: "tambahkan semua")
+
+Work Log:
+- Kontrak (src/lib/chat-types.ts): CHAT_DATA_SAVER_KEY, HISTORY_PAGE_SIZE=50, MEDIA_RETENTION_DAYS=30, MEDIA_QUOTA_BYTES=250MiB; ChatMessage += thumbUrl/mediaExpiredAt; UserAuthAck/HistoryAck += hasMore; OlderMessagesAck baru; ChatErrorCode += RATE_LIMITED/QUOTA_EXCEEDED; lastMessage += fileName/mediaExpired; doc event messages:older + aturan baru messages:send.
+- Task 2-b (subagent general-purpose): /api/media → ETag kuat + If-None-Match 304 + Accept-Ranges/Range 206 (+416), stat-first; /api/upload → dedup SHA-256 (nama file = hash32.ext, file identik disimpan sekali). Lint/tsc bersih; 19/19 kasus range lolos.
+- Backend chat-service (v8): foto & voice kini lewat /api/upload (content = URL /api/media; data URL legacy masih diterima); metadata fileName/fileSize/mimeType wajib utk media disk + thumbUrl opsional; messages table += thumb_url & media_expired_at; getMessagesPage (50/hal, beforeId) + event messages:older; rate limit per akun (30 teks/menit, 12 media/menit) + kuota penyimpanan 250MiB (SUM file_size); transkripsi voice membaca file dari db/media (voiceDataUrlOf); sweeper retensi (boot+5s, tiap 6 jam) menandai media >30 hari → tombstone mediaExpiredAt + broadcast message:updated, hapus file disk dengan refcount (urutan fix: redaksi dulu, baru release — bug refcount-sendiri ditemukan & diperbaiki lewat uji nyata); wal_checkpoint+VACUUM tiap siklus; overview lastMessage += fileName/mediaExpired.
+- Frontend: useVoiceRecorder → mono 16kHz 24kbps + hasil Blob; chat-utils += readDataSaver/saveDataSaver, uploadMedia, compressImageToBlobs (full 1600px + thumb 320px), videoPosterBlob (poster video), messagePreview(mediaExpired); Messenger & AdminPanel: foto dikompres+thumb → unggah dua file → pesan image bawa thumbUrl; video dapat poster otomatis; voice diunggah (bukan data URL); tombol "Muat pesan lama" (prepend + jaga scroll); toggle "Hemat data" (daun 🍃 di header user, item menu admin) → media tanpa thumb = "ketuk untuk memuat", video preload none, audio/voice preload none; tombstone "⏳ Media kedaluwarsa"; error RATE_LIMITED/QUOTA_EXCEEDED diterjemahkan.
+- E2E (gateway :81): curl → 200 ETag/Accept-Ranges, Range 206 Content-Range benar, If-None-Match 304, dedup URL identik utk file sama; retensi nyata (seed 40 hari → sweep, DB tombstone + FILE TERHAPUS setelah fix urutan); browser: kirim teks/foto baru (2 POST upload, bubble = thumb /api/media), pagination 50→65→68 + tombol hilang saat habis, hemat data (legacy = placeholder, thumb tetap tampil, ketuk → termuat), tombstone kedaluwarsa tampil, menu admin "Hemat data: nonaktif", mobile 390px bersih.
+- Insiden diagnostik: (1) sesi browser "zombie" (socket mati pas hot-reload) membuat emit hilang — sesi segar normal; (2) service worker PWA menyajikan JS basi hasil edit → unregister; (3) filter teks sandbox memangkas urutan "[h" di input/output alat → baris const [hasMore sempat rusak & sulit didiagnosis — diperbaiki & diverifikasi via char-code python; tsc+lint 0 error.
+- Bersih-bersih data uji (129 → 42 pesan; file orphan dihapus). Catatan: #11 "serve media via Caddy" TIDAK diubah (berisiko bagi gateway sandbox) — tujuannya tercapai via ETag 304 + immutable cache + Range + thumbnail.
+
+Stage Summary:
+- ChatKita v8 jauh lebih ringan: DB tak lagi menyimpan base64 (semua media di disk, dedup SHA-256), login/history hanya 50 pesan + thumbnail <30KB (bukan puluhan MB), media otomatus kedaluwarsa 30 hari (disk dibebaskan, refcount aman), VACUUM berkala, voice 24kbps mono, proteksi rate limit + kuota 250MB, mode hemat data opsional, video seek via HTTP Range (206 terverifikasi).
+- Service: chat-service v8 (port 3003, retensi 30 hari via env MEDIA_RETENTION_DAYS); lint & tsc bersih; E2E hijau termasuk kasus retensi nyata.

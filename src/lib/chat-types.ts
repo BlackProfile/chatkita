@@ -15,12 +15,18 @@
  *     delete-for-everyone, emoji reactions, live ✓✓ read receipts, pinned
  *     messages, archive, voice-note transcription, on-demand translate,
  *     Web Push notifications, document/video/audio file sharing).
- *   - Images & voice notes travel in-band as data URLs (size-capped).
- *   - Files (docs, video, audio, archives, …) are uploaded out-of-band
- *     via the Next.js route POST /api/upload (stored under db/media/ on
- *     disk) and the message carries the public URL /api/media/<name>
- *     plus fileName/fileSize/mimeType metadata. GET /api/media/<name>
- *     streams the bytes back (inline preview; ?download=1 for download).
+ *   - v8 (server-lightening): ALL media (photos & voice notes included)
+ *     lives on disk under db/media/ and travels as /api/media/<name> URLs
+ *     (legacy in-band data URLs still render but are no longer produced).
+ *     Photos/videos get tiny client-side thumbnails (`thumbUrl`); history is
+ *     paginated (50/page, `messages:older` loads more); media ages out after
+ *     MEDIA_RETENTION_DAYS (server sweeps → `mediaExpiredAt` tombstone);
+ *     per-account rate limits + storage quota guard the socket.
+ *   - Files are uploaded out-of-band via the Next.js route POST /api/upload
+ *     (stored under db/media/, SHA-256 deduplicated) and the message carries
+ *     the public URL /api/media/<name> plus fileName/fileSize/mimeType.
+ *     GET /api/media/<name> streams bytes with immutable caching, ETag/304
+ *     and HTTP Range support (video seeking without full re-download).
  *
  * NO customer-service tooling lives here anymore: no operating hours,
  * no quick-reply templates, no AI auto-reply/summary/suggestions, no
@@ -48,6 +54,13 @@ export const CHAT_SOUND_KEY = "chatkita:sound";
 /** Persisted per-browser chat font size ("sm" | "md" | "lg"). */
 export const CHAT_FONT_KEY = "chatkita:font-size";
 
+/**
+ * Persisted per-browser data-saver toggle. When on, heavy media (photos,
+ * videos, audio attachments) is NOT fetched automatically — a tap-to-load
+ * placeholder is shown instead. Thumbnails (<30 KB) still render.
+ */
+export const CHAT_DATA_SAVER_KEY = "chatkita:data-saver";
+
 /** Draft of an unsent message (per role/conversation), survives reloads. */
 export const draftKey = (scope: string, id: string) => `chatkita:draft:${scope}:${id}`;
 
@@ -61,6 +74,15 @@ export const SOCKET_URL = `/?XTransformPort=${CHAT_SERVICE_PORT}`;
 
 export const MAX_MESSAGE_LENGTH = 1000;
 export const MAX_NAME_LENGTH = 40;
+
+/** Messages per history page (auth/history/older). Older pages load on demand. */
+export const HISTORY_PAGE_SIZE = 50;
+
+/** Per-account media retention (server-side sweep; env MEDIA_RETENTION_DAYS). */
+export const MEDIA_RETENTION_DAYS = 30;
+
+/** Per-account storage quota for disk media (sum of fileSize). */
+export const MEDIA_QUOTA_BYTES = 250 * 1024 * 1024; // 250 MiB
 
 /* ------------------------------------------------------------------ */
 /* Entities                                                            */
@@ -119,6 +141,16 @@ export interface ChatMessage {
   fileSize?: number;
   /** file messages: MIME type (e.g. application/pdf, video/mp4). */
   mimeType?: string;
+  /**
+   * v8 — tiny preview image (<30 KB) for photos & videos. The bubble renders
+   * this instead of the full media; the viewer loads the full version.
+   */
+  thumbUrl?: string;
+  /**
+   * v8 — set when the retention sweeper removed this message's media
+   * (content/file metadata are redacted; a tombstone placeholder renders).
+   */
+  mediaExpiredAt?: string;
 }
 
 /** A chat partner including live presence info. */
@@ -144,6 +176,8 @@ export interface ConversationOverview {
     deleted: boolean;
     /** file messages: original file name (for "📎 <nama>" previews). */
     fileName?: string;
+    /** v8 — last message's media was swept by retention. */
+    mediaExpired?: boolean;
   } | null;
   lastMessageAt: string;
   /** Unread messages sent by the partner. */
@@ -177,6 +211,8 @@ export interface UserAuthAck {
   partner: PartnerInfo;
   /** Full history of the conversation (already marked as read). */
   messages: ChatMessage[];
+  /** v8 — true when older pages exist (messages:older loads them). */
+  hasMore: boolean;
   /** How far the admin has read → ✓✓ on my sent messages. */
   partnerLastReadId: number;
   /** VAPID public key for Web Push ("" when push is unavailable). */
@@ -196,6 +232,8 @@ export interface AdminAuthAck {
 export interface HistoryAck {
   ok: true;
   messages: ChatMessage[];
+  /** v8 — true when older pages exist (messages:older loads them). */
+  hasMore: boolean;
   partner: PartnerInfo;
   partnerLastReadId: number;
   /** My read cursor BEFORE this call → "new messages" divider. */
@@ -209,6 +247,14 @@ export interface HistoryAck {
 export interface MessageAck {
   ok: true;
   message: ChatMessage;
+}
+
+/** Ack payload returned by `messages:older` (v8 pagination). */
+export interface OlderMessagesAck {
+  ok: true;
+  /** Up to HISTORY_PAGE_SIZE messages OLDER than beforeId, ascending. */
+  messages: ChatMessage[];
+  hasMore: boolean;
 }
 
 export interface SetPinAck {
@@ -254,6 +300,8 @@ export type ChatErrorCode =
   | "UNAUTHORIZED"
   | "PIN_REQUIRED"
   | "INVALID_PIN"
+  | "RATE_LIMITED"
+  | "QUOTA_EXCEEDED"
   | "SERVER_ERROR";
 
 export interface ChatErrorAck {
@@ -285,23 +333,45 @@ export type AckOf<T> = T | ChatErrorAck;
 //                     Password login (ADMIN_PASSWORD env or "admin123").
 //                     Joins the `admins` room; returns ALL conversations.
 //
-// messages:history  { conversationId: string }
+// messages:history  { conversationId: string; beforeId?: number }
 //                     → HistoryAck | ChatErrorAck
 //                     Both roles; participant-gated; marks read.
+//                     Returns the newest HISTORY_PAGE_SIZE (50) messages
+//                     ascending; with `beforeId` (v8) the page ENDING just
+//                     before that id. `hasMore` signals older pages.
+//
+// messages:older    { conversationId: string; beforeId: number }
+//                     → OlderMessagesAck | ChatErrorAck            (v8)
+//                     Participant-gated page of up to 50 messages with
+//                     id < beforeId (ascending) + `hasMore`. Read state
+//                     is NOT touched. Powers the "Muat pesan lama" button.
 //
 // messages:send     { conversationId: string; content: string;
 //                     type?: 'text'|'image'|'voice'|'file';
 //                     replyToId?: number; durationMs?: number;
-//                     fileName?: string; fileSize?: number; mimeType?: string }
+//                     fileName?: string; fileSize?: number; mimeType?: string;
+//                     thumbUrl?: string }
 //                     → MessageAck | ChatErrorAck
 //                     Both roles; participant-gated. Sender auto-reads.
-//                     image/voice content = data URL (size-capped server-
-//                     side). Voice notes are transcribed asynchronously
-//                     (transcript arrives via message:updated).
+//                     v8 — image/voice content is PREFERRED as the
+//                     /api/media/<name> URL produced by POST /api/upload
+//                     (then fileName/fileSize/mimeType are REQUIRED and
+//                     validated; legacy in-band data URLs still accepted,
+//                     size-capped). `thumbUrl` is an optional /api/media
+//                     URL pointing at a tiny preview image.
+//                     Voice notes are transcribed asynchronously (server
+//                     reads the bytes from db/media; transcript arrives
+//                     via message:updated).
 //                     file content = /api/media/<name> URL obtained from
 //                     POST /api/upload; fileName (1–255 chars), mimeType
 //                     (type/subtype) and fileSize (≤ 25 MiB) are required
 //                     metadata validated server-side.
+//                     v8 guards: per-account rate limits (30 text/min,
+//                     12 media/min → RATE_LIMITED) and a storage quota
+//                     (sum of fileSize ≤ 250 MiB → QUOTA_EXCEEDED).
+//                     The retention sweeper may later redact any media
+//                     message (→ mediaExpiredAt tombstone via
+//                     message:updated) after MEDIA_RETENTION_DAYS.
 //
 // messages:delete   { messageId: number }
 //                     → { ok: true } | ChatErrorAck
@@ -345,7 +415,8 @@ export type AckOf<T> = T | ChatErrorAck;
 //
 // message:updated      MessageUpdatePayload
 //                        Merge-by-id: delete tombstones, edits, late
-//                        voice transcripts, translations, reactions.
+//                        voice transcripts, translations, reactions,
+//                        v8 retention tombstones (mediaExpiredAt).
 //
 // read:update          { conversationId, userId, lastReadMessageId }
 //                        `userId` = who read. Own sent messages with

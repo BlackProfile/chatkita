@@ -2,7 +2,7 @@
  * Pure helpers shared by the ChatKita chat UI (client-side only usage).
  */
 
-import { CHAT_FONT_KEY, type ChatMessage } from "./chat-types";
+import { CHAT_DATA_SAVER_KEY, CHAT_FONT_KEY, type ChatMessage } from "./chat-types";
 
 /* ------------------------------ font size ------------------------------ */
 
@@ -22,6 +22,26 @@ export function readFontScale(): FontScale {
 export function saveFontScale(scale: FontScale): void {
   try {
     window.localStorage.setItem(CHAT_FONT_KEY, scale);
+  } catch {
+    /* ignore */
+  }
+}
+
+/* ------------------------------ data saver ------------------------------ */
+
+/** Mode hemat data (v8): media berat tidak dimuat otomatis — tap untuk memuat.
+ *  Thumbnail (<30 KB) tetap tampil. */
+export function readDataSaver(): boolean {
+  try {
+    return window.localStorage.getItem(CHAT_DATA_SAVER_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function saveDataSaver(on: boolean): void {
+  try {
+    window.localStorage.setItem(CHAT_DATA_SAVER_KEY, on ? "1" : "0");
   } catch {
     /* ignore */
   }
@@ -176,18 +196,125 @@ export function resolveFileKind(mimeType?: string, fileName?: string): FileKind 
 
 /**
  * Sidebar/quote one-liner for a message of any type.
- * `fileName` hanya untuk pesan type "file" (pratinjau daftar percakapan).
+ * `fileName` hanya untuk pesan type "file" (pratinjau daftar percakapan);
+ * `mediaExpired` = media sudah dihapus pembersih retensi (v8).
  */
 export function messagePreview(
   type: string,
   content: string,
   deleted: boolean,
-  fileName?: string
+  fileName?: string,
+  mediaExpired?: boolean
 ): string {
   if (deleted) return "🚫 Pesan ini dihapus";
+  if (mediaExpired) return "⏳ Media kedaluwarsa";
   if (type === "image") return "📷 Foto";
   if (type === "voice") return "🎤 Pesan suara";
   if (type === "file") return `📎 ${fileName ?? "File"}`;
   if (type === "system") return content;
   return content;
+}
+
+/* ------------------------- pipeline media (v8) ------------------------- */
+
+/** Batas ukuran file yang diunggah ke /api/upload (25 MiB). */
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+export interface UploadResult {
+  url: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+}
+
+/**
+ * POST /api/upload — simpan blob/file ke db/media (SHA-256 dedup di server)
+ * dan dapatkan URL publik /api/media/<nama> + metadata. Melempar Error bila
+ * gagal; pemanggil menampilkan pesan kesalahan.
+ */
+export async function uploadMedia(file: File): Promise<UploadResult> {
+  const body = new FormData();
+  body.append("file", file);
+  const res = await fetch("/api/upload", { method: "POST", body });
+  const data = (await res.json().catch(() => null)) as
+    | (UploadResult & { ok: true })
+    | { ok: false; error: string }
+    | null;
+  if (!res.ok || !data || data.ok !== true) throw new Error("upload-failed");
+  return data;
+}
+
+/**
+ * Kompres foto di browser (meringankan server & bandwidth): full ≤1600px
+ * JPEG q0.82 + thumbnail ≤320px q0.6 (biasanya <30 KB). Gagal decode
+ * (mis. HEIC) melempar Error — pemanggil boleh fallback unggah file asli.
+ */
+export async function compressImageToBlobs(
+  file: File
+): Promise<{ full: Blob; thumb: Blob }> {
+  const bitmap = await createImageBitmap(file);
+  const draw = (max: number, quality: number): Promise<Blob> => {
+    const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("canvas");
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return new Promise<Blob>((resolveBlob, rejectBlob) =>
+      canvas.toBlob(
+        (b) => (b ? resolveBlob(b) : rejectBlob(new Error("blob"))),
+        "image/jpeg",
+        quality
+      )
+    );
+  };
+  try {
+    const full = await draw(1600, 0.82);
+    const thumb = await draw(320, 0.6);
+    return { full, thumb };
+  } finally {
+    bitmap.close();
+  }
+}
+
+/**
+ * Thumbnail video (poster): ambil satu frame sebagai JPEG kecil via
+ * <video> tersembunyi. Best-effort — null bila browser menolak/timeout.
+ */
+export async function videoPosterBlob(file: File): Promise<Blob | null> {
+  const url = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.muted = true;
+  video.preload = "auto";
+  video.src = url;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("timeout")), 4000);
+      video.onloadeddata = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      video.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error("video"));
+      };
+    });
+    const width = video.videoWidth || 320;
+    const height = video.videoHeight || 320;
+    const scale = Math.min(1, 320 / Math.max(width, height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob((b) => resolve(b), "image/jpeg", 0.6)
+    );
+  } catch {
+    return null;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }

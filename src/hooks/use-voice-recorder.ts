@@ -3,14 +3,17 @@
 /**
  * useVoiceRecorder — microphone capture via MediaRecorder, exposed as a
  * tiny state machine: idle → recording → (result | cancelled).
- * Produces a base64 data URL the chat-service accepts for voice messages.
+ * v8 — rekaman dibuat sekecil mungkin agar ringan di server & bandwidth:
+ * mono, 16 kHz, 24 kbps Opus (suaranya tetap jernih untuk percakapan).
+ * Hasilnya berupa Blob yang DIUNGGAH ke /api/upload (bukan data URL lagi).
  * The stream is ALWAYS torn down on stop/cancel/unmount.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface VoiceRecording {
-  dataUrl: string;
+  blob: Blob;
+  mimeType: string;
   durationMs: number;
 }
 
@@ -66,12 +69,20 @@ export function useVoiceRecorder() {
   const start = useCallback(async () => {
     if (recorderRef.current) return;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // v8 — mono 16 kHz: separuh bitrate, kualitas bicara tetap jelas.
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
       streamRef.current = stream;
       const mimeType = pickMimeType();
       const recorder = mimeType
-        ? new MediaRecorder(stream, { mimeType })
-        : new MediaRecorder(stream);
+        ? new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 24000 })
+        : new MediaRecorder(stream, { audioBitsPerSecond: 24000 });
       chunksRef.current = [];
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
@@ -85,16 +96,7 @@ export function useVoiceRecorder() {
         });
         teardown();
         if (!resolve) return; // cancelled
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          resolve(
-            typeof reader.result === "string" && reader.result.startsWith("data:audio/")
-              ? { dataUrl: reader.result, durationMs }
-              : null
-          );
-        };
-        reader.onerror = () => resolve(null);
-        reader.readAsDataURL(blob);
+        resolve(blob.size > 0 ? { blob, mimeType: blob.type, durationMs } : null);
       };
       startedAtRef.current = Date.now();
       recorder.start();
