@@ -610,6 +610,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         lm.created_at AS last_at,
         lm.type AS last_type,
         lm.deleted_at AS last_deleted,
+        lm.file_name AS last_file_name,
         pm.id AS pin_id,
         pm.sender_id AS pin_sender,
         pm.content AS pin_content,
@@ -654,6 +655,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     last_at: number | null
     last_type: string | null
     last_deleted: number | null
+    last_file_name: string | null
     pin_id: number | null
     pin_sender: string | null
     pin_content: string | null
@@ -681,6 +683,9 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
             createdAt: new Date(r.last_at as number).toISOString(),
             type: r.last_type ?? 'text',
             deleted: !!r.last_deleted,
+            ...(r.last_file_name && !r.last_deleted
+              ? { fileName: r.last_file_name }
+              : {}),
           }
         : null,
     lastMessageAt: new Date(r.last_message_at).toISOString(),

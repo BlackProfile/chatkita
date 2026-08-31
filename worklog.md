@@ -527,3 +527,25 @@ Work Log:
   - No page errors; note: "Buka" on non-viewable types opens download URL in a new tab (window.open with noopener — not trackable in headless test, by design).
 Stage Summary:
 - File sharing fully working end-to-end: any file type ≤25MB via /api/upload → db/media, messages carry /api/media URLs + fileName/fileSize/mimeType, in-app viewer (image/video/audio/PDF iframe) with always-available Unduh, protocol suite 43/43, lint/tsc clean. ChatKita v7 = pure messenger with full media support.
+
+---
+Task ID: 6
+Agent: Z.ai Code (main)
+Task: Gabungkan tombol foto & lampiran file menjadi SATU tombol paperclip (permintaan user: "kenapa ga digabung aja")
+
+Work Log:
+- Baca state terkini: fitur file sharing v7 sudah lengkap (chat-types, /api/upload, /api/media/[name], ChatBubble, media-viewer, dialog konfirmasi) — composer masih punya 2 tombol terpisah (ImagePlus + Paperclip) di Messenger.tsx DAN AdminPanel.tsx.
+- Messenger.tsx: hapus tombol "Kirim foto" (ImagePlus) + input accept="image/*" + docInputRef; sisakan SATU input type="file" tanpa accept + SATU tombol Paperclip "Lampirkan foto atau file" → handleFilePick.
+- AdminPanel.tsx: perubahan identik (konsistensi kedua sisi).
+- Perbaikan UX di handleFilePick (kedua file): foto ≤6MB → alur foto (kompresi canvas); foto >6MB tidak lagi error, tapi diarahkan ke alur unggah 25MB (ChatBubble tetap merender file+mime image sebagai gambar).
+- Polesan pratinjau daftar percakapan admin: SQL overview chat-service kini mengirim lm.file_name AS last_file_name → lastMessage.fileName (tidak untuk pesan terhapus); chat-types.ts ConversationOverview.lastMessage ditambah fileName?; AdminPanel sudah punya helper lastFileName() opportunistic sehingga otomatis menampilkan "📎 video-uji.mp4" (sebelumnya generik "📎 File").
+- Restart bersih chat-service (bun --hot sempat menangkap file setengah tertulis → "Unexpected end of file" transien; kill -9 instance lama PID 7339, jalankan ulang → PID 12108 listening port 3003, socket.io polling 200).
+- E2E via gateway http://localhost:81/ (agent-browser): login "Budi Uji" → composer hanya 1 tombol paperclip; upload tesfoto.png → chip pratinjau foto → kirim → bubble foto; upload dok-uji.pdf → dialog "Kirim file" (nama+397 B) → kirim → kartu PDF (Buka/Unduh) → viewer in-app iframe PDF; upload video-uji.mp4 → dialog (11 KB) → kirim → bubble dengan <video> player inline + scrubber.
+- Admin: login /?admin → 1 tombol gabungan, foto/PDF/video diterima & dirender, mobile 390px bersih; setelah restart service daftar tampil "📎 video-uji.mp4".
+- bun run lint 0 error; dev.log: POST /api/upload 200, GET /api/media/*.pdf|*.mp4 200; tanpa page error.
+
+Stage Summary:
+- Composer ChatKita kini ala WhatsApp: SATU tombol paperclip untuk semua lampiran (foto, video, dokumen, audio, arsip, dll) di sisi user dan admin; foto kecil tetap dikompresi (data URL), sisanya diunggah 25MB via /api/upload.
+- Foto besar (>6MB) tidak lagi gagal — otomatis masuk jalur unggah dan tetap tampil sebagai gambar.
+- Pratinjau daftar percakapan admin menampilkan nama file asli setelah pesan file ("📎 <nama>").
+- Kontrak v6/v7 bertambah 1 field opsional (lastMessage.fileName) — kompatibel mundur (frontend sudah opportunistic sejak awal).

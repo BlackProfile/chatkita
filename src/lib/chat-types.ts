@@ -142,6 +142,8 @@ export interface ConversationOverview {
     createdAt: string;
     type: string;
     deleted: boolean;
+    /** file messages: original file name (for "📎 <nama>" previews). */
+    fileName?: string;
   } | null;
   lastMessageAt: string;
   /** Unread messages sent by the partner. */

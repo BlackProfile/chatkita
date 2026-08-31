@@ -7,7 +7,6 @@ import {
   ArchiveRestore,
   ArrowDown,
   ArrowLeft,
-  ImagePlus,
   Loader2,
   Lock,
   LogOut,
@@ -237,7 +236,6 @@ export function AdminPanel() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const atBottomRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const docInputRef = useRef<HTMLInputElement | null>(null);
   const translatingIdRef = useRef<number | null>(null);
   const filterInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -754,11 +752,12 @@ export function AdminPanel() {
     if (emitMessage(pendingImage, "image")) setPendingImage(null);
   };
 
-  /* Lampiran file: gambar dirutekan ke alur foto (kompresi), lainnya → dialog. */
+  /* Satu tombol lampiran: foto ≤6MB → alur foto (kompresi); foto besar &
+   * jenis lainnya → dialog unggah (maks 25MB, tetap tampil sebagai gambar). */
   const handleFilePick = (file: File | undefined | null) => {
     if (!file) return;
     setFileError(null);
-    if (file.type.startsWith("image/")) {
+    if (file.type.startsWith("image/") && file.size <= 6 * 1024 * 1024) {
       void handleImagePick(file);
       return;
     }
@@ -1516,19 +1515,8 @@ export function AdminPanel() {
                       <input
                         ref={fileInputRef}
                         type="file"
-                        accept="image/*"
                         className="hidden"
-                        aria-label="Pilih foto"
-                        onChange={(e) => {
-                          void handleImagePick(e.target.files?.[0]);
-                          e.target.value = "";
-                        }}
-                      />
-                      <input
-                        ref={docInputRef}
-                        type="file"
-                        className="hidden"
-                        aria-label="Lampirkan file"
+                        aria-label="Pilih foto atau file"
                         onChange={(e) => {
                           handleFilePick(e.target.files?.[0]);
                           e.target.value = "";
@@ -1547,18 +1535,9 @@ export function AdminPanel() {
                         variant="ghost"
                         size="icon"
                         className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
-                        aria-label="Kirim foto"
+                        aria-label="Lampirkan foto atau file"
+                        title="Lampirkan foto atau file"
                         onClick={() => fileInputRef.current?.click()}
-                      >
-                        <ImagePlus className="size-5" aria-hidden="true" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
-                        aria-label="Lampirkan file"
-                        title="Lampirkan file"
-                        onClick={() => docInputRef.current?.click()}
                       >
                         <Paperclip className="size-5" aria-hidden="true" />
                       </Button>
