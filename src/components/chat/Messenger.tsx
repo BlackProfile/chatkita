@@ -306,10 +306,12 @@ export function Messenger() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [partnerTyping, setPartnerTyping] = useState(false);
   const [connected, setConnected] = useState(false);
-  // Prefilled with the last used name so a returning user only taps Masuk.
   // Messenger mounts client-only (the page gates it behind hydration),
   // so reading localStorage in the initializer is safe.
-  const [name, setName] = useState(() => readLastName());
+  // The input is NEVER prefilled — a returning user gets a one-tap
+  // "Lanjut chat sebagai …" button instead (clearer than a mystery value
+  // sitting in the field).
+  const [name, setName] = useState("");
   const [lastName, setLastName] = useState(() => readLastName());
   const [pinEntry, setPinEntry] = useState("");
   const [needsPin, setNeedsPin] = useState(false);
@@ -599,10 +601,15 @@ export function Messenger() {
   /* Actions                                                           */
   /* ---------------------------------------------------------------- */
 
-  const handleAuth = () => {
+  /**
+   * Login. `override` lets the "Lanjut chat sebagai …" button authenticate
+   * with the stored last name without putting it back into the input.
+   */
+  const handleAuth = (override?: string) => {
     const socket = socketRef.current;
-    const trimmed = name.trim();
+    const trimmed = (override ?? name).trim();
     if (!socket || !connected || !trimmed) return;
+    if (override && override !== name) setName(override);
     setAuthError(null);
     socket.emit(
       "user:auth",
@@ -676,10 +683,10 @@ export function Messenger() {
     setSearchQuery("");
     setTitleUnread(0);
     hiddenUnreadRef.current = 0;
-    // Login card comes back prefilled with the last used name — one tap
-    // on "Lanjut Chat" resumes the previous conversation (server matches
-    // the account by case-insensitive name and returns the full history).
-    setName(readLastName());
+    // Login card comes back EMPTY — a returning user simply taps the
+    // "Lanjut chat sebagai …" button (server matches the account by
+    // case-insensitive name and returns the full history).
+    setName("");
     // Fresh socket ⇒ server cleanly forgets this client's rooms.
     setEpoch((e) => e + 1);
   };
@@ -844,8 +851,34 @@ export function Messenger() {
                 handleAuth();
               }}
             >
+              {lastName ? (
+                <>
+                  <Button
+                    type="button"
+                    className="h-11 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+                    disabled={!connected}
+                    onClick={() => handleAuth(lastName)}
+                  >
+                    {connected
+                      ? `Lanjut chat sebagai “${lastName}”`
+                      : "Menghubungkan…"}
+                  </Button>
+                  <p className="text-center text-xs text-muted-foreground">
+                    Lanjutkan percakapan Anda sebelumnya — riwayat pesan tetap ada
+                  </p>
+                  <div className="flex items-center gap-3" aria-hidden="true">
+                    <span className="h-px flex-1 bg-border" />
+                    <span className="text-xs text-muted-foreground">
+                      atau masuk sebagai nama lain
+                    </span>
+                    <span className="h-px flex-1 bg-border" />
+                  </div>
+                </>
+              ) : null}
               <div className="space-y-2">
-                <Label htmlFor="messenger-name">Nama Anda</Label>
+                <Label htmlFor="messenger-name">
+                  {lastName ? "Nama baru" : "Nama Anda"}
+                </Label>
                 <Input
                   id="messenger-name"
                   value={name}
@@ -880,20 +913,21 @@ export function Messenger() {
               {authError ? <p className="text-sm text-destructive">{authError}</p> : null}
               <Button
                 type="submit"
-                className="h-11 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+                variant={lastName ? "outline" : "default"}
+                className={
+                  lastName
+                    ? "h-11 w-full"
+                    : "h-11 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+                }
                 disabled={!connected || !name.trim() || (needsPin && !pinEntry)}
               >
-                {connected
-                  ? lastName && name.trim().toLowerCase() === lastName.toLowerCase()
-                    ? "Lanjut Chat"
-                    : "Masuk"
-                  : "Menghubungkan…"}
+                {connected ? "Masuk" : "Menghubungkan…"}
               </Button>
-              <p className="text-center text-xs text-muted-foreground">
-                {lastName
-                  ? `Lanjutkan chat sebelumnya sebagai “${lastName}” — riwayat pesan Anda tetap ada`
-                  : "Nama yang sama = akun yang sama, jadi Anda bisa lanjut chat kapan saja"}
-              </p>
+              {!lastName ? (
+                <p className="text-center text-xs text-muted-foreground">
+                  Nama yang sama = akun yang sama, jadi Anda bisa lanjut chat kapan saja
+                </p>
+              ) : null}
               {installAvailable ? (
                 <Button
                   type="button"

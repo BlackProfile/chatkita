@@ -443,3 +443,18 @@ Work Log:
 
 Stage Summary:
 - ChatKita is now a pure WhatsApp/Telegram-style private messenger end-to-end (contract, backend, frontend, data). All 11 CS feature groups removed; messenger core (receipts, presence, typing, reply, edit, delete, reactions, translate, voice transcription, pin, archive, search, PIN, push/PWA, drafts, fonts, QR invite) verified working via real browser flows. Backup of pre-reset data: db-backup-cs-cleanup/.
+
+---
+Task ID: 5
+Agent: main (Z.ai Code)
+Task: Login card — remove name prefill, add one-tap "Lanjut chat" option + full DB reset
+
+Work Log:
+- Messenger.tsx: `name` state no longer initializes from readLastName() (empty input for everyone); logout resets name to "" instead of re-prefilling
+- handleAuth(override?: string) — the continue button authenticates with the stored last name without injecting it into the input; on PIN_REQUIRED the override is set into `name` so the PIN submit path stays consistent
+- Login card restructured: when lastName exists → primary emerald button "Lanjut chat sebagai “X”" + subtext, divider "atau masuk sebagai nama lain", then label "Nama baru" + outline Masuk; first-time users see the original form unchanged
+- Full DB reset: killed chat-service (PID 5288), deleted chat.db/-wal/-shm (no new backup — explicit user request; earlier backup kept in db-backup-cs-cleanup/), restarted via setsid bun run dev (PID 5820); fresh boot OK (migrations, new VAPID keys, admin seeded, v6 on :3003)
+- E2E (agent-browser via gateway :81): fresh browser → new-user card (empty input, no continue button) ✓; login "Budi Uji" → logout → returning card shows empty input + "Lanjut chat sebagai “Budi Uji”" ✓; one-tap continue entered chat with empty history ✓; sent "Halo Admin 👋" → admin panel (fresh login) shows conversation with unread badge 1 ✓; `bun run lint` clean ✓
+
+Stage Summary:
+- Returning users get a one-tap continue option and the name field is never prefilled anymore; database fully reset to a pristine v6 state (only Admin seeded + test entries created during verification).
