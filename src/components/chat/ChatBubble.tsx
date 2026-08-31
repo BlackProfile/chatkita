@@ -23,6 +23,7 @@ import type { MessageReaction, ReplyPreview } from "@/lib/chat-types";
 import { formatChatTime, formatFileSize, resolveFileKind } from "@/lib/chat-utils";
 import { cn } from "@/lib/utils";
 import { FileKindIcon } from "@/components/chat/media-viewer";
+import { VoicePlayer } from "@/components/chat/voice-player";
 
 /** Fixed reaction palette (mirrors the server). */
 const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"] as const;
@@ -85,92 +86,6 @@ interface ChatBubbleProps {
   onEdit?: () => void;
   onTranslate?: () => void;
   onPin?: () => void;
-}
-
-/* ------------------------------------------------------------------ */
-/* Voice player (play/pause + seek bar + duration)                     */
-/* ------------------------------------------------------------------ */
-
-function formatDuration(ms: number): string {
-  const total = Math.max(0, Math.round(ms / 1000));
-  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
-}
-
-function VoicePlayer({
-  src,
-  durationMs,
-  mine,
-}: {
-  src: string;
-  durationMs?: number;
-  mine: boolean;
-}) {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [playing, setPlaying] = useState(false);
-  const [positionMs, setPositionMs] = useState(0);
-  const [realDurationMs, setRealDurationMs] = useState(0);
-
-  const total = realDurationMs || durationMs || 0;
-
-  const toggle = () => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    if (playing) audio.pause();
-    else void audio.play().catch(() => setPlaying(false));
-  };
-
-  return (
-    <div className="flex min-w-44 items-center gap-2">
-      <audio
-        ref={audioRef}
-        src={src}
-        preload="none"
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
-        onEnded={() => {
-          setPlaying(false);
-          setPositionMs(total);
-        }}
-        onTimeUpdate={(e) => setPositionMs(e.currentTarget.currentTime * 1000)}
-        onLoadedMetadata={(e) => {
-          const d = e.currentTarget.duration;
-          if (Number.isFinite(d) && d > 0) setRealDurationMs(d * 1000);
-        }}
-      />
-      <button
-        type="button"
-        aria-label={playing ? "Jeda pesan suara" : "Putar pesan suara"}
-        className={cn(
-          "flex size-8 shrink-0 items-center justify-center rounded-full",
-          mine ? "bg-white/20 text-white hover:bg-white/30" : "bg-primary/10 hover:bg-primary/20"
-        )}
-        onClick={toggle}
-      >
-        {playing ? (
-          <Pause className="size-4" aria-hidden="true" />
-        ) : (
-          <Play className="size-4" aria-hidden="true" />
-        )}
-      </button>
-      <input
-        type="range"
-        min={0}
-        max={Math.max(1, total)}
-        value={Math.min(positionMs, total)}
-        aria-label="Posisi pemutar suara"
-        className="h-1 w-24 cursor-pointer accent-current sm:w-32"
-        onChange={(e) => {
-          const audio = audioRef.current;
-          const value = Number(e.target.value);
-          setPositionMs(value);
-          if (audio && total > 0) audio.currentTime = value / 1000;
-        }}
-      />
-      <span className={cn("text-[10px] tabular-nums", mine ? "opacity-80" : "opacity-60")}>
-        {formatDuration(playing || positionMs > 0 ? positionMs : total)}
-      </span>
-    </div>
-  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -369,7 +284,12 @@ export function ChatBubble({
             />
           ) : type === "voice" ? (
             <div className="px-1.5 py-1">
-              <VoicePlayer src={content} durationMs={durationMs} mine={isRight} />
+              <VoicePlayer
+                src={content}
+                durationMs={durationMs}
+                mine={isRight}
+                seed={messageId ?? 1}
+              />
               {transcript ? (
                 <p
                   className={cn(
@@ -393,7 +313,10 @@ export function ChatBubble({
               onClick={(e) => e.stopPropagation()}
             />
           ) : type === "file" && fileKind === "audio" ? (
-            <div className="min-w-56 px-1.5 py-1" onClick={(e) => e.stopPropagation()}>
+            <div
+              className="min-w-56 px-1.5 py-1"
+              onClick={(e) => e.stopPropagation()}
+            >
               <p
                 className={cn(
                   "mb-1 break-words text-xs font-medium",
@@ -402,11 +325,10 @@ export function ChatBubble({
               >
                 {fileName ?? "Audio"}
               </p>
-              <audio
+              <VoicePlayer
                 src={content}
-                controls
-                preload="none"
-                className="w-56 max-w-full"
+                mine={isRight}
+                seed={messageId ?? 1}
               />
             </div>
           ) : type === "file" ? (

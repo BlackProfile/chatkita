@@ -2,19 +2,28 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
+import { useTheme } from "next-themes";
 import {
   Archive,
   ArchiveRestore,
   ArrowDown,
   ArrowLeft,
+  Bell,
   ChevronUp,
+  DatabaseBackup,
+  EyeOff,
+  FileJson,
+  GaugeCircle,
   Leaf,
   Loader2,
   Lock,
+  LockKeyhole,
   LogOut,
   MessagesSquare,
+  Megaphone,
   Mic,
   MoreVertical,
+  Moon,
   Paperclip,
   Pin,
   QrCode,
@@ -22,12 +31,16 @@ import {
   SendHorizonal,
   ShieldCheck,
   Smile,
+  Sun,
   Type,
+  Wrench,
   X,
 } from "lucide-react";
 import type { Socket } from "socket.io-client";
 
 import { ChatBubble } from "@/components/chat/ChatBubble";
+import { AdminDashboard, type DashboardTab } from "@/components/chat/admin-dashboard";
+import { DaySeparator, dayKey } from "@/components/chat/day-separator";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
 import { MediaViewer, FileKindIcon, type ViewerMedia } from "@/components/chat/media-viewer";
 import { TypingDots } from "@/components/chat/TypingDots";
@@ -72,10 +85,15 @@ import {
   draftKey,
   type AckOf,
   type AdminAuthAck,
+  type AppSettings,
+  type AppSettingsUpdatePayload,
   type ArchiveUpdatePayload,
+  type BackupAck,
+  type BroadcastAck,
   type ChatErrorAck,
   type ChatMessage,
   type ConversationOverview,
+  type GhostAck,
   type HistoryAck,
   type MessageAck,
   type MessageUpdatePayload,
@@ -83,6 +101,7 @@ import {
   type PinUpdatePayload,
   type PublicSettingsAck,
   type TranslateAck,
+  type VacuumAck,
 } from "@/lib/chat-types";
 import {
   avatarColorClass,
@@ -153,6 +172,8 @@ function saveDraft(scope: string, id: string, value: string): void {
   }
 }
 
+const ADMIN_LOCK_KEY = "chatkita:admin-locked";
+
 /**
  * ChatKita AdminPanel — satu tempat untuk membaca & membalas pesan
  * SEMUA user (masing-masing 1-on-1 dengan Admin). User tidak bisa
@@ -161,6 +182,7 @@ function saveDraft(scope: string, id: string, value: string): void {
  */
 export function AdminPanel() {
   const isMobile = useIsMobile();
+  const { resolvedTheme, setTheme } = useTheme();
 
   const [authed, setAuthed] = useState(false);
   const [conversations, setConversations] = useState<ConversationOverview[]>([]);
@@ -216,8 +238,19 @@ export function AdminPanel() {
   /** v5 — first unread message id → "Pesan baru" divider. */
   const [unreadDividerId, setUnreadDividerId] = useState<number | null>(null);
 
+  // v10 — dashboard aplikasi, pengaturan global, mode hantu, kunci layar.
+  const [dashOpen, setDashOpen] = useState(false);
+  const [dashTab, setDashTab] = useState<DashboardTab>("ringkasan");
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  const [ghost, setGhost] = useState(false);
+  const [locked, setLocked] = useState(false);
+  const [lockPin, setLockPin] = useState("");
+  const [lockError, setLockError] = useState<string | null>(null);
+  const [menuNotice, setMenuNotice] = useState<string | null>(null);
+
   const socketRef = useRef<Socket | null>(null);
   const passwordRef = useRef<string | null>(null);
+  const ghostRef = useRef(false);
   const activeIdRef = useRef<string | null>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const partnerTypingTimersRef = useRef<
@@ -228,6 +261,7 @@ export function AdminPanel() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const translatingIdRef = useRef<number | null>(null);
   const filterInputRef = useRef<HTMLInputElement | null>(null);
+  const menuNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const recorder = useVoiceRecorder();
 
@@ -242,6 +276,134 @@ export function AdminPanel() {
       saveDataSaver(next);
       return next;
     });
+
+  /* ---------------------------------------------------------------- */
+  /* v10 — menu aplikasi: dashboard / siaran / pemeliharaan / sesi      */
+  /* ---------------------------------------------------------------- */
+  const showMenuNotice = useCallback((text: string) => {
+    setMenuNotice(text);
+    if (menuNoticeTimer.current) clearTimeout(menuNoticeTimer.current);
+    menuNoticeTimer.current = setTimeout(() => setMenuNotice(null), 2600);
+  }, []);
+
+  const openDashboard = useCallback((tab: DashboardTab) => {
+    setDashTab(tab);
+    setDashOpen(true);
+  }, []);
+
+  const toggleGhost = useCallback(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    socket.emit("admin:ghost", { on: !ghostRef.current }, (res: AckOf<GhostAck>) => {
+      if (res.ok) {
+        ghostRef.current = res.ghost;
+        setGhost(res.ghost);
+        showMenuNotice(res.ghost ? "Mode hantu aktif — baca tanpa ✓✓" : "Mode hantu nonaktif");
+      }
+    });
+  }, [showMenuNotice]);
+
+  const toggleMaintenance = useCallback(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    const next = !(appSettings?.maintenanceMode ?? false);
+    socket.emit(
+      "admin:settings:set",
+      { maintenanceMode: next },
+      (res: AckOf<AppSettingsAck> | ChatErrorAck) => {
+        if (res.ok) {
+          setAppSettings(res.settings);
+          showMenuNotice(res.settings.maintenanceMode ? "Mode pemeliharaan AKTIF" : "Mode pemeliharaan nonaktif");
+        }
+      }
+    );
+  }, [appSettings?.maintenanceMode, showMenuNotice]);
+
+  const downloadBackup = useCallback(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    showMenuNotice("Menyiapkan backup…");
+    socket.emit("admin:backup", {}, (res: AckOf<BackupAck>) => {
+      if (!res.ok) {
+        showMenuNotice("Backup gagal");
+        return;
+      }
+      try {
+        const blob = new Blob([JSON.stringify(res, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `chatkita-backup-${res.exportedAt.slice(0, 10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showMenuNotice("Backup JSON terunduh ✓");
+      } catch {
+        showMenuNotice("Backup gagal");
+      }
+    });
+  }, [showMenuNotice]);
+
+  const runVacuum = useCallback(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    showMenuNotice("Mengompres database…");
+    socket.emit("admin:vacuum", {}, (res: AckOf<VacuumAck>) => {
+      if (!res.ok) {
+        showMenuNotice("VACUUM gagal");
+        return;
+      }
+      const saved = res.before.walBytes - res.after.walBytes;
+      showMenuNotice(
+        `VACUUM selesai — DB ${(res.after.dbBytes / 1024).toFixed(0)} KB${saved > 0 ? ` (hemat ${(saved / 1024).toFixed(0)} KB)` : ""}`
+      );
+    });
+  }, [showMenuNotice]);
+
+  const lockNow = useCallback(() => {
+    try {
+      window.sessionStorage.setItem(ADMIN_LOCK_KEY, "1");
+    } catch {
+      /* ignore */
+    }
+    setLockPin("");
+    setLockError(null);
+    setLocked(true);
+  }, []);
+
+  const unlock = useCallback(() => {
+    const socket = socketRef.current;
+    if (!socket || !lockPin.trim()) return;
+    socket.emit("admin:auth", { password: lockPin }, (res: AckOf<AdminAuthAck>) => {
+      if (res.ok) {
+        try {
+          window.sessionStorage.removeItem(ADMIN_LOCK_KEY);
+        } catch {
+          /* ignore */
+        }
+        setLocked(false);
+        setLockPin("");
+        setLockError(null);
+      } else {
+        setLockError("Password salah.");
+      }
+    });
+  }, [lockPin]);
+
+  // Pulihkan status kunci layar setelah reload (per tab/session).
+  useEffect(() => {
+    try {
+      if (window.sessionStorage.getItem(ADMIN_LOCK_KEY) === "1") setLocked(true);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (menuNoticeTimer.current) clearTimeout(menuNoticeTimer.current);
+    },
+    []
+  );
 
   const scrollToBottom = useCallback((smooth = false) => {
     const el = scrollRef.current;
@@ -312,6 +474,11 @@ export function AdminPanel() {
 
     socket.on("disconnect", () => {
       setConnected(false);
+    });
+
+    // v10 — pengaturan aplikasi live (mode pemeliharaan, nama aplikasi…).
+    socket.on("app:settings:update", (s: AppSettingsUpdatePayload) => {
+      setAppSettings(s);
     });
 
     socket.on("conversations:update", (list: ConversationOverview[]) => {
@@ -1035,6 +1202,7 @@ export function AdminPanel() {
   /* ---------------------------------------------------------------- */
   const showSidebar = !isMobile || !activeId;
   const showChatPane = !isMobile || activeId !== null;
+  const maintenanceOn = appSettings?.maintenanceMode ?? false;
 
   const partnerStatus = activeTyping
     ? "sedang mengetik…"
@@ -1044,11 +1212,75 @@ export function AdminPanel() {
 
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col">
+      {/* v10 — kunci layar: overlay penuh, buka kunci dengan password admin */}
+      {locked ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/95 p-4 backdrop-blur">
+          <Card className="w-full max-w-sm rounded-2xl">
+            <CardHeader className="items-center text-center">
+              <span
+                className="mx-auto rounded-lg bg-emerald-600/10 p-3 text-emerald-600"
+                aria-hidden="true"
+              >
+                <LockKeyhole className="size-6" />
+              </span>
+              <CardTitle className="text-xl">Layar Terkunci</CardTitle>
+              <CardDescription>
+                Masukkan password admin untuk melanjutkan
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form
+                className="space-y-3"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  unlock();
+                }}
+              >
+                <Input
+                  autoFocus
+                  type="password"
+                  value={lockPin}
+                  autoComplete="current-password"
+                  aria-label="Password admin"
+                  className="h-11 text-center"
+                  onChange={(e) => {
+                    setLockPin(e.target.value);
+                    setLockError(null);
+                  }}
+                />
+                {lockError ? <p className="text-center text-sm text-destructive">{lockError}</p> : null}
+                <Button
+                  type="submit"
+                  className="h-11 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+                  disabled={!lockPin.trim() || !connected}
+                >
+                  Buka kunci
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="h-10 w-full text-muted-foreground hover:text-destructive"
+                  onClick={handleLogout}
+                >
+                  <LogOut className="size-4" aria-hidden="true" />
+                  Keluar dari admin
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-card">
         {/* Reconnecting strip */}
         {!connected ? (
           <p className="bg-amber-500/10 px-3 py-1.5 text-xs text-amber-600 dark:text-amber-400">
             Koneksi terputus — mencoba menyambung ulang…
+          </p>
+        ) : null}
+        {/* v10 — banner mode pemeliharaan (live dari dashboard) */}
+        {maintenanceOn ? (
+          <p className="bg-amber-500/10 px-3 py-1.5 text-xs text-amber-600 dark:text-amber-400">
+            🛠 Mode pemeliharaan aktif{appSettings?.maintenanceNote ? ` — ${appSettings.maintenanceNote}` : ""}
           </p>
         ) : null}
 
@@ -1082,17 +1314,88 @@ export function AdminPanel() {
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-0.5">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-9 text-muted-foreground hover:text-foreground"
-                    aria-label="Bagikan lewat QR"
-                    title="QR code untuk membuka chat"
-                    onClick={openQr}
-                  >
-                    <QrCode className="size-4" aria-hidden="true" />
-                  </Button>
-                  <ThemeToggle />
+                  {/* v10 — menu aplikasi (⋮ emerald): dashboard + pengelolaan */}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-9"
+                        aria-label="Menu aplikasi"
+                        title="Menu aplikasi"
+                      >
+                        <span className="relative">
+                          <MoreVertical className="size-4 text-emerald-600" aria-hidden="true" />
+                          {maintenanceOn ? (
+                            <span
+                              aria-hidden="true"
+                              className="absolute -right-1 -top-1 size-1.5 rounded-full bg-amber-500"
+                            />
+                          ) : null}
+                        </span>
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-64">
+                      <DropdownMenuLabel>Panel aplikasi</DropdownMenuLabel>
+                      <DropdownMenuItem onClick={() => openDashboard("ringkasan")}>
+                        <GaugeCircle className="mr-2 size-4" aria-hidden="true" />
+                        Dashboard aplikasi
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => openDashboard("siaran")}>
+                        <Megaphone className="mr-2 size-4" aria-hidden="true" />
+                        Siaran pesan
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => openDashboard("siaran")}>
+                        <Bell className="mr-2 size-4" aria-hidden="true" />
+                        Pengumuman
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={toggleMaintenance}
+                        className={cn(maintenanceOn && "bg-amber-500/10")}
+                      >
+                        <Wrench className="mr-2 size-4" aria-hidden="true" />
+                        Mode pemeliharaan: {maintenanceOn ? "aktif" : "nonaktif"}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => openDashboard("sistem")}>
+                        <ShieldCheck className="mr-2 size-4" aria-hidden="true" />
+                        Info aplikasi
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={downloadBackup}>
+                        <FileJson className="mr-2 size-4" aria-hidden="true" />
+                        Unduh backup JSON
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={runVacuum}>
+                        <DatabaseBackup className="mr-2 size-4" aria-hidden="true" />
+                        Kompres VACUUM
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuLabel>Sesi &amp; tampilan</DropdownMenuLabel>
+                      <DropdownMenuItem onClick={openQr}>
+                        <QrCode className="mr-2 size-4" aria-hidden="true" />
+                        QR code undangan
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={toggleGhost}
+                        className={cn(ghost && "bg-accent")}
+                      >
+                        <EyeOff className="mr-2 size-4" aria-hidden="true" />
+                        Mode hantu: {ghost ? "aktif" : "nonaktif"}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={lockNow}>
+                        <LockKeyhole className="mr-2 size-4" aria-hidden="true" />
+                        Kunci layar
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}>
+                        {resolvedTheme === "dark" ? (
+                          <Sun className="mr-2 size-4" aria-hidden="true" />
+                        ) : (
+                          <Moon className="mr-2 size-4" aria-hidden="true" />
+                        )}
+                        Tema {resolvedTheme === "dark" ? "terang" : "gelap"}
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   <Button
                     variant="ghost"
                     size="icon"
@@ -1455,8 +1758,14 @@ export function AdminPanel() {
                         </p>
                       )
                     ) : (
-                      visibleMessages.map((m) => (
+                      visibleMessages.map((m, idx) => (
                         <div key={m.id} className="contents">
+                          {/* v10 — pemisah tanggal di pesan pertama tiap hari */}
+                          {idx === 0 ||
+                          dayKey(visibleMessages[idx - 1].createdAt) !==
+                            dayKey(m.createdAt) ? (
+                            <DaySeparator createdAt={m.createdAt} />
+                          ) : null}
                           {m.id === unreadDividerId ? (
                             <div
                               className="my-1 flex items-center gap-2"
@@ -1889,6 +2198,25 @@ export function AdminPanel() {
 
       {/* Viewer media full-screen (foto/video/audio/PDF/dokumen) */}
       <MediaViewer media={viewer} onClose={() => setViewer(null)} />
+
+      {/* v10 — Dashboard aplikasi (analitik, pengaturan, siaran, sistem) */}
+      <AdminDashboard
+        open={dashOpen}
+        onOpenChange={setDashOpen}
+        socket={socketRef.current}
+        tab={dashTab}
+        onTabChange={setDashTab}
+      />
+
+      {/* v10 — notifikasi singkat aksi menu (backup / vacuum / ghost / dll) */}
+      {menuNotice ? (
+        <div
+          role="status"
+          className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full bg-foreground px-4 py-2 text-xs font-medium text-background shadow-lg"
+        >
+          {menuNotice}
+        </div>
+      ) : null}
     </div>
   );
 }

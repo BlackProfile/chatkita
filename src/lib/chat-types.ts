@@ -313,6 +313,115 @@ export interface ChatErrorAck {
 export type AckOf<T> = T | ChatErrorAck;
 
 /* ------------------------------------------------------------------ */
+/* v10 — admin dashboard / app settings / broadcast                    */
+/* ------------------------------------------------------------------ */
+
+/** App-wide settings (editable by admin, broadcast to everyone). */
+export interface AppSettings {
+  appName: string;
+  welcomeMessage: string;
+  maintenanceMode: boolean;
+  maintenanceNote: string;
+}
+
+/** `public:settings` now also carries the public app settings (v10). */
+export interface PublicSettingsAck {
+  ok: true;
+  pushPublicKey: string;
+  /** v10 — present on newer servers; optional for older clients. */
+  app?: AppSettings;
+}
+
+/** One UTC day of message counts (dashboard daily series). */
+export interface DashboardDayPoint {
+  date: string;
+  count: number;
+}
+
+/** A user row inside the dashboard (top users / all users tables). */
+export interface DashboardUserRow {
+  id: string;
+  name: string;
+  messages: number;
+  lastSeenAt: string;
+  online: boolean;
+  /** Only on the all-users list. */
+  joinedAt?: string;
+}
+
+/** Full stats payload returned by `admin:dashboard`. */
+export interface DashboardStats {
+  generatedAt: string;
+  version: string;
+  uptimeMs: number;
+  totals: {
+    users: number;
+    conversations: number;
+    messages: number;
+    deletedMessages: number;
+    last24h: number;
+    last7d: number;
+    byType: Record<string, number>;
+    onlineUsers: number;
+    mediaCount: number;
+    mediaBytes: number;
+  };
+  daily: DashboardDayPoint[];
+  /** 24 buckets, hour-of-day (UTC) over the last 7 days. */
+  hourly: number[];
+  topUsers: DashboardUserRow[];
+  users: DashboardUserRow[];
+  storage: {
+    dbBytes: number;
+    walBytes: number;
+    mediaBytes: number;
+    mediaFiles: number;
+    quotaBytes: number;
+    retentionDays: number;
+  };
+}
+
+export interface DashboardStatsAck {
+  ok: true;
+  stats: DashboardStats;
+}
+
+export interface AppSettingsAck {
+  ok: true;
+  settings: AppSettings;
+}
+
+export interface BroadcastAck {
+  ok: true;
+  count: number;
+  kind: "siaran" | "pengumuman";
+}
+
+export interface BackupAck {
+  ok: true;
+  exportedAt: string;
+  version: string;
+  users: unknown[];
+  conversations: unknown[];
+  messages: unknown[];
+  settings: { key: string; value: string }[];
+}
+
+export interface VacuumAck {
+  ok: true;
+  before: { dbBytes: number; walBytes: number };
+  after: { dbBytes: number; walBytes: number };
+}
+
+export interface GhostAck {
+  ok: true;
+  ghost: boolean;
+}
+
+/** Server → everyone: app settings changed (v10). */
+export type AppSettingsUpdatePayload = AppSettings;
+
+/* ------------------------------------------------------------------ */
 /* Client → Server events (ack via callback where listed)              */
 /* ------------------------------------------------------------------ */
 //
@@ -402,6 +511,25 @@ export type AckOf<T> = T | ChatErrorAck;
 // conversation:archive { conversationId, archived }  (admin)
 //                     Plain archive/unarchive — no rating side effects.
 // push:subscribe       { subscription }              (no ack, user/admin)
+//
+// ---- v10 (admin dashboard) — all admin-only, ack via callback ----
+//
+// admin:dashboard     {} → DashboardStatsAck | ChatErrorAck
+// admin:settings:get  {} → AppSettingsAck | ChatErrorAck
+// admin:settings:set  { appName?, welcomeMessage?, maintenanceMode?,
+//                       maintenanceNote? } → AppSettingsAck | ChatErrorAck
+//                       Also broadcasts `app:settings:update` to everyone.
+// admin:broadcast     { text, kind: 'siaran'|'pengumuman' }
+//                       → BroadcastAck | ChatErrorAck
+//                       Inserts one system message into EVERY conversation.
+// admin:backup        {} → BackupAck | ChatErrorAck (full JSON dump)
+// admin:vacuum        {} → VacuumAck | ChatErrorAck (WAL checkpoint + VACUUM)
+// admin:ghost         { on: boolean } → GhostAck | ChatErrorAck
+//                       Ghost reading: admin reads without read receipts.
+//
+// ---- v10 server → client ----
+//
+// app:settings:update  AppSettingsUpdatePayload (broadcast to ALL clients)
 
 /* ------------------------------------------------------------------ */
 /* Server → Client events                                              */

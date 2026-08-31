@@ -595,3 +595,34 @@ Work Log:
 Stage Summary:
 - ChatKita v8 jauh lebih ringan: DB tak lagi menyimpan base64 (semua media di disk, dedup SHA-256), login/history hanya 50 pesan + thumbnail <30KB (bukan puluhan MB), media otomatus kedaluwarsa 30 hari (disk dibebaskan, refcount aman), VACUUM berkala, voice 24kbps mono, proteksi rate limit + kuota 250MB, mode hemat data opsional, video seek via HTTP Range (206 terverifikasi).
 - Service: chat-service v8 (port 3003, retensi 30 hari via env MEDIA_RETENTION_DAYS); lint & tsc bersih; E2E hijau termasuk kasus retensi nyata.
+
+---
+Task ID: 18
+Agent: Z.ai Code (main)
+Task: Pulihkan fitur yang hilang (sandbox ter-revert ke v8) + dashboard admin diperluas + Task 18 voice player WhatsApp-style ("kok banyak fitur yang hilang, aplikasi jadi sederhana" + "tambahkan fitur dashboard pada admin lainnya" + "buat audio player aplikasi untuk audio")
+
+Work Log:
+- DIAGNOSIS: sandbox ter-restore ke snapshot v8 (commit 31 Aug 18:19) — seluruh pekerjaan sesi-4/5 hilang dari disk (dashboard admin, menu aplikasi ⋮, day separator), sementara chat-service v8 tetap utuh. Tidak ada kode sesi-4/5 di git/worklog → dibangun ulang dari nol + diperluas.
+- Backend chat-service v10 (mini-services/chat-service/index.ts):
+  * Impor +readdirSync/+statSync; SERVICE_VERSION/BOOT_AT/DB_PATH konstanta; boot log v10.
+  * App settings (tabel settings): appName/welcomeMessage/maintenanceMode/maintenanceNote + APP_SETTING_LIMITS + getAppSettings/broadcastAppSettings (io.emit app:settings:update ke SEMUA client).
+  * dashboardStats(): agregasi SQL (users, conversations, messages, deleted, 24h/7d, byType, daily 14 hari zero-filled epoch-day, hourly 24 bucket 7 hari, topUsers 10, users ≤100 + last_seen/online, media bytes+count, dirStats(MEDIA_DIR), db/wal statSync, onlineUsers dari onlineSockets).
+  * Event admin-only (guard authedUserId===ADMIN): admin:dashboard, admin:settings:get/set (validasi + broadcast), admin:broadcast {text≤500, kind siaran|pengumuman → insertAndFanOut system ke SEMUA percakapan}, admin:backup (dump users/conversations/messages/settings minus vapid secrets), admin:vacuum (before/after bytes + dbMaintenance), admin:ghost {on} → socket.data.ghost.
+  * Ghost mode: messages:history & messages:read skip markRead/broadcastRead bila admin ghost ✓ (terverifikasi DB: cursor tetap 188 saat max 189).
+  * public:settings += app (AppSettings) → kartu login tampil nama aplikasi + sambutan + banner pemeliharaan.
+- Frontend:
+  * src/components/chat/admin-dashboard.tsx (BARU, ~600 baris): dialog 6 tab (Ringkasan: 6 KPI + bar chart CSS 14 hari + komposisi jenis; Analitik: hourly 24 bar + top users 🥇🥈🥉 + rata2/media%/hapus%; Pengguna: daftar online/lastSeen/jumlah; Siaran: composer siaran/pengumuman + feedback "Terkirim ke N"; Pengaturan: nama aplikasi + sambutan + switch pemeliharaan + catatan; Sistem: bar penyimpanan DB/WAL/media vs kuota + uptime + backup JSON + VACUUM before→after + info aplikasi), auto-refresh 30 dtk.
+  * src/components/chat/day-separator.tsx (BARU): dayKey/dayLabel (Hari ini/Kemarin/nama hari ≤6 hari/"31 Agustus"+tahun lintas) + DaySeparator chip tengah.
+  * src/components/chat/voice-player.tsx (BARU): WhatsApp-style — tombol putar/jeda, 26 bar waveform deterministik (seed=id pesan) progres + seek klik + keyboard, ikon mic, durasi berjalan, kecepatan 1x→1,5x→2x (label "1,5x"), satu-audio-aktif global, preload none.
+  * ChatBubble: voice + file audio kini pakai VoicePlayer baru (hapus player lama).
+  * AdminPanel: toolbar profil kini [⋮ Menu aplikasi emerald (dot amber saat pemeliharaan)][Keluar]; menu 11 item (Dashboard/Siaran/Pengumuman/Pemeliharaan toggle/Info aplikasi/Backup JSON/VACUUM + grup "Sesi & tampilan": QR/Mode hantu/Kunci layar/Tema); kunci layar overlay (password admin, persist sessionStorage, pulih pasca-reload); chip notifikasi aksi menu; banner pemeliharaan live; day separator di pesan.
+  * Messenger: day separator; kartu login "Masuk {appName}" + sambutan + notice pemeliharaan; banner pemeliharaan di chat pane; app:settings:update listener.
+  * chat-types.ts: +AppSettings/AppSettingsUpdatePayload/DashboardStats(±Ack)/AppSettingsAck/BroadcastAck/BackupAck/VacuumAck/GhostAck; PublicSettingsAck += app?.
+- Verifikasi E2E (gateway :81, agent-browser): login admin → menu 11 item ✓; dashboard Ringkasan data nyata (4 user/45 pesan/9,4 MB) ✓; Pengaturan simpan nama+sambutan → kartu login user tampil "Masuk ChatKita"+sambutan ✓; Siaran → "Terkirim ke 4 percakapan" + pill sistem di semua chat ✓; VACUUM "hemat 125 KB" ✓; day separator "Hari ini" dua sisi ✓; voice player admin (bubble hijau, 1,5x, posisi jalan 1,8s) + user (bubble putih, 0:01 berjalan) ✓; mode hantu ON → admin buka chat → read cursor DB TIDAK maju (188 vs 189) + badge "Belum dibaca (1)" konsisten ✓; kunci layar overlay + buka kunci ✓; dark mode penuh ✓; mobile 390px bersih ✓; lint 0/0; chat-service v10 restart mulus (PID via bun --hot, port 3003).
+- Insiden: (1) `bun -e` insert SQLite gagal senyap + "ambiguous column name" → seed via file .ts `bun run`; (2) lint react-hooks/set-state-in-effect → fetch dashboard di-defer via setTimeout(0) + interval digabung; (3) empty-interface lint → type alias.
+- Bersih-bersih: hapus 4 pesan broadcast + 1 seed voice + 1 pesan ghost-test, file db/media/test-voice-7s.wav, welcomeMessage direset, maintenanceMode '0', checkpoint+VACUUM (total kembali 45 pesan).
+
+Stage Summary:
+- Fitur sesi-4/5 yang hilang akibat revert v8 DIPULIHKAN dan diperluas: Dashboard Aplikasi 6-tab (jauh lebih kaya dari versi lama: KPI/grafik harian/per-jam/top-user/penyimpanan/backup/VACUUM/siaran/pengaturan live), Menu aplikasi ⋮ 11 item di toolbar profil, day separator dua panel, mode hantu (server-side, tanpa ✓✓), kunci layar admin, mode pemeliharaan + siaran/pengumuman global + identitas aplikasi (nama/sambutan) yang live di kartu login.
+- Task 18 (voice player WhatsApp-style: waveform + kecepatan 1x/1,5x/2x + seek) SELESAI dan berlaku dua sisi (voice note + lampiran audio).
+- chat-service kini v10 (admin:dashboard/settings/broadcast/backup/vacuum/ghost + app:settings:update broadcast). Lint 0/0, E2E hijau, DB bersih (45 pesan).

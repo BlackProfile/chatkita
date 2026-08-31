@@ -59,7 +59,7 @@
 import { createServer } from 'http'
 import { join, resolve } from 'path'
 import { createHash } from 'crypto'
-import { readFileSync, unlinkSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { Database } from 'bun:sqlite'
 import { Server, type Socket as IoSocket } from 'socket.io'
 import ZAI from 'z-ai-web-dev-sdk'
@@ -70,6 +70,9 @@ import webpush from 'web-push'
 /* ------------------------------------------------------------------ */
 
 const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
+/** v10 — service version surfaced by the admin dashboard (Info aplikasi). */
+const SERVICE_VERSION = 'v10'
+const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
 const MAX_NAME_LENGTH = 40
@@ -111,7 +114,8 @@ const EDIT_WINDOW_MS = 15 * 60_000
 /* Storage (bun:sqlite, WAL)                                           */
 /* ------------------------------------------------------------------ */
 
-const db = new Database(join(import.meta.dir, 'chat.db'))
+const DB_PATH = join(import.meta.dir, 'chat.db')
+const db = new Database(DB_PATH)
 db.run('PRAGMA journal_mode = WAL')
 
 db.run(`
@@ -330,6 +334,202 @@ const setSetting = (key: string, value: string) => {
     'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
     [key, value]
   )
+}
+
+/* ------------- v10 — application settings (admin dashboard) ------------- */
+
+/** App-wide settings editable from the admin dashboard (persisted). */
+interface AppSettingsApi {
+  appName: string
+  welcomeMessage: string
+  maintenanceMode: boolean
+  maintenanceNote: string
+}
+
+const APP_SETTING_LIMITS = {
+  appName: 40,
+  welcomeMessage: 200,
+  maintenanceNote: 200,
+} as const
+
+const getAppSettings = (): AppSettingsApi => ({
+  appName: getSetting('appName') ?? 'ChatKita',
+  welcomeMessage: getSetting('welcomeMessage') ?? '',
+  maintenanceMode: getSetting('maintenanceMode') === '1',
+  maintenanceNote:
+    getSetting('maintenanceNote') ??
+    'Sedang dalam pemeliharaan — beberapa fitur mungkin terbatas.',
+})
+
+/** Fan out the freshest app settings to EVERY connected client. */
+const broadcastAppSettings = () => {
+  io.emit('app:settings:update', getAppSettings())
+}
+
+/** Directory size helper (bytes) for the dashboard storage panel. */
+const dirStats = (dir: string): { bytes: number; files: number } => {
+  let bytes = 0
+  let files = 0
+  try {
+    for (const entry of readdirSync(dir)) {
+      try {
+        const st = statSync(join(dir, entry))
+        if (st.isFile()) {
+          bytes += st.size
+          files += 1
+        }
+      } catch {
+        /* file vanished mid-scan */
+      }
+    }
+  } catch {
+    /* directory missing yet */
+  }
+  return { bytes, files }
+}
+
+/**
+ * v10 — aggregated dashboard stats for `admin:dashboard`.
+ * All aggregation happens in SQL; days are UTC epoch-day buckets.
+ */
+const dashboardStats = () => {
+  const nowMs = now()
+  const DAY_MS = 86_400_000
+
+  const scalar = (sql: string, ...params: (string | number)[]): number =>
+    Number((db.query(sql).get(...params) as { v: number | null } | undefined)?.v ?? 0)
+
+  const users = scalar("SELECT COUNT(*) AS v FROM users WHERE role = 'user'")
+  const conversations = scalar('SELECT COUNT(*) AS v FROM conversations')
+  const messages = scalar('SELECT COUNT(*) AS v FROM messages')
+  const deletedMessages = scalar('SELECT COUNT(*) AS v FROM messages WHERE deleted_at IS NOT NULL')
+  const last24h = scalar('SELECT COUNT(*) AS v FROM messages WHERE created_at >= ?', nowMs - DAY_MS)
+  const last7d = scalar('SELECT COUNT(*) AS v FROM messages WHERE created_at >= ?', nowMs - 7 * DAY_MS)
+
+  const byTypeRows = db
+    .query('SELECT type, COUNT(*) AS c FROM messages GROUP BY type')
+    .all() as { type: string | null; c: number }[]
+  const byType: Record<string, number> = { text: 0, image: 0, voice: 0, file: 0, system: 0 }
+  for (const r of byTypeRows) {
+    const key = r.type && r.type in byType ? r.type : 'text'
+    byType[key] += r.c
+  }
+
+  // Daily series — last 14 UTC days, zero-filled.
+  const dailyRows = db
+    .query(
+      `SELECT CAST(created_at / 86400000 AS INTEGER) AS day, COUNT(*) AS c
+       FROM messages WHERE created_at >= ? GROUP BY day`
+    )
+    .all(nowMs - 13 * DAY_MS) as { day: number; c: number }[]
+  const dailyMap = new Map(dailyRows.map((r) => [r.day, r.c]))
+  const daily: { date: string; count: number }[] = []
+  for (let i = 13; i >= 0; i -= 1) {
+    const epochDay = Math.floor(nowMs / DAY_MS) - i
+    daily.push({
+      date: new Date(epochDay * DAY_MS).toISOString().slice(0, 10),
+      count: dailyMap.get(epochDay) ?? 0,
+    })
+  }
+
+  // Hour-of-day distribution over the last 7 days (0-23, UTC).
+  const hourlyRows = db
+    .query(
+      `SELECT CAST(strftime('%H', created_at / 1000, 'unixepoch') AS INTEGER) AS h, COUNT(*) AS c
+       FROM messages WHERE created_at >= ? GROUP BY h`
+    )
+    .all(nowMs - 7 * DAY_MS) as { h: number; c: number }[]
+  const hourly: number[] = Array.from({ length: 24 }, () => 0)
+  for (const r of hourlyRows) {
+    if (r.h >= 0 && r.h < 24) hourly[r.h] = r.c
+  }
+
+  const topUsers = (
+    db
+      .query(
+        `SELECT u.id, u.name, u.last_seen_at,
+           (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id) AS c
+         FROM users u WHERE u.role = 'user'
+         ORDER BY c DESC, u.name ASC LIMIT 10`
+      )
+      .all() as { id: string; name: string; last_seen_at: number; c: number }[]
+  ).map((r) => ({
+    id: r.id,
+    name: r.name,
+    messages: r.c,
+    lastSeenAt: new Date(r.last_seen_at).toISOString(),
+    online: isOnline(r.id),
+  }))
+
+  const allUsers = (
+    db
+      .query(
+        `SELECT u.id, u.name, u.created_at, u.last_seen_at,
+           (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id) AS c
+         FROM users u WHERE u.role = 'user'
+         ORDER BY u.last_seen_at DESC LIMIT 100`
+      )
+      .all() as { id: string; name: string; created_at: number; last_seen_at: number; c: number }[]
+  ).map((r) => ({
+    id: r.id,
+    name: r.name,
+    joinedAt: new Date(r.created_at).toISOString(),
+    lastSeenAt: new Date(r.last_seen_at).toISOString(),
+    messages: r.c,
+    online: isOnline(r.id),
+  }))
+
+  const mediaRow = db
+    .query(
+      `SELECT COUNT(*) AS c, COALESCE(SUM(file_size), 0) AS b FROM messages
+       WHERE file_size IS NOT NULL AND deleted_at IS NULL AND media_expired_at IS NULL`
+    )
+    .get() as { c: number; b: number }
+
+  let dbBytes = 0
+  let walBytes = 0
+  try {
+    dbBytes = statSync(DB_PATH).size
+    walBytes = statSync(`${DB_PATH}-wal`).size
+  } catch {
+    /* WAL may not exist */
+  }
+  const media = dirStats(MEDIA_DIR)
+
+  let onlineUsers = 0
+  for (const [id, sockets] of onlineSockets) {
+    if (id !== ADMIN_ID && sockets.size > 0) onlineUsers += 1
+  }
+
+  return {
+    generatedAt: new Date(nowMs).toISOString(),
+    version: SERVICE_VERSION,
+    uptimeMs: nowMs - BOOT_AT,
+    totals: {
+      users,
+      conversations,
+      messages,
+      deletedMessages,
+      last24h,
+      last7d,
+      byType,
+      onlineUsers,
+      mediaCount: Number(mediaRow.c),
+      mediaBytes: Number(mediaRow.b),
+    },
+    daily,
+    hourly,
+    topUsers,
+    users: allUsers,
+    storage: {
+      dbBytes,
+      walBytes,
+      mediaBytes: media.bytes,
+      mediaFiles: media.files,
+      quotaBytes: QUOTA_BYTES,
+      retentionDays: Math.round(RETENTION_MS / DAY_MS),
+    },
+  }
 }
 
 /* --------------------- Web Push (v5, offline delivery) --------------------- */
@@ -1167,8 +1367,9 @@ io.on('connection', (socket) => {
 
   socket.on('public:settings', handler(socket, (_data, ack) => {
     // Pre-login Web Push config: just the VAPID public key ("" when push
-    // is unavailable).
-    ack({ ok: true, pushPublicKey: VAPID_PUBLIC })
+    // is unavailable). v10 — also carries the public app settings so the
+    // login card can show the app name + maintenance notice.
+    ack({ ok: true, pushPublicKey: VAPID_PUBLIC, app: getAppSettings() })
   }))
 
   /* ---------------------------- auth ---------------------------- */
@@ -1322,8 +1523,13 @@ io.on('connection', (socket) => {
         return
       }
       const lastReadBefore = getReadUpTo(conversation.id, me)
-      const readUpTo = markRead(conversation.id, me)
-      broadcastRead(conversation, me, readUpTo)
+      // v10 — admin ghost mode: reading leaves read receipts untouched
+      // (users keep seeing ✓ instead of ✓✓ for their sent messages).
+      const ghost = me === ADMIN_ID && socket.data?.ghost === true
+      if (!ghost) {
+        const readUpTo = markRead(conversation.id, me)
+        broadcastRead(conversation, me, readUpTo)
+      }
       const partner = getPartnerUser(conversation, me)
       const page = getMessagesPage(conversation.id)
       ack({
@@ -1579,6 +1785,8 @@ io.on('connection', (socket) => {
       const conversation =
         typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
       if (!conversation || !isParticipant(conversation, me)) return
+      // v10 — ghost mode: no read receipts are sent while active.
+      if (me === ADMIN_ID && socket.data?.ghost === true) return
       const readUpTo = markRead(conversation.id, me)
       broadcastRead(conversation, me, readUpTo)
       pushConversationsTo(me)
@@ -1846,6 +2054,121 @@ io.on('connection', (socket) => {
     })
   )
 
+  /* ------------------------------------------------------------------ */
+  /* v10 — admin dashboard: stats / settings / broadcast / backup         */
+  /* ------------------------------------------------------------------ */
+
+  /** Every event below is admin-only (socket must have passed admin:auth). */
+  const adminGuard = (ack: AckFn): boolean => {
+    if (authedUserId(socket) !== ADMIN_ID) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return false
+    }
+    return true
+  }
+
+  socket.on('admin:dashboard', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    ack({ ok: true, stats: dashboardStats() })
+  }))
+
+  socket.on('admin:settings:get', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    ack({ ok: true, settings: getAppSettings() })
+  }))
+
+  socket.on('admin:settings:set', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const next: AppSettingsApi = getAppSettings()
+    if (typeof data?.appName === 'string') {
+      const v = data.appName.trim()
+      if (v.length < 1 || v.length > APP_SETTING_LIMITS.appName) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      next.appName = v
+    }
+    if (typeof data?.welcomeMessage === 'string') {
+      next.welcomeMessage = data.welcomeMessage.trim().slice(0, APP_SETTING_LIMITS.welcomeMessage)
+    }
+    if (typeof data?.maintenanceMode === 'boolean') {
+      next.maintenanceMode = data.maintenanceMode
+    }
+    if (typeof data?.maintenanceNote === 'string') {
+      next.maintenanceNote = data.maintenanceNote.trim().slice(0, APP_SETTING_LIMITS.maintenanceNote)
+    }
+    setSetting('appName', next.appName)
+    setSetting('welcomeMessage', next.welcomeMessage)
+    setSetting('maintenanceMode', next.maintenanceMode ? '1' : '0')
+    setSetting('maintenanceNote', next.maintenanceNote)
+    broadcastAppSettings()
+    console.log(`App settings updated (maintenance: ${next.maintenanceMode})`)
+    ack({ ok: true, settings: next })
+  }))
+
+  /**
+   * Siaran / Pengumuman — one system message fanned out to EVERY
+   * conversation (admin appears as the system announcer).
+   */
+  socket.on('admin:broadcast', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const text = typeof data?.text === 'string' ? data.text.trim() : ''
+    const kind = data?.kind === 'pengumuman' ? 'pengumuman' : 'siaran'
+    if (text.length < 1 || text.length > 500) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const content =
+      kind === 'pengumuman' ? `📢 Pengumuman: ${text}` : `📣 Siaran: ${text}`
+    const rows = db.query('SELECT * FROM conversations').all() as ConversationRow[]
+    for (const conversation of rows) {
+      insertAndFanOut(conversation, ADMIN_ID, content, 'system')
+    }
+    console.log(`${kind} broadcast to ${rows.length} conversation(s)`)
+    ack({ ok: true, count: rows.length, kind })
+  }))
+
+  /** Full JSON backup (users, conversations, messages, app settings). */
+  socket.on('admin:backup', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    const settingsRows = (
+      db.query('SELECT key, value FROM settings').all() as { key: string; value: string }[]
+    ).filter((r) => !r.key.startsWith('vapid')) // never export push secrets
+    ack({
+      ok: true,
+      exportedAt: new Date().toISOString(),
+      version: SERVICE_VERSION,
+      users: db.query('SELECT id, name, role, created_at, last_seen_at FROM users').all(),
+      conversations: db.query('SELECT * FROM conversations').all(),
+      messages: db.query('SELECT * FROM messages ORDER BY id ASC').all(),
+      settings: settingsRows,
+    })
+  }))
+
+  /** Manual WAL checkpoint + VACUUM with before/after disk sizes. */
+  socket.on('admin:vacuum', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    const sizeOf = (p: string): number => {
+      try {
+        return statSync(p).size
+      } catch {
+        return 0
+      }
+    }
+    const before = { dbBytes: sizeOf(DB_PATH), walBytes: sizeOf(`${DB_PATH}-wal`) }
+    dbMaintenance()
+    const after = { dbBytes: sizeOf(DB_PATH), walBytes: sizeOf(`${DB_PATH}-wal`) }
+    ack({ ok: true, before, after })
+  }))
+
+  /** Admin ghost mode toggle (no read receipts while on). */
+  socket.on('admin:ghost', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    socket.data.ghost = data?.on === true
+    console.log(`Ghost mode ${socket.data.ghost ? 'ON' : 'OFF'} (socket ${socket.id})`)
+    ack({ ok: true, ghost: socket.data.ghost })
+  }))
+
   /* ---------------------------- account PIN ---------------------------- */
 
   socket.on(
@@ -1932,7 +2255,7 @@ setInterval(maintenanceCycle, 6 * 60 * 60_000)
 
 httpServer.listen(PORT, () => {
   console.log(
-    `ChatKita chat-service v8 listening on port ${PORT} (path: '/', push: ${VAPID_PUBLIC ? 'on' : 'off'}, retensi: ${RETENTION_MS / 86_400_000} hari)`
+    `ChatKita chat-service ${SERVICE_VERSION} listening on port ${PORT} (path: '/', push: ${VAPID_PUBLIC ? 'on' : 'off'}, retensi: ${RETENTION_MS / 86_400_000} hari)`
   )
 })
 

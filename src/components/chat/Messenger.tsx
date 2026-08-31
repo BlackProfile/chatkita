@@ -21,6 +21,7 @@ import {
 import type { Socket } from "socket.io-client";
 
 import { ChatBubble } from "@/components/chat/ChatBubble";
+import { DaySeparator, dayKey } from "@/components/chat/day-separator";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
 import { MediaViewer, FileKindIcon, type ViewerMedia } from "@/components/chat/media-viewer";
 import { TypingDots } from "@/components/chat/TypingDots";
@@ -62,6 +63,8 @@ import {
   MAX_NAME_LENGTH,
   draftKey,
   type AckOf,
+  type AppSettings,
+  type AppSettingsUpdatePayload,
   type ChatErrorAck,
   type ChatMessage,
   type ConversationOverview,
@@ -348,6 +351,8 @@ export function Messenger() {
   // Web Push VAPID public key (null = push unavailable).
   const [pushPublicKey, setPushPublicKey] = useState<string | null>(null);
   const [pinnedMsg, setPinnedMsg] = useState<{ id: number; snippet: string } | null>(null);
+  // v10 — pengaturan aplikasi (nama + mode pemeliharaan) dari server.
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [editing, setEditing] = useState<ChatMessage | null>(null);
   const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
   const [installAvailable, setInstallAvailable] = useState(false);
@@ -420,7 +425,10 @@ export function Messenger() {
       // { ok, pushPublicKey }) so it is ready right after login.
       if (!meRef.current) {
         socket.emit("public:settings", {}, (res: AckOf<PublicSettingsAck>) => {
-          if (res.ok && res.pushPublicKey) setPushPublicKey(res.pushPublicKey);
+          if (res.ok) {
+            if (res.pushPublicKey) setPushPublicKey(res.pushPublicKey);
+            if (res.app) setAppSettings(res.app);
+          }
         });
       }
       const current = meRef.current;
@@ -476,6 +484,11 @@ export function Messenger() {
 
     socket.on("disconnect", () => {
       setConnected(false);
+    });
+
+    // v10 — pengaturan aplikasi live (nama + mode pemeliharaan).
+    socket.on("app:settings:update", (s: AppSettingsUpdatePayload) => {
+      setAppSettings(s);
     });
 
     // Recovery: if the current conversation disappears server-side
@@ -1022,10 +1035,19 @@ export function Messenger() {
             >
               <MessageCircleMore className="size-6" />
             </span>
-            <CardTitle className="text-xl">Masuk Chat</CardTitle>
+            <CardTitle className="text-xl">
+              Masuk {appSettings?.appName || "Chat"}
+            </CardTitle>
             <CardDescription>
-              Cukup nama Anda untuk langsung terhubung & chat dengan Admin
+              {appSettings?.welcomeMessage ||
+                "Cukup nama Anda untuk langsung terhubung & chat dengan Admin"}
             </CardDescription>
+            {appSettings?.maintenanceMode ? (
+              <p className="mt-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+                🛠 Mode pemeliharaan aktif
+                {appSettings.maintenanceNote ? ` — ${appSettings.maintenanceNote}` : ""}
+              </p>
+            ) : null}
           </CardHeader>
           <CardContent>
             <form
@@ -1307,6 +1329,14 @@ export function Messenger() {
           </div>
         ) : null}
 
+        {/* v10 — banner mode pemeliharaan (live dari dashboard admin) */}
+        {appSettings?.maintenanceMode ? (
+          <p className="shrink-0 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-600 dark:text-amber-400">
+            🛠 Mode pemeliharaan aktif
+            {appSettings.maintenanceNote ? ` — ${appSettings.maintenanceNote}` : ""}
+          </p>
+        ) : null}
+
         {/* Pinned message banner (v5) */}
         {pinnedMsg ? (
           <button
@@ -1367,8 +1397,14 @@ export function Messenger() {
                 </p>
               )
             ) : (
-              visibleMessages.map((m) => (
-                <ChatBubble
+              visibleMessages.map((m, idx) => (
+                <div key={m.id} className="contents">
+                  {/* v10 — pemisah tanggal di pesan pertama tiap hari */}
+                  {idx === 0 ||
+                  dayKey(visibleMessages[idx - 1].createdAt) !== dayKey(m.createdAt) ? (
+                    <DaySeparator createdAt={m.createdAt} />
+                  ) : null}
+                  <ChatBubble
                   key={m.id}
                   messageId={m.id}
                   content={m.content}
@@ -1404,7 +1440,8 @@ export function Messenger() {
                       ? () => handleTranslate(m)
                       : undefined
                   }
-                />
+                  />
+                </div>
               ))
             )}
           </div>
