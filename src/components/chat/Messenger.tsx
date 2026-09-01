@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ChevronUp,
@@ -23,7 +23,13 @@ import type { Socket } from "socket.io-client";
 import { ChatBubble } from "@/components/chat/ChatBubble";
 import { DaySeparator, dayKey } from "@/components/chat/day-separator";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
-import { MediaViewer, FileKindIcon, type ViewerMedia } from "@/components/chat/media-viewer";
+import {
+  MediaViewer,
+  FileKindIcon,
+  buildMediaGallery,
+  viewerStateForMessage,
+  type ViewerState,
+} from "@/components/chat/media-viewer";
 import { TypingDots } from "@/components/chat/TypingDots";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -68,6 +74,8 @@ import {
   type ChatErrorAck,
   type ChatMessage,
   type ConversationOverview,
+  type ConversationPinnedPayload,
+  type ConversationResetPayload,
   type HistoryAck,
   type MessageAck,
   type MessageUpdatePayload,
@@ -78,6 +86,7 @@ import {
   type SetPinAck,
   type TranslateAck,
   type UserAuthAck,
+  type UserRestrictedPayload,
 } from "@/lib/chat-types";
 import {
   avatarColorClass,
@@ -346,11 +355,24 @@ export function Messenger() {
   const [showJump, setShowJump] = useState(false);
   const [newCount, setNewCount] = useState(0);
   // Viewer media full-screen (pengganti lightbox gambar saja).
-  const [viewer, setViewer] = useState<ViewerMedia | null>(null);
+  // Task 19: membawa GALERI media percakapan (foto+video, urutan pesan)
+  // + index item yang dibuka → navigasi geser/panah/chevron di viewer.
+  const [viewer, setViewer] = useState<ViewerState | null>(null);
+  const mediaGallery = useMemo(() => buildMediaGallery(messages), [messages]);
 
   // Web Push VAPID public key (null = push unavailable).
   const [pushPublicKey, setPushPublicKey] = useState<string | null>(null);
-  const [pinnedMsg, setPinnedMsg] = useState<{ id: number; snippet: string } | null>(null);
+  const [pinnedMsg, setPinnedMsg] = useState<{
+    id: number;
+    snippet: string;
+    senderName?: string;
+  } | null>(null);
+  // v11 — status pembatasan akun dari admin (user:restricted live).
+  const [restricted, setRestricted] = useState<UserRestrictedPayload | null>(null);
+  /** Tick detik untuk hitung mundur bisukan (hanya jalan saat aktif). */
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  /** Pin yang disembunyikan user (dismiss visual saja). */
+  const [pinHiddenId, setPinHiddenId] = useState<number | null>(null);
   // v10 — pengaturan aplikasi (nama + mode pemeliharaan) dari server.
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [editing, setEditing] = useState<ChatMessage | null>(null);
@@ -508,6 +530,39 @@ export function Messenger() {
       if (p.conversationId !== conversationIdRef.current) return;
       setPinnedMsg(p.pinned ? { id: p.pinned.id, snippet: p.pinned.snippet } : null);
     });
+    // v11 — snapshot pin kaya (termasuk nama pengirim) — dikirim setelah versi legacy.
+    socket.on("conversation:pinned", (p: ConversationPinnedPayload) => {
+      if (p.conversationId !== conversationIdRef.current) return;
+      setPinnedMsg(
+        p.pinnedMessage
+          ? {
+              id: p.pinnedMessage.messageId,
+              snippet: p.pinnedMessage.snippet,
+              senderName: p.pinnedMessage.senderName,
+            }
+          : null
+      );
+    });
+    // v11 — reset chat oleh admin: kosongkan pesan + sisipkan catatan sistem.
+    socket.on("conversation:reset", (p: ConversationResetPayload) => {
+      if (p.conversationId !== conversationIdRef.current) return;
+      const note: ChatMessage = {
+        id: -Date.now(),
+        conversationId: p.conversationId,
+        senderId: "system",
+        content: `🧹 Riwayat chat dihapus oleh admin (${p.deleted} pesan)`,
+        createdAt: p.deletedAt,
+        type: "system",
+      };
+      setMessages([note]);
+      setHasMore(false);
+      setPinnedMsg(null);
+      setPinHiddenId(null);
+    });
+    // v11 — status pembatasan akun (live saat admin mengubah, + saat login bila aktif).
+    socket.on("user:restricted", (r: UserRestrictedPayload) => {
+      setRestricted(r);
+    });
 
     // Append messages ONLY here; skip if the last stored message already
     // has the same id (history-replacement vs live-event race).
@@ -634,6 +689,15 @@ export function Messenger() {
     });
   }, [conversationId, scrollToBottom]);
 
+  /* v11 — hitung mundur bisukan (interval 1 dtk hanya saat bisukan aktif). */
+  const mutedUntilMs = restricted?.mutedUntil ? Date.parse(restricted.mutedUntil) : 0;
+  const mutedActive = mutedUntilMs > nowTick;
+  useEffect(() => {
+    if (!mutedActive) return;
+    const iv = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, [mutedActive]);
+
   /* Clear the tab badge when the user reads while visible. */
   useEffect(() => {
     if (!document.hidden) setTitleUnread(0);
@@ -722,6 +786,8 @@ export function Messenger() {
     setReplyTo(null);
     setEditing(null);
     setPinnedMsg(null);
+    setPinHiddenId(null);
+    setRestricted(null);
     setPushPublicKey(null);
     if (pendingImage) URL.revokeObjectURL(pendingImage.previewUrl);
     setPendingImage(null);
@@ -772,7 +838,15 @@ export function Messenger() {
               ? "Terlalu sering mengirim — tunggu sebentar."
               : res.error === "QUOTA_EXCEEDED"
                 ? "Kuota penyimpanan akun penuh (250 MB)."
-                : null
+                : res.error === "FROZEN"
+                  ? "Akun dibekukan admin."
+                  : res.error === "MUTED"
+                    ? `Dibisukan admin (tersisa ${res.remainingSeconds ?? 0}s).`
+                    : res.error === "SLOW_MODE"
+                      ? `Mode lambat: tunggu ${res.remainingSeconds ?? 0}s.`
+                      : res.error === "MEDIA_BLOCKED"
+                        ? "Media diblokir admin."
+                        : null
           );
         }
       }
@@ -1154,6 +1228,22 @@ export function Messenger() {
   /* ---------------------------------------------------------------- */
   /* Render: full-screen 1-on-1 chat with Admin                        */
   /* ---------------------------------------------------------------- */
+  const fmtHM = (d: Date) =>
+    `${String(d.getHours()).padStart(2, "0")}.${String(d.getMinutes()).padStart(2, "0")}`;
+
+  const sendBlocked = !!restricted?.frozen || mutedActive;
+  const mediaBlocked = !!restricted?.mediaBlocked;
+  const mutedRemaining = mutedActive
+    ? Math.max(0, Math.ceil((mutedUntilMs - nowTick) / 1000))
+    : 0;
+  const composerPlaceholder = restricted?.frozen
+    ? "Akun dibekukan admin"
+    : mutedActive
+      ? "Akun dibisukan admin"
+      : editing
+        ? "Simpan hasil edit…"
+        : "Tulis pesan…";
+
   const partnerStatus = partnerTyping
     ? "sedang mengetik…"
     : partner?.online
@@ -1337,18 +1427,49 @@ export function Messenger() {
           </p>
         ) : null}
 
-        {/* Pinned message banner (v5) */}
-        {pinnedMsg ? (
-          <button
-            type="button"
-            className="flex shrink-0 items-center gap-2 border-b bg-amber-500/5 px-3 py-1.5 text-left text-xs"
-            onClick={() => scrollToMessage(pinnedMsg.id)}
-          >
+        {/* v11 — banner pembatasan akun (persisten selama aktif) */}
+        {restricted && (restricted.frozen || mutedActive || restricted.slowMode > 0 || restricted.mediaBlocked) ? (
+          <div className="shrink-0 space-y-0.5 border-b bg-muted/30 px-3 py-1.5 text-xs" role="alert">
+            {restricted.frozen ? (
+              <p className="font-medium text-rose-600 dark:text-rose-400">🚫 Akun dibekukan admin</p>
+            ) : null}
+            {mutedActive && restricted.mutedUntil ? (
+              <p className="font-medium text-amber-600 dark:text-amber-400">
+                🔇 Dibisukan s/{fmtHM(new Date(restricted.mutedUntil))} — {mutedRemaining}s lagi
+              </p>
+            ) : null}
+            {restricted.mediaBlocked ? (
+              <p className="text-muted-foreground">📎 Media diblokir (teks saja)</p>
+            ) : null}
+            {restricted.slowMode > 0 ? (
+              <p className="text-muted-foreground">🐢 Mode lambat: {restricted.slowMode} pesan/menit</p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* Pinned message banner (v5 + nama pengirim v11, dismiss visual untuk user) */}
+        {pinnedMsg && pinnedMsg.id !== pinHiddenId ? (
+          <div className="flex shrink-0 items-center gap-2 border-b bg-amber-500/5 px-3 py-1.5 text-xs">
             <Pin className="size-3.5 shrink-0 text-amber-600" aria-hidden="true" />
-            <span className="min-w-0 flex-1 truncate text-muted-foreground">
-              {pinnedMsg.snippet}
-            </span>
-          </button>
+            <button
+              type="button"
+              className="min-w-0 flex-1 truncate text-left"
+              onClick={() => scrollToMessage(pinnedMsg.id)}
+            >
+              {pinnedMsg.senderName ? (
+                <span className="font-medium text-amber-600">{pinnedMsg.senderName}: </span>
+              ) : null}
+              <span className="text-muted-foreground">{pinnedMsg.snippet}</span>
+            </button>
+            <button
+              type="button"
+              aria-label="Sembunyikan pin"
+              className="shrink-0 text-muted-foreground hover:text-foreground"
+              onClick={() => setPinHiddenId(pinnedMsg.id)}
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
         ) : null}
 
         {/* Messages */}
@@ -1432,7 +1553,7 @@ export function Messenger() {
                   canEdit={canEditMessage(m, me.userId)}
                   onReply={() => setReplyTo(m)}
                   onDelete={() => handleDelete(m)}
-                  onMediaOpen={setViewer}
+                  onMediaOpen={() => setViewer(viewerStateForMessage(mediaGallery, m))}
                   onReact={(emoji) => handleReact(m, emoji)}
                   onEdit={() => handleEditStart(m)}
                   onTranslate={
@@ -1622,7 +1743,14 @@ export function Messenger() {
                 size="icon"
                 className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
                 aria-label="Lampirkan foto atau file"
-                title="Lampirkan foto atau file"
+                title={
+                  mediaBlocked
+                    ? "Media diblokir admin"
+                    : sendBlocked
+                      ? "Pengiriman dibatasi admin"
+                      : "Lampirkan foto atau file"
+                }
+                disabled={!connected || mediaBlocked || sendBlocked}
                 onClick={() => fileInputRef.current?.click()}
               >
                 <Paperclip className="size-5" aria-hidden="true" />
@@ -1630,10 +1758,10 @@ export function Messenger() {
               <Input
                 value={input}
                 maxLength={MAX_MESSAGE_LENGTH}
-                placeholder={editing ? "Simpan hasil edit…" : "Tulis pesan…"}
+                placeholder={composerPlaceholder}
                 aria-label={editing ? "Edit pesan" : "Tulis pesan"}
                 autoComplete="off"
-                disabled={!connected}
+                disabled={!connected || sendBlocked}
                 className="h-11 flex-1"
                 onChange={(e) => handleInputChange(e.target.value)}
                 onKeyDown={(e) => {
@@ -1652,7 +1780,7 @@ export function Messenger() {
                   size="icon"
                   className="size-11 shrink-0 bg-emerald-600 text-white hover:bg-emerald-600/90"
                   aria-label="Kirim"
-                  disabled={!connected || uploading || (!input.trim() && !pendingImage)}
+                  disabled={!connected || uploading || sendBlocked || (!input.trim() && !pendingImage)}
                   onClick={() => {
                     if (pendingImage) void sendImage();
                     else handleSend();
@@ -1666,7 +1794,7 @@ export function Messenger() {
                   size="icon"
                   className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
                   aria-label="Rekam pesan suara"
-                  disabled={!connected}
+                  disabled={!connected || mediaBlocked || sendBlocked}
                   onClick={() => void recorder.start()}
                 >
                   <Mic className="size-5" aria-hidden="true" />
@@ -1776,8 +1904,8 @@ export function Messenger() {
         </Dialog>
       ) : null}
 
-      {/* Viewer media full-screen (foto/video/audio/PDF/dokumen) */}
-      <MediaViewer media={viewer} onClose={() => setViewer(null)} />
+      {/* Viewer media full-screen + galeri geser (Task 19) */}
+      <MediaViewer state={viewer} onClose={() => setViewer(null)} />
     </div>
   );
 }

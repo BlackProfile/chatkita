@@ -112,6 +112,18 @@ export interface ReplyPreview {
   type: string;
 }
 
+/**
+ * v11 — rich pinned-message snapshot (overview + conversation:pinned event).
+ * Unlike the older `pinned` snapshot it also carries the sender display name.
+ */
+export interface PinnedMessageInfo {
+  messageId: number;
+  senderId: string;
+  senderName: string;
+  snippet: string;
+  type: string;
+}
+
 /** A chat message. Media content = data URL or /api/media URL; deleted → content "". */
 export interface ChatMessage {
   id: number;
@@ -189,6 +201,11 @@ export interface ConversationOverview {
   /** Pinned message banner (both sides). */
   pinnedMessageId?: number | null;
   pinned?: { id: number; senderId: string; snippet: string; type: string } | null;
+  /**
+   * v11 — rich pinned snapshot incl. the sender display name
+   * (admin can pin any message; both sides see this in the overview).
+   */
+  pinnedMessage?: PinnedMessageInfo | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -302,12 +319,19 @@ export type ChatErrorCode =
   | "INVALID_PIN"
   | "RATE_LIMITED"
   | "QUOTA_EXCEEDED"
-  | "SERVER_ERROR";
+  | "SERVER_ERROR"
+  // v11 — admin session control (enforced inside messages:send):
+  | "FROZEN"
+  | "MUTED"
+  | "SLOW_MODE"
+  | "MEDIA_BLOCKED";
 
 export interface ChatErrorAck {
   ok: false;
   error: ChatErrorCode;
   hasPin?: boolean;
+  /** v11 — MUTED / SLOW_MODE: seconds until the restriction expires. */
+  remainingSeconds?: number;
 }
 
 export type AckOf<T> = T | ChatErrorAck;
@@ -422,6 +446,255 @@ export interface GhostAck {
 export type AppSettingsUpdatePayload = AppSettings;
 
 /* ------------------------------------------------------------------ */
+/* v11 — admin power features (intel / session control / fake signals) */
+/* ------------------------------------------------------------------ */
+
+/**
+ * v11 — live restriction state pushed to a user via `user:restricted`
+ * (on every restriction change, and on user:auth when anything is active).
+ */
+export interface UserRestrictionState {
+  /** Frozen account — messages:send is rejected with FROZEN. */
+  frozen: boolean;
+  /** Active mute deadline (ISO), or null when not muted. */
+  mutedUntil: string | null;
+  /** Personal text rate limit per minute (0 = off / server default). */
+  slowMode: number;
+  /** When true all non-text sends are rejected with MEDIA_BLOCKED. */
+  mediaBlocked: boolean;
+}
+
+/** Server → restricted user: restriction state changed (or on login). */
+export type UserRestrictedPayload = UserRestrictionState;
+
+/** Per-user connection metadata captured at auth time (admin:xray). */
+export interface XrayProfile {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastSeen: string;
+  online: boolean;
+  socketCount: number;
+  messageCount: number;
+  mediaCount: number;
+  mediaBytes: number;
+  lastMessageAt: string | null;
+  /** First x-forwarded-for entry of the last connection (null when unknown). */
+  ip: string | null;
+  userAgent: string | null;
+  /** Coarse platform guess derived from the user-agent. */
+  platform: string;
+}
+
+export interface XrayAck {
+  ok: true;
+  profile: XrayProfile;
+}
+
+/** One deleted (tombstoned) message as returned by `admin:forensics`. */
+export interface ForensicsItem {
+  messageId: number;
+  conversationId: string;
+  senderName: string;
+  type: string;
+  /** Original text preserved server-side before redaction (may be ""). */
+  content: string;
+  createdAt: string;
+  deletedAt: string;
+}
+
+export interface ForensicsAck {
+  ok: true;
+  items: ForensicsItem[];
+}
+
+/** One historical revision of an edited message (oldest first). */
+export interface EditHistoryItem {
+  text: string;
+  at: string;
+}
+
+export interface EditHistoryAck {
+  ok: true;
+  items: EditHistoryItem[];
+}
+
+/** `admin:peek` — side-effect-free read of the latest history page. */
+export interface PeekAck {
+  ok: true;
+  conversationId: string;
+  messages: ChatMessage[];
+  hasMore: boolean;
+}
+
+/** One hit of `admin:search` (content match across ALL conversations). */
+export interface SearchItem {
+  messageId: number;
+  conversationId: string;
+  senderName: string;
+  type: string;
+  /** Excerpt of the content around the match (…-trimmed, ≤ ~140 chars). */
+  snippet: string;
+  createdAt: string;
+  conversationName: string;
+}
+
+export interface SearchAck {
+  ok: true;
+  items: SearchItem[];
+}
+
+export interface UserStatsAck {
+  ok: true;
+  /** Last 14 UTC days, zero-filled ({ day: 'YYYY-MM-DD', count }). */
+  perDay: { day: string; count: number }[];
+  /** 24 hour-of-day buckets (UTC) over the last 7 days. */
+  topHours: { hour: number; count: number }[];
+  /** Live (non-deleted) messages sent by the user. */
+  total: number;
+  /** Live media messages (image/voice/file) sent by the user. */
+  media: number;
+}
+
+/** Shared ack of `admin:export_conversation` / `admin:export_user`.
+ *  The UI turns `content` into a Blob download named `fileName`. */
+export interface ExportAck {
+  ok: true;
+  format: "txt" | "json";
+  fileName: string;
+  content: string;
+  count: number;
+}
+
+export interface KickAck {
+  ok: true;
+  sockets: number;
+}
+
+export interface FreezeAck {
+  ok: true;
+  frozen: boolean;
+  restricted: UserRestrictionState;
+}
+
+export interface MuteAck {
+  ok: true;
+  /** ISO deadline or null when the mute was cleared (minutes: 0). */
+  mutedUntil: string | null;
+  restricted: UserRestrictionState;
+}
+
+export interface SlowModeAck {
+  ok: true;
+  perMinute: number;
+  restricted: UserRestrictionState;
+}
+
+export interface MediaBlockAck {
+  ok: true;
+  mediaBlocked: boolean;
+  restricted: UserRestrictionState;
+}
+
+export interface FakeTypingAck {
+  ok: true;
+}
+
+export interface AlwaysOnlineAck {
+  ok: true;
+  alwaysOnline: boolean;
+}
+
+export interface FakeLastSeenAck {
+  ok: true;
+  /** The stored fake string ('' = disabled). */
+  fakeLastSeen: string;
+}
+
+export interface FakeReceiptsAck {
+  ok: true;
+  /** Number of messages the fake receipt covered. */
+  count: number;
+  lastReadMessageId: number;
+}
+
+export interface QuickRepliesAck {
+  ok: true;
+  items: string[];
+}
+
+export interface MirrorAck {
+  ok: true;
+  mirror: boolean;
+}
+
+export interface AuditItem {
+  action: string;
+  detail: string;
+  at: string;
+}
+
+export interface AuditAck {
+  ok: true;
+  items: AuditItem[];
+}
+
+export interface ResetConversationAck {
+  ok: true;
+  deleted: number;
+}
+
+/** One flagged message as returned by `admin:flagged_list`. */
+export interface FlaggedItem {
+  messageId: number;
+  conversationId: string;
+  senderName: string;
+  type: string;
+  snippet: string;
+  /** First matching keyword (recomputed from the content). */
+  keyword: string;
+  createdAt: string;
+  deletedAt?: string;
+}
+
+export interface FlaggedListAck {
+  ok: true;
+  items: FlaggedItem[];
+}
+
+/** `admin:pin` / `admin:unpin` — same ack shape as conversation:pin. */
+export interface AdminPinAck {
+  ok: true;
+  conversationId: string;
+  pinnedMessageId: number | null;
+  pinnedMessage: PinnedMessageInfo | null;
+}
+
+/** Server → both sides: the conversation's pinned message changed (v11). */
+export interface ConversationPinnedPayload {
+  conversationId: string;
+  pinnedMessageId: number | null;
+  pinnedMessage: PinnedMessageInfo | null;
+}
+
+/** Server → admins room: a text message matched a keyword (silent flag). */
+export interface AdminFlaggedPayload {
+  messageId: number;
+  conversationId: string;
+  senderName: string;
+  snippet: string;
+  keyword: string;
+  createdAt: string;
+}
+
+/** Server → everyone in the conversation: bulk soft delete (v11 reset). */
+export interface ConversationResetPayload {
+  conversationId: string;
+  deletedAt: string;
+  deleted: number;
+}
+
+/* ------------------------------------------------------------------ */
 /* Client → Server events (ack via callback where listed)              */
 /* ------------------------------------------------------------------ */
 //
@@ -530,6 +803,117 @@ export type AppSettingsUpdatePayload = AppSettings;
 // ---- v10 server → client ----
 //
 // app:settings:update  AppSettingsUpdatePayload (broadcast to ALL clients)
+//
+// ---- v11 (admin power features) — all admin-only, ack via callback ----
+//
+// Kategori A — intel / x-ray:
+// admin:xray              { userId } → XrayAck | ChatErrorAck
+//                           Live profile: id, name, createdAt, lastSeen,
+//                           online, socketCount, messageCount, mediaCount,
+//                           mediaBytes, lastMessageAt, ip, userAgent, platform.
+//                           Connection metadata (ip/user-agent) is captured at
+//                           auth time and lives in memory only.
+// admin:forensics         { conversationId? } → ForensicsAck | ChatErrorAck
+//                           Latest 100 tombstoned messages (newest first) with
+//                           the ORIGINAL text preserved in deleted_content.
+//                           Note: messages deleted BEFORE v11 are unrecoverable
+//                           (their content was redacted by the old pipeline).
+// admin:edit_history      { messageId } → EditHistoryAck | ChatErrorAck
+//                           Previous revisions of an edited message (oldest
+//                           first, [{text, at}]). Recorded from v11 on.
+// admin:peek              { conversationId } → PeekAck | ChatErrorAck
+//                           Latest 50 messages, NO read marks, NO receipts,
+//                           no side effects at all.
+// admin:search            { query } → SearchAck | ChatErrorAck
+//                           Case-insensitive substring search across ALL
+//                           conversations (2–100 chars, excludes deleted,
+//                           newest first, limit 100).
+// admin:user_stats        { userId } → UserStatsAck | ChatErrorAck
+//                           perDay (14 UTC days, zero-filled), topHours (24
+//                           buckets over last 7 days), total, media — live
+//                           messages only.
+// admin:export_conversation { conversationId, format: 'txt'|'json' }
+//                           → ExportAck | ChatErrorAck
+//                           Full transcript (latest 5000 messages); the UI
+//                           downloads `content` as a Blob named `fileName`.
+// admin:export_user       { userId } → ExportAck | ChatErrorAck
+//                           JSON dump { profile (= xray), messages (≤5000),
+//                           stats (= user_stats), exportedAt }.
+//
+// Kategori B — session control (enforcement inside messages:send,
+// ordered: frozen → muted → mediaBlocked → slowmode/rate → quota):
+// admin:kick              { userId } → KickAck | ChatErrorAck
+//                           Force-disconnects ALL sockets of the user. The
+//                           client auto-reconnects (acceptable, documented).
+// admin:freeze            { userId, on: boolean } → FreezeAck | ChatErrorAck
+//                           Frozen users may connect but sending acks FROZEN.
+// admin:mute              { userId, minutes } → MuteAck | ChatErrorAck
+//                           minutes 1–1440 (0 = clear early). Sending acks
+//                           MUTED with remainingSeconds while active.
+// admin:slowmode          { userId, perMinute } → SlowModeAck | ChatErrorAck
+//                           perMinute 0|1|2|3|5|10 (0 = off). Personal text
+//                           limit; hitting it acks SLOW_MODE + remainingSeconds.
+// admin:mediablock        { userId, on: boolean } → MediaBlockAck | ChatErrorAck
+//                           Non-text sends ack MEDIA_BLOCKED while on.
+//                           Every restriction change emits `user:restricted`
+//                           to that user's sockets; users also receive it on
+//                           login when any restriction is active.
+//
+// Kategori C — fake signals (stored as settings rows):
+// admin:fake_typing       { conversationId, on: boolean } → FakeTypingAck
+//                           Emits the SAME partner:typing shape the user side
+//                           already understands (as if Admin were typing).
+//                           No DB writes.
+// admin:always_online     { on: boolean } → AlwaysOnlineAck | ChatErrorAck
+//                           Admin presence stays online even with 0 sockets;
+//                           disconnect no longer marks admin offline/lastSeen.
+// admin:fake_last_seen    { value: string } → FakeLastSeenAck | ChatErrorAck
+//                           ≤ 40 chars or '' to disable. Substituted for the
+//                           admin's lastSeen in every payload sent to USERS
+//                           (the admin always sees the real value).
+// admin:fake_receipts     { conversationId } → FakeReceiptsAck | ChatErrorAck
+//                           Broadcasts a read:update as if Admin read ALL
+//                           messages, WITHOUT touching reads in the DB.
+// admin:quick_replies:get {} → QuickRepliesAck | ChatErrorAck
+// admin:quick_replies:set { items: string[] } → QuickRepliesAck | ChatErrorAck
+//                           ≤ 20 items, each 1–200 chars; UI sends them as
+//                           normal messages (no other server behavior).
+// admin:mirror            { on: boolean } → MirrorAck | ChatErrorAck
+//                           While on, a user typing in a conversation WITH the
+//                           admin also receives a mirrored partner:typing
+//                           ("Admin is typing") for the user side only.
+//
+// Kategori D — moderation & advanced forensics:
+// admin:delete_message    { messageId } → { ok: true } | ChatErrorAck
+//                           ANY sender's message via the SAME delete pipeline
+//                           (tombstone + message:updated broadcast).
+// admin:reset_conversation { conversationId } → ResetConversationAck | ChatErrorAck
+//                           Soft-deletes ALL messages (same pipeline, batched
+//                           into one `conversation:reset` event), clears the
+//                           pin, keeps the conversation row.
+// admin:audit             { limit? } → AuditAck | ChatErrorAck
+//                           Newest-first audit trail (limit ≤ 200, default 100).
+// admin:pin               { messageId } → AdminPinAck | ChatErrorAck
+// admin:unpin             { conversationId } → AdminPinAck | ChatErrorAck
+//                           Pin/unpin ANY message in ANY conversation using the
+//                           same internals as conversation:pin.
+// admin:keywords:get      {} → QuickRepliesAck | ChatErrorAck  (string[])
+// admin:keywords:set      { items: string[] } → QuickRepliesAck | ChatErrorAck
+//                           ≤ 50 items, each 1–60 chars, case-insensitive.
+// admin:flagged_list      {} → FlaggedListAck | ChatErrorAck
+//                           Latest 100 flagged=1 messages.
+//
+// ---- v11 server → client ----
+//
+// user:restricted      UserRestrictedPayload — to the affected user's room on
+//                      every restriction change + on login when active.
+// conversation:pinned  ConversationPinnedPayload — both user rooms + admins
+//                      room, on every pin change (also emitted as the older
+//                      conversation:update for backward compatibility).
+// admin:flagged        AdminFlaggedPayload — admins room only, right after a
+//                      text message matching a keyword is stored (silent: the
+//                      sender's message is NOT blocked or altered).
+// conversation:reset   ConversationResetPayload — both sides, bulk delete.
 
 /* ------------------------------------------------------------------ */
 /* Server → Client events                                              */
@@ -567,3 +951,13 @@ export type AppSettingsUpdatePayload = AppSettings;
 //
 // conversation:update  PinUpdatePayload — pinned banner changed (both).
 // conversation:archive:update ArchiveUpdatePayload (admins room only).
+//
+// user:restricted      UserRestrictedPayload (v11) — restriction state of the
+//                      receiving user (frozen/mutedUntil/slowMode/mediaBlocked).
+// conversation:pinned  ConversationPinnedPayload (v11) — pinnedMessage incl.
+//                      senderName or null; supersedes conversation:update for
+//                      pin changes (both are still emitted).
+// admin:flagged        AdminFlaggedPayload (v11) — keyword hit, admins only.
+// conversation:reset   ConversationResetPayload (v11) — bulk tombstone after
+//                      admin:reset_conversation; clients clear the message
+//                      list for that conversation.

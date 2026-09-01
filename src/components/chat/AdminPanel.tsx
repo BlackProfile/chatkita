@@ -10,9 +10,11 @@ import {
   ArrowLeft,
   Bell,
   ChevronUp,
+  Clock,
   DatabaseBackup,
   EyeOff,
   FileJson,
+  Flag,
   GaugeCircle,
   Leaf,
   Loader2,
@@ -27,23 +29,47 @@ import {
   Paperclip,
   Pin,
   QrCode,
+  Radio,
+  Repeat,
+  ScrollText,
   Search,
   SendHorizonal,
+  ShieldAlert,
   ShieldCheck,
   Smile,
   Sun,
   Type,
+  Users,
   Wrench,
   X,
+  Zap,
 } from "lucide-react";
 import type { Socket } from "socket.io-client";
 
 import { ChatBubble } from "@/components/chat/ChatBubble";
 import { AdminDashboard, type DashboardTab } from "@/components/chat/admin-dashboard";
+import {
+  AuditLogDialog,
+  ConfirmDialog,
+  EditHistoryDialog,
+  FakeLastSeenDialog,
+  ForensicsDialog,
+  KeywordsDialog,
+  QuickRepliesDialog,
+  SearchMessagesDialog,
+  downloadTextFile,
+} from "@/components/chat/admin-tools";
 import { DaySeparator, dayKey } from "@/components/chat/day-separator";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
-import { MediaViewer, FileKindIcon, type ViewerMedia } from "@/components/chat/media-viewer";
+import {
+  MediaViewer,
+  FileKindIcon,
+  buildMediaGallery,
+  viewerStateForMessage,
+  type ViewerState,
+} from "@/components/chat/media-viewer";
 import { TypingDots } from "@/components/chat/TypingDots";
+import { UserManager } from "@/components/chat/user-manager";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -85,7 +111,11 @@ import {
   draftKey,
   type AckOf,
   type AdminAuthAck,
+  type AdminFlaggedPayload,
+  type AdminPinAck,
+  type AlwaysOnlineAck,
   type AppSettings,
+  type AppSettingsAck,
   type AppSettingsUpdatePayload,
   type ArchiveUpdatePayload,
   type BackupAck,
@@ -93,13 +123,21 @@ import {
   type ChatErrorAck,
   type ChatMessage,
   type ConversationOverview,
+  type ConversationPinnedPayload,
+  type ConversationResetPayload,
+  type ExportAck,
+  type FakeReceiptsAck,
+  type FakeTypingAck,
   type GhostAck,
   type HistoryAck,
   type MessageAck,
   type MessageUpdatePayload,
+  type MirrorAck,
   type OlderMessagesAck,
   type PinUpdatePayload,
   type PublicSettingsAck,
+  type QuickRepliesAck,
+  type ResetConversationAck,
   type TranslateAck,
   type VacuumAck,
 } from "@/lib/chat-types";
@@ -222,13 +260,18 @@ export function AdminPanel() {
   const [searchQuery, setSearchQuery] = useState("");
   const [showJump, setShowJump] = useState(false);
   const [newCount, setNewCount] = useState(0);
-  // Viewer media full-screen (pengganti lightbox gambar saja).
-  const [viewer, setViewer] = useState<ViewerMedia | null>(null);
+  // Viewer media full-screen — Task 19: bawa galeri media (foto+video)
+  // percakapan aktif + index item yang dibuka (geser-gesir di viewer).
+  const [viewer, setViewer] = useState<ViewerState | null>(null);
+  const mediaGallery = useMemo(
+    () => buildMediaGallery(activeId ? messagesMap[activeId] ?? [] : []),
+    [messagesMap, activeId]
+  );
 
   // v5 — font / pinned / edit / translate / archive / QR
   const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
   const [pinnedMap, setPinnedMap] = useState<
-    Record<string, { id: number; snippet: string } | null>
+    Record<string, { id: number; snippet: string; senderName?: string } | null>
   >({});
   const [editing, setEditing] = useState<ChatMessage | null>(null);
   const [translatingId, setTranslatingId] = useState<number | null>(null);
@@ -247,6 +290,24 @@ export function AdminPanel() {
   const [lockPin, setLockPin] = useState("");
   const [lockError, setLockError] = useState<string | null>(null);
   const [menuNotice, setMenuNotice] = useState<string | null>(null);
+
+  // v11 — intelijen & moderasi + sinyal palsu
+  const [umOpen, setUmOpen] = useState(false);
+  const [umTarget, setUmTarget] = useState<string | null>(null);
+  const [forensicsOpen, setForensicsOpen] = useState(false);
+  const [msgSearchOpen, setMsgSearchOpen] = useState(false);
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [keywordsOpen, setKeywordsOpen] = useState(false);
+  const [quickRepliesOpen, setQuickRepliesOpen] = useState(false);
+  const [fakeLastSeenOpen, setFakeLastSeenOpen] = useState(false);
+  const [alwaysOnline, setAlwaysOnline] = useState(false);
+  const [mirror, setMirror] = useState(false);
+  const [quickReplies, setQuickReplies] = useState<string[]>([]);
+  const [fakeTypingMap, setFakeTypingMap] = useState<Record<string, boolean>>({});
+  const [receiptsConfirm, setReceiptsConfirm] = useState(false);
+  const [resetConfirm, setResetConfirm] = useState(false);
+  const [modTarget, setModTarget] = useState<ChatMessage | null>(null);
+  const [editHistId, setEditHistId] = useState<number | null>(null);
 
   const socketRef = useRef<Socket | null>(null);
   const passwordRef = useRef<string | null>(null);
@@ -359,6 +420,123 @@ export function AdminPanel() {
     });
   }, [showMenuNotice]);
 
+  /* v11 — sinyal palsu: selalu online / mode cermin */
+  const toggleAlwaysOnline = useCallback(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    socket.emit(
+      "admin:always_online",
+      { on: !alwaysOnline },
+      (res: AckOf<AlwaysOnlineAck>) => {
+        if (res.ok) {
+          setAlwaysOnline(res.alwaysOnline);
+          showMenuNotice(res.alwaysOnline ? "Selalu online AKTIF" : "Selalu online nonaktif");
+        }
+      }
+    );
+  }, [alwaysOnline, showMenuNotice]);
+
+  const toggleMirror = useCallback(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    socket.emit("admin:mirror", { on: !mirror }, (res: AckOf<MirrorAck>) => {
+      if (res.ok) {
+        setMirror(res.mirror);
+        showMenuNotice(res.mirror ? "Mode cermin AKTIF — user melihat 'Admin sedang mengetik'" : "Mode cermin nonaktif");
+      }
+    });
+  }, [mirror, showMenuNotice]);
+
+  /* v11 — alat percakapan aktif: typing palsu / receipts / ekspor / reset */
+  const toggleFakeTyping = useCallback((conversationId: string) => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    const on = !fakeTypingMap[conversationId];
+    setFakeTypingMap((prev) => ({ ...prev, [conversationId]: on }));
+    socket.emit(
+      "admin:fake_typing",
+      { conversationId, on },
+      (res: AckOf<FakeTypingAck>) => {
+        if (!res.ok) setFakeTypingMap((prev) => ({ ...prev, [conversationId]: !on }));
+      }
+    );
+  }, [fakeTypingMap]);
+
+  const sendFakeReceipts = useCallback(() => {
+    const socket = socketRef.current;
+    const id = activeIdRef.current;
+    if (!socket || !id) return;
+    socket.emit(
+      "admin:fake_receipts",
+      { conversationId: id },
+      (res: AckOf<FakeReceiptsAck>) => {
+        if (res.ok) showMenuNotice(`✓✓ palsu terkirim — ${res.count} pesan`);
+        else showMenuNotice("Gagal mengirim ✓✓ palsu");
+      }
+    );
+  }, [showMenuNotice]);
+
+  const exportChat = useCallback(
+    (format: "txt" | "json") => {
+      const socket = socketRef.current;
+      const id = activeIdRef.current;
+      if (!socket || !id) return;
+      showMenuNotice("Menyiapkan ekspor…");
+      socket.emit(
+        "admin:export_conversation",
+        { conversationId: id, format },
+        (res: AckOf<ExportAck>) => {
+          if (!res.ok) {
+            showMenuNotice("Ekspor gagal");
+            return;
+          }
+          downloadTextFile(
+            res.fileName,
+            res.content,
+            res.format === "json" ? "application/json" : "text/plain"
+          );
+          showMenuNotice(`Ekspor ${res.format.toUpperCase()} terunduh (${res.count} pesan) ✓`);
+        }
+      );
+    },
+    [showMenuNotice]
+  );
+
+  const resetActiveConversation = useCallback(() => {
+    const socket = socketRef.current;
+    const id = activeIdRef.current;
+    if (!socket || !id) return;
+    socket.emit(
+      "admin:reset_conversation",
+      { conversationId: id },
+      (res: AckOf<ResetConversationAck>) => {
+        if (res.ok) showMenuNotice(`Chat direset (${res.deleted} pesan dihapus)`);
+        else showMenuNotice("Reset chat gagal");
+      }
+    );
+  }, [showMenuNotice]);
+
+  const unpinActive = useCallback(() => {
+    const socket = socketRef.current;
+    const id = activeIdRef.current;
+    if (!socket || !id) return;
+    socket.emit(
+      "admin:unpin",
+      { conversationId: id },
+      (res: AckOf<AdminPinAck>) => {
+        if (res.ok) setPinnedMap((prev) => ({ ...prev, [id]: null }));
+      }
+    );
+  }, []);
+
+  const confirmModerate = useCallback(() => {
+    const target = modTarget;
+    if (!target) return;
+    setModTarget(null);
+    socketRef.current?.emit("admin:delete_message", { messageId: target.id });
+    showMenuNotice("Pesan dihapus (moderasi)");
+  }, [modTarget, showMenuNotice]);
+
   const lockNow = useCallback(() => {
     try {
       window.sessionStorage.setItem(ADMIN_LOCK_KEY, "1");
@@ -455,6 +633,10 @@ export function AdminPanel() {
                 void subscribeToPush(socket, pres.pushPublicKey);
               }
             });
+            // v11 — muat balasan cepat untuk chip di atas composer.
+            socket.emit("admin:quick_replies:get", {}, (qres: AckOf<QuickRepliesAck>) => {
+              if (qres.ok) setQuickReplies(qres.items);
+            });
             if (activeIdRef.current) loadHistory(activeIdRef.current);
           } else {
             // No longer authorized — drop back to the login form.
@@ -500,6 +682,37 @@ export function AdminPanel() {
         ...prev,
         [p.conversationId]: p.pinned ? { id: p.pinned.id, snippet: p.pinned.snippet } : null,
       }));
+    });
+    // v11 — pin berubah: snapshot kaya (termasuk nama pengirim).
+    socket.on("conversation:pinned", (p: ConversationPinnedPayload) => {
+      setPinnedMap((prev) => ({
+        ...prev,
+        [p.conversationId]: p.pinnedMessage
+          ? {
+              id: p.pinnedMessage.messageId,
+              snippet: p.pinnedMessage.snippet,
+              senderName: p.pinnedMessage.senderName,
+            }
+          : null,
+      }));
+    });
+    // v11 — reset chat oleh admin: kosongkan list + sisipkan catatan sistem.
+    socket.on("conversation:reset", (p: ConversationResetPayload) => {
+      const note: ChatMessage = {
+        id: -Date.now(),
+        conversationId: p.conversationId,
+        senderId: "system",
+        content: `🧹 Riwayat chat dihapus oleh admin (${p.deleted} pesan)`,
+        createdAt: p.deletedAt,
+        type: "system",
+      };
+      setMessagesMap((prev) => ({ ...prev, [p.conversationId]: [note] }));
+      setHasMoreMap((prev) => ({ ...prev, [p.conversationId]: false }));
+      setPinnedMap((prev) => ({ ...prev, [p.conversationId]: null }));
+    });
+    // v11 — pesan cocok kata terlarang (diam-diam, hanya ke room admins).
+    socket.on("admin:flagged", (p: AdminFlaggedPayload) => {
+      showMenuNotice(`🚩 "${p.keyword}" dari ${p.senderName}: ${p.snippet.slice(0, 60)}`);
     });
     socket.on("conversation:archive:update", (p: ArchiveUpdatePayload) => {
       setConversations((prev) =>
@@ -637,7 +850,7 @@ export function AdminPanel() {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [epoch, scrollToBottom]);
+  }, [epoch, scrollToBottom, showMenuNotice]);
 
   /* ---------------------------------------------------------------- */
   /* Derived values                                                    */
@@ -732,6 +945,23 @@ export function AdminPanel() {
     setFileError(null);
     setViewer(null);
     setPinnedMap({});
+    // v11 — reset state fitur admin saat logout
+    setQuickReplies([]);
+    setFakeTypingMap({});
+    setAlwaysOnline(false);
+    setMirror(false);
+    setUmOpen(false);
+    setUmTarget(null);
+    setForensicsOpen(false);
+    setMsgSearchOpen(false);
+    setAuditOpen(false);
+    setKeywordsOpen(false);
+    setQuickRepliesOpen(false);
+    setFakeLastSeenOpen(false);
+    setReceiptsConfirm(false);
+    setResetConfirm(false);
+    setModTarget(null);
+    setEditHistId(null);
     setTitleUnread(0);
     // Fresh socket ⇒ server cleanly forgets this client's rooms.
     setEpoch((e) => e + 1);
@@ -878,14 +1108,35 @@ export function AdminPanel() {
     );
   };
 
+  /* v11 — pin via admin:pin/unpin (bisa pin pesan siapa pun) + ack memperbarui banner. */
   const togglePin = (msg: ChatMessage) => {
     const id = activeIdRef.current;
-    if (!id) return;
-    const isPinned = pinnedMap[id]?.id === msg.id;
-    socketRef.current?.emit("conversation:pin", {
-      conversationId: id,
-      messageId: isPinned ? null : msg.id,
-    });
+    const socket = socketRef.current;
+    if (!id || !socket) return;
+    if (pinnedMap[id]?.id === msg.id) {
+      socket.emit("admin:unpin", { conversationId: id }, (res: AckOf<AdminPinAck>) => {
+        if (res.ok) setPinnedMap((prev) => ({ ...prev, [id]: null }));
+      });
+    } else {
+      socket.emit("admin:pin", { messageId: msg.id }, (res: AckOf<AdminPinAck>) => {
+        if (res.ok) {
+          setPinnedMap((prev) => ({
+            ...prev,
+            [res.conversationId]: res.pinnedMessage
+              ? {
+                  id: res.pinnedMessage.messageId,
+                  snippet: res.pinnedMessage.snippet,
+                  senderName: res.pinnedMessage.senderName,
+                }
+              : null,
+          }));
+        }
+      });
+    }
+  };
+
+  const quickSend = (text: string) => {
+    if (!emitMessage(text, "text")) showMenuNotice("Gagal mengirim balasan cepat");
   };
 
   const scrollToMessage = (id: number) => {
@@ -1370,6 +1621,57 @@ export function AdminPanel() {
                         Kompres VACUUM
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
+                      <DropdownMenuLabel>Intelijen &amp; moderasi</DropdownMenuLabel>
+                      <DropdownMenuItem
+                        onClick={() => {
+                          setUmTarget(null);
+                          setUmOpen(true);
+                        }}
+                      >
+                        <Users className="mr-2 size-4" aria-hidden="true" />
+                        Manajemen pengguna
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setForensicsOpen(true)}>
+                        <ShieldAlert className="mr-2 size-4" aria-hidden="true" />
+                        Forensik
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setMsgSearchOpen(true)}>
+                        <Search className="mr-2 size-4" aria-hidden="true" />
+                        Pencarian pesan
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setAuditOpen(true)}>
+                        <ScrollText className="mr-2 size-4" aria-hidden="true" />
+                        Audit log
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setKeywordsOpen(true)}>
+                        <Flag className="mr-2 size-4" aria-hidden="true" />
+                        Kata terlarang
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setQuickRepliesOpen(true)}>
+                        <Zap className="mr-2 size-4" aria-hidden="true" />
+                        Balasan cepat
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuLabel>Sinyal palsu</DropdownMenuLabel>
+                      <DropdownMenuItem
+                        onClick={toggleAlwaysOnline}
+                        className={cn(alwaysOnline && "bg-accent")}
+                      >
+                        <Radio className="mr-2 size-4" aria-hidden="true" />
+                        Selalu online: {alwaysOnline ? "aktif" : "nonaktif"}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setFakeLastSeenOpen(true)}>
+                        <Clock className="mr-2 size-4" aria-hidden="true" />
+                        Last seen palsu…
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={toggleMirror}
+                        className={cn(mirror && "bg-accent")}
+                      >
+                        <Repeat className="mr-2 size-4" aria-hidden="true" />
+                        Mode cermin: {mirror ? "aktif" : "nonaktif"}
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
                       <DropdownMenuLabel>Sesi &amp; tampilan</DropdownMenuLabel>
                       <DropdownMenuItem onClick={openQr}>
                         <QrCode className="mr-2 size-4" aria-hidden="true" />
@@ -1659,22 +1961,96 @@ export function AdminPanel() {
                   </div>
                 </div>
 
-                {/* Pinned message banner (v5) */}
-                {pinnedMap[activeConversation.id] ? (
+                {/* v11 — bilah alat admin percakapan aktif */}
+                <div
+                  className="flex shrink-0 items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1"
+                  role="toolbar"
+                  aria-label="Alat moderasi admin"
+                >
                   <button
                     type="button"
-                    className="flex shrink-0 items-center gap-2 border-b bg-amber-500/5 px-3 py-1.5 text-left text-xs"
-                    onClick={() => scrollToMessage(pinnedMap[activeConversation.id]!.id)}
+                    aria-pressed={!!fakeTypingMap[activeConversation.id]}
+                    className={cn(
+                      "flex h-7 shrink-0 items-center gap-1 rounded-full border px-2.5 text-[11px] font-medium transition-colors",
+                      fakeTypingMap[activeConversation.id]
+                        ? "border-emerald-600 bg-emerald-600 text-white"
+                        : "bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
+                    )}
+                    onClick={() => toggleFakeTyping(activeConversation.id)}
                   >
-                    <Pin className="size-3.5 shrink-0 text-amber-600" aria-hidden="true" />
-                    <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                      {pinnedMap[activeConversation.id]!.snippet}
-                    </span>
-                    <X
-                      className="size-3.5 shrink-0 text-muted-foreground"
-                      aria-hidden="true"
-                    />
+                    ⌨ Typing palsu
                   </button>
+                  <button
+                    type="button"
+                    className="flex h-7 shrink-0 items-center gap-1 rounded-full border bg-background px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    onClick={() => setReceiptsConfirm(true)}
+                  >
+                    ✓✓ Palsu
+                  </button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        className="flex h-7 shrink-0 items-center gap-1 rounded-full border bg-background px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      >
+                        Ekspor chat
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start">
+                      <DropdownMenuItem onClick={() => exportChat("txt")}>
+                        Ekspor TXT
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => exportChat("json")}>
+                        Ekspor JSON
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <button
+                    type="button"
+                    className="flex h-7 shrink-0 items-center gap-1 rounded-full border bg-background px-2.5 text-[11px] font-medium text-destructive transition-colors hover:bg-destructive/10"
+                    onClick={() => setResetConfirm(true)}
+                  >
+                    Reset chat
+                  </button>
+                  <button
+                    type="button"
+                    className="flex h-7 shrink-0 items-center gap-1 rounded-full border bg-background px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    onClick={() => {
+                      setUmTarget(activeConversation.partner.id);
+                      setUmOpen(true);
+                    }}
+                  >
+                    Info user
+                  </button>
+                </div>
+
+                {/* Pinned message banner (v5 + senderName v11 + unpin admin) */}
+                {pinnedMap[activeConversation.id] ? (
+                  <div className="flex shrink-0 items-center gap-2 border-b bg-amber-500/5 px-3 py-1.5 text-xs">
+                    <Pin className="size-3.5 shrink-0 text-amber-600" aria-hidden="true" />
+                    <button
+                      type="button"
+                      className="min-w-0 flex-1 truncate text-left"
+                      onClick={() => scrollToMessage(pinnedMap[activeConversation.id]!.id)}
+                    >
+                      {pinnedMap[activeConversation.id]!.senderName ? (
+                        <span className="font-medium text-amber-600">
+                          {pinnedMap[activeConversation.id]!.senderName}:{" "}
+                        </span>
+                      ) : null}
+                      <span className="text-muted-foreground">
+                        {pinnedMap[activeConversation.id]!.snippet}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Lepas pin"
+                      className="shrink-0 text-muted-foreground hover:text-foreground"
+                      onClick={unpinActive}
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  </div>
                 ) : null}
 
                 {/* Search bar */}
@@ -1808,7 +2184,7 @@ export function AdminPanel() {
                           canPin
                           onReply={() => setReplyTo(m)}
                           onDelete={() => handleDelete(m)}
-                          onMediaOpen={setViewer}
+                          onMediaOpen={() => setViewer(viewerStateForMessage(mediaGallery, m))}
                           onReact={(emoji) => handleReact(m, emoji)}
                           onEdit={() => handleEditStart(m)}
                           onTranslate={
@@ -1817,6 +2193,10 @@ export function AdminPanel() {
                               : undefined
                           }
                           onPin={() => togglePin(m)}
+                          onModerate={
+                            m.senderId !== ADMIN_ID && !m.deletedAt ? () => setModTarget(m) : undefined
+                          }
+                          onEditHistory={m.editedAt ? () => setEditHistId(m.id) : undefined}
                           />
                         </div>
                       ))
@@ -1926,6 +2306,28 @@ export function AdminPanel() {
                     >
                       <X className="size-4" />
                     </button>
+                  </div>
+                ) : null}
+
+                {/* v11 — baris balasan cepat di atas composer */}
+                {quickReplies.length > 0 && !recorder.recording ? (
+                  <div
+                    className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-t px-3 py-1.5"
+                    aria-label="Balasan cepat"
+                  >
+                    <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                      Cepat
+                    </span>
+                    {quickReplies.slice(0, 8).map((q) => (
+                      <button
+                        key={q}
+                        type="button"
+                        className="shrink-0 rounded-full border bg-muted/60 px-2.5 py-1 text-xs transition-colors hover:bg-accent"
+                        onClick={() => quickSend(q)}
+                      >
+                        {q}
+                      </button>
+                    ))}
                   </div>
                 ) : null}
 
@@ -2197,7 +2599,7 @@ export function AdminPanel() {
       ) : null}
 
       {/* Viewer media full-screen (foto/video/audio/PDF/dokumen) */}
-      <MediaViewer media={viewer} onClose={() => setViewer(null)} />
+      <MediaViewer state={viewer} onClose={() => setViewer(null)} />
 
       {/* v10 — Dashboard aplikasi (analitik, pengaturan, siaran, sistem) */}
       <AdminDashboard
@@ -2206,6 +2608,124 @@ export function AdminPanel() {
         socket={socketRef.current}
         tab={dashTab}
         onTabChange={setDashTab}
+      />
+
+      {/* v11 — Manajemen pengguna (daftar + X-Ray + aksi sesi) */}
+      <UserManager
+        open={umOpen}
+        onOpenChange={setUmOpen}
+        socket={socketRef.current}
+        initialUserId={umTarget}
+        onNotice={showMenuNotice}
+      />
+
+      {/* v11 — Forensik (terhapus / ditandai / riwayat edit) */}
+      {forensicsOpen ? (
+        <ForensicsDialog
+          open
+          onOpenChange={setForensicsOpen}
+          socket={socketRef.current}
+          conversations={conversations}
+          onNotice={showMenuNotice}
+        />
+      ) : null}
+
+      {/* v11 — Pencarian pesan global */}
+      {msgSearchOpen ? (
+        <SearchMessagesDialog
+          open
+          onOpenChange={setMsgSearchOpen}
+          socket={socketRef.current}
+          onJump={(cid) => {
+            setMsgSearchOpen(false);
+            if (cid) handleSelectConversation(cid);
+          }}
+        />
+      ) : null}
+
+      {/* v11 — Audit log */}
+      {auditOpen ? (
+        <AuditLogDialog open onOpenChange={setAuditOpen} socket={socketRef.current} />
+      ) : null}
+
+      {/* v11 — Kata terlarang */}
+      {keywordsOpen ? (
+        <KeywordsDialog
+          open
+          onOpenChange={setKeywordsOpen}
+          socket={socketRef.current}
+          onNotice={showMenuNotice}
+        />
+      ) : null}
+
+      {/* v11 — Balasan cepat */}
+      {quickRepliesOpen ? (
+        <QuickRepliesDialog
+          open
+          onOpenChange={setQuickRepliesOpen}
+          socket={socketRef.current}
+          onNotice={showMenuNotice}
+          onSaved={setQuickReplies}
+        />
+      ) : null}
+
+      {/* v11 — Last seen palsu */}
+      {fakeLastSeenOpen ? (
+        <FakeLastSeenDialog
+          open
+          onOpenChange={setFakeLastSeenOpen}
+          socket={socketRef.current}
+          onNotice={showMenuNotice}
+        />
+      ) : null}
+
+      {/* v11 — Riwayat edit pesan (dari aksi bubble / forensik) */}
+      {editHistId !== null ? (
+        <EditHistoryDialog
+          messageId={editHistId}
+          socket={socketRef.current}
+          onClose={() => setEditHistId(null)}
+        />
+      ) : null}
+
+      {/* v11 — konfirmasi ✓✓ palsu */}
+      <ConfirmDialog
+        open={receiptsConfirm}
+        onOpenChange={setReceiptsConfirm}
+        title="Kirim ✓✓ palsu?"
+        description="Semua pesan Anda di chat ini akan tampak SUDAH DIBACA di sisi user, tanpa mengubah data baca di server."
+        confirmLabel="Kirim ✓✓ palsu"
+        onConfirm={sendFakeReceipts}
+      />
+
+      {/* v11 — konfirmasi reset chat */}
+      <ConfirmDialog
+        open={resetConfirm}
+        onOpenChange={setResetConfirm}
+        title="Reset chat ini?"
+        description="SEMUA pesan percakapan ini dihapus permanen untuk kedua sisi dan pin dibersihkan. Tindakan dicatat di audit log."
+        confirmLabel="Ya, reset"
+        destructive
+        onConfirm={resetActiveConversation}
+      />
+
+      {/* v11 — konfirmasi hapus pesan (moderasi) */}
+      <ConfirmDialog
+        open={!!modTarget}
+        onOpenChange={(v) => {
+          if (!v) setModTarget(null);
+        }}
+        title="Hapus pesan (moderasi)?"
+        description={
+          modTarget
+            ? `Pesan dari ${
+                modTarget.senderId === ADMIN_ID ? "Anda" : activeConversation?.partner.name
+              } dihapus untuk semua pihak (isi asli tersimpan di Forensik).`
+            : undefined
+        }
+        confirmLabel="Hapus"
+        destructive
+        onConfirm={confirmModerate}
       />
 
       {/* v10 — notifikasi singkat aksi menu (backup / vacuum / ghost / dll) */}

@@ -7,6 +7,7 @@ import {
   CheckCheck,
   Copy,
   Download,
+  History,
   Hourglass,
   Image as ImageIcon,
   Languages,
@@ -23,6 +24,7 @@ import type { MessageReaction, ReplyPreview } from "@/lib/chat-types";
 import { formatChatTime, formatFileSize, resolveFileKind } from "@/lib/chat-utils";
 import { cn } from "@/lib/utils";
 import { FileKindIcon } from "@/components/chat/media-viewer";
+import { firstUrlInText, LinkPreviewCard } from "@/components/chat/link-preview";
 import { VoicePlayer } from "@/components/chat/voice-player";
 
 /** Fixed reaction palette (mirrors the server). */
@@ -78,6 +80,10 @@ interface ChatBubbleProps {
   canEdit?: boolean;
   /** v5 — show the "Sematkan" action (admin only). */
   canPin?: boolean;
+  /** v11 — moderasi admin: hapus pesan pengguna lain (dengan konfirmasi di induk). */
+  onModerate?: () => void;
+  /** v11 — admin: lihat riwayat revisi pesan yang pernah diedit. */
+  onEditHistory?: () => void;
   onReply?: () => void;
   onDelete?: () => void;
   /** Buka media (foto/PDF) di viewer full-screen; jenis lain unduh langsung. */
@@ -125,6 +131,8 @@ export function ChatBubble({
   pinned = false,
   canEdit = false,
   canPin = false,
+  onModerate,
+  onEditHistory,
   onReply,
   onDelete,
   onMediaOpen,
@@ -170,6 +178,8 @@ export function ChatBubble({
   const isRight = side === "right";
   const canDelete = !deleted && isRight && !!onDelete;
   const reactionList = reactions ?? [];
+  /* Task 19 — URL pertama di pesan teks (kartu pratinjau di bawah teks). */
+  const textLinkUrl = type === "text" && !deleted ? firstUrlInText(content) : null;
   /* file messages: kategori dari mimeType (+ fallback ekstensi nama). */
   const fileKind = type === "file" ? resolveFileKind(mimeType, fileName) : null;
   const isFileImage = type === "image" || (type === "file" && fileKind === "image");
@@ -400,6 +410,15 @@ export function ChatBubble({
             <p className="whitespace-pre-wrap break-words">{content}</p>
           )}
 
+          {/* Task 19 — kartu pratinjau tautan (pesan teks ber-URL), di bawah
+              teks, selebar bubble. Klik kartu TIDAK men-toggle baris aksi. */}
+          {!deleted && type === "text" && textLinkUrl ? (
+            <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
+              {/* key: remount per URL agar state hook/skeleton selalu segar */}
+              <LinkPreviewCard key={textLinkUrl} url={textLinkUrl} dark={isRight} />
+            </div>
+          ) : null}
+
           {/* v5 — translation */}
           {!deleted && translation ? (
             <p
@@ -574,6 +593,32 @@ export function ChatBubble({
             >
               <Pin className="size-3.5" aria-hidden="true" />
               {pinned ? "Lepas sematan" : "Sematkan"}
+            </button>
+          ) : null}
+          {onEditHistory ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
+              onClick={() => {
+                closeActions();
+                onEditHistory();
+              }}
+            >
+              <History className="size-3.5" aria-hidden="true" />
+              Riwayat edit
+            </button>
+          ) : null}
+          {onModerate ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-xs text-destructive hover:bg-destructive/10"
+              onClick={() => {
+                closeActions();
+                onModerate();
+              }}
+            >
+              <Trash2 className="size-3.5" aria-hidden="true" />
+              Hapus (moderasi)
             </button>
           ) : null}
           {canDelete ? (

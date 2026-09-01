@@ -1,0 +1,964 @@
+     1→/**
+     2→ * Shared contract between the Next.js frontend and the chat-service
+     3→ * mini service (socket.io, port 3003). DO NOT change event names or
+     4→ * payload shapes without updating BOTH sides.
+     5→ *
+     6→ * Model (v6 — pure private messenger, like WhatsApp/Telegram):
+     7→ *   Every person who opens the app logs in with a name and gets a
+     8→ *   private 1-on-1 chat with the Admin account (the app owner), just
+     9→ *   like messaging any contact.
+    10→ *   - A user NEVER sees other users, their presence, or their messages
+    11→ *     (enforced server-side via participant checks).
+    12→ *   - The Admin (owner) sees ALL conversations in one list, like
+    13→ *     WhatsApp Web.
+    14→ *   - Messages: text | image | voice | file | system (+ replies, edit,
+    15→ *     delete-for-everyone, emoji reactions, live ✓✓ read receipts, pinned
+    16→ *     messages, archive, voice-note transcription, on-demand translate,
+    17→ *     Web Push notifications, document/video/audio file sharing).
+    18→ *   - v8 (server-lightening): ALL media (photos & voice notes included)
+    19→ *     lives on disk under db/media/ and travels as /api/media/<name> URLs
+    20→ *     (legacy in-band data URLs still render but are no longer produced).
+    21→ *     Photos/videos get tiny client-side thumbnails (`thumbUrl`); history is
+    22→ *     paginated (50/page, `messages:older` loads more); media ages out after
+    23→ *     MEDIA_RETENTION_DAYS (server sweeps → `mediaExpiredAt` tombstone);
+    24→ *     per-account rate limits + storage quota guard the socket.
+    25→ *   - Files are uploaded out-of-band via the Next.js route POST /api/upload
+    26→ *     (stored under db/media/, SHA-256 deduplicated) and the message carries
+    27→ *     the public URL /api/media/<name> plus fileName/fileSize/mimeType.
+    28→ *     GET /api/media/<name> streams bytes with immutable caching, ETag/304
+    29→ *     and HTTP Range support (video seeking without full re-download).
+    30→ *
+    31→ * NO customer-service tooling lives here anymore: no operating hours,
+    32→ * no quick-reply templates, no AI auto-reply/summary/suggestions, no
+    33→ * SLA alerts, no chatbot menu, no pre-chat form, no star ratings, no
+    34→ * broadcast, no CRM labels/notes, no stats, no CSV/PDF export.
+    35→ */
+    36→
+    37→/** Fixed id of the admin account (seeded by the server on boot). */
+    38→export const ADMIN_ID = "admin";
+    39→export const ADMIN_NAME = "Admin";
+    40→
+    41→/** Persisted user login ({ userId, name }) — Telegram-style, no password. */
+    42→export const CHAT_SESSION_KEY = "chatkita:user";
+    43→
+    44→/**
+    45→ * Last account name that logged in from this browser. Unlike the session
+    46→ * key it SURVIVES logout, so the login card can prefill it and offer a
+    47→ * one-tap "continue previous conversation" entry.
+    48→ */
+    49→export const CHAT_LAST_NAME_KEY = "chatkita:last-name";
+    50→
+    51→/** Persisted per-browser mute for the new-message blip. */
+    52→export const CHAT_SOUND_KEY = "chatkita:sound";
+    53→
+    54→/** Persisted per-browser chat font size ("sm" | "md" | "lg"). */
+    55→export const CHAT_FONT_KEY = "chatkita:font-size";
+    56→
+    57→/**
+    58→ * Persisted per-browser data-saver toggle. When on, heavy media (photos,
+    59→ * videos, audio attachments) is NOT fetched automatically — a tap-to-load
+    60→ * placeholder is shown instead. Thumbnails (<30 KB) still render.
+    61→ */
+    62→export const CHAT_DATA_SAVER_KEY = "chatkita:data-saver";
+    63→
+    64→/** Draft of an unsent message (per role/conversation), survives reloads. */
+    65→export const draftKey = (scope: string, id: string) => `chatkita:draft:${scope}:${id}`;
+    66→
+    67→/** Demo hint rendered on the admin login form (server default password). */
+    68→export const ADMIN_PASSWORD_HINT = "admin123";
+    69→
+    70→/** Which mini service port — always reach it through the gateway query param. */
+    71→export const CHAT_SERVICE_PORT = 3003;
+    72→
+    73→export const SOCKET_URL = `/?XTransformPort=${CHAT_SERVICE_PORT}`;
+    74→
+    75→export const MAX_MESSAGE_LENGTH = 1000;
+    76→export const MAX_NAME_LENGTH = 40;
+    77→
+    78→/** Messages per history page (auth/history/older). Older pages load on demand. */
+    79→export const HISTORY_PAGE_SIZE = 50;
+    80→
+    81→/** Per-account media retention (server-side sweep; env MEDIA_RETENTION_DAYS). */
+    82→export const MEDIA_RETENTION_DAYS = 30;
+    83→
+    84→/** Per-account storage quota for disk media (sum of fileSize). */
+    85→export const MEDIA_QUOTA_BYTES = 250 * 1024 * 1024; // 250 MiB
+    86→
+    87→/* ------------------------------------------------------------------ */
+    88→/* Entities                                                            */
+    89→/* ------------------------------------------------------------------ */
+    90→
+    91→export interface ChatUser {
+    92→  id: string;
+    93→  name: string;
+    94→  /** Present on user auth: whether this account is PIN-protected. */
+    95→  hasPin?: boolean;
+    96→}
+    97→
+    98→export type MessageContentType = "text" | "image" | "voice" | "file" | "system";
+    99→
+   100→/** Grouped emoji reactions on one message. */
+   101→export interface MessageReaction {
+   102→  emoji: string;
+   103→  /** User ids who reacted with this emoji. */
+   104→  userIds: string[];
+   105→}
+   106→
+   107→/** Snapshot of the original message a reply points at. */
+   108→export interface ReplyPreview {
+   109→  id: number;
+   110→  senderId: string;
+   111→  snippet: string;
+   112→  type: string;
+   113→}
+   114→
+   115→/**
+   116→ * v11 — rich pinned-message snapshot (overview + conversation:pinned event).
+   117→ * Unlike the older `pinned` snapshot it also carries the sender display name.
+   118→ */
+   119→export interface PinnedMessageInfo {
+   120→  messageId: number;
+   121→  senderId: string;
+   122→  senderName: string;
+   123→  snippet: string;
+   124→  type: string;
+   125→}
+   126→
+   127→/** A chat message. Media content = data URL or /api/media URL; deleted → content "". */
+   128→export interface ChatMessage {
+   129→  id: number;
+   130→  conversationId: string;
+   131→  senderId: string;
+   132→  content: string;
+   133→  /** ISO 8601 timestamp string */
+   134→  createdAt: string;
+   135→  type: MessageContentType;
+   136→  replyToId?: number;
+   137→  replyTo?: ReplyPreview;
+   138→  /** Voice notes: recording length in ms. */
+   139→  durationMs?: number;
+   140→  /** Voice notes: AI transcription (may arrive later via message:updated). */
+   141→  transcript?: string;
+   142→  /** Soft delete marker (content is redacted server-side). */
+   143→  deletedAt?: string;
+   144→  /** Set when the sender edited their text message. */
+   145→  editedAt?: string;
+   146→  /** Indonesian translation fetched on demand. */
+   147→  translation?: string;
+   148→  /** Emoji reactions (may arrive later via message:updated). */
+   149→  reactions?: MessageReaction[];
+   150→  /** file messages: original file name (display only). */
+   151→  fileName?: string;
+   152→  /** file messages: size in bytes. */
+   153→  fileSize?: number;
+   154→  /** file messages: MIME type (e.g. application/pdf, video/mp4). */
+   155→  mimeType?: string;
+   156→  /**
+   157→   * v8 — tiny preview image (<30 KB) for photos & videos. The bubble renders
+   158→   * this instead of the full media; the viewer loads the full version.
+   159→   */
+   160→  thumbUrl?: string;
+   161→  /**
+   162→   * v8 — set when the retention sweeper removed this message's media
+   163→   * (content/file metadata are redacted; a tombstone placeholder renders).
+   164→   */
+   165→  mediaExpiredAt?: string;
+   166→}
+   167→
+   168→/** A chat partner including live presence info. */
+   169→export type PartnerInfo = ChatUser & {
+   170→  online: boolean;
+   171→  /** ISO timestamp of the last time this user was online (null if unknown). */
+   172→  lastSeenAt: string | null;
+   173→};
+   174→
+   175→/**
+   176→ * One conversation as seen by the requesting side.
+   177→ * For the admin: `partner` is the human user. For a user: `partner` is Admin.
+   178→ */
+   179→export interface ConversationOverview {
+   180→  id: string;
+   181→  partner: PartnerInfo;
+   182→  lastMessage: {
+   183→    id: number;
+   184→    senderId: string;
+   185→    content: string;
+   186→    createdAt: string;
+   187→    type: string;
+   188→    deleted: boolean;
+   189→    /** file messages: original file name (for "📎 <nama>" previews). */
+   190→    fileName?: string;
+   191→    /** v8 — last message's media was swept by retention. */
+   192→    mediaExpired?: boolean;
+   193→  } | null;
+   194→  lastMessageAt: string;
+   195→  /** Unread messages sent by the partner. */
+   196→  unread: number;
+   197→  /** How far the PARTNER has read → ✓✓ on my own bubbles. */
+   198→  partnerLastReadId: number;
+   199→  /** Archived conversations live in their own tab (WhatsApp-style). */
+   200→  archived?: boolean;
+   201→  /** Pinned message banner (both sides). */
+   202→  pinnedMessageId?: number | null;
+   203→  pinned?: { id: number; senderId: string; snippet: string; type: string } | null;
+   204→  /**
+   205→   * v11 — rich pinned snapshot incl. the sender display name
+   206→   * (admin can pin any message; both sides see this in the overview).
+   207→   */
+   208→  pinnedMessage?: PinnedMessageInfo | null;
+   209→}
+   210→
+   211→/* ------------------------------------------------------------------ */
+   212→/* Ack payloads                                                        */
+   213→/* ------------------------------------------------------------------ */
+   214→
+   215→/** Ack payload returned by `public:settings` (pre-login push config). */
+   216→export interface PublicSettingsAck {
+   217→  ok: true;
+   218→  pushPublicKey: string;
+   219→}
+   220→
+   221→/** Ack payload returned by `user:auth`. */
+   222→export interface UserAuthAck {
+   223→  ok: true;
+   224→  user: ChatUser;
+   225→  /** The user's single conversation (with Admin). */
+   226→  conversationId: string;
+   227→  /** Always the Admin in this model. */
+   228→  partner: PartnerInfo;
+   229→  /** Full history of the conversation (already marked as read). */
+   230→  messages: ChatMessage[];
+   231→  /** v8 — true when older pages exist (messages:older loads them). */
+   232→  hasMore: boolean;
+   233→  /** How far the admin has read → ✓✓ on my sent messages. */
+   234→  partnerLastReadId: number;
+   235→  /** VAPID public key for Web Push ("" when push is unavailable). */
+   236→  pushPublicKey: string;
+   237→  /** Pinned banner state. */
+   238→  pinnedMessageId?: number | null;
+   239→  pinned?: { id: number; senderId: string; snippet: string; type: string } | null;
+   240→}
+   241→
+   242→/** Ack payload returned by `admin:auth`. */
+   243→export interface AdminAuthAck {
+   244→  ok: true;
+   245→  conversations: ConversationOverview[];
+   246→}
+   247→
+   248→/** Ack payload returned by `messages:history` (both roles, participant-only). */
+   249→export interface HistoryAck {
+   250→  ok: true;
+   251→  messages: ChatMessage[];
+   252→  /** v8 — true when older pages exist (messages:older loads them). */
+   253→  hasMore: boolean;
+   254→  partner: PartnerInfo;
+   255→  partnerLastReadId: number;
+   256→  /** My read cursor BEFORE this call → "new messages" divider. */
+   257→  lastReadBefore: number;
+   258→  /** Pinned banner state. */
+   259→  pinnedMessageId?: number | null;
+   260→  pinned?: { id: number; senderId: string; snippet: string; type: string } | null;
+   261→}
+   262→
+   263→/** Ack payload returned by `messages:send`. */
+   264→export interface MessageAck {
+   265→  ok: true;
+   266→  message: ChatMessage;
+   267→}
+   268→
+   269→/** Ack payload returned by `messages:older` (v8 pagination). */
+   270→export interface OlderMessagesAck {
+   271→  ok: true;
+   272→  /** Up to HISTORY_PAGE_SIZE messages OLDER than beforeId, ascending. */
+   273→  messages: ChatMessage[];
+   274→  hasMore: boolean;
+   275→}
+   276→
+   277→export interface SetPinAck {
+   278→  ok: true;
+   279→  hasPin: boolean;
+   280→}
+   281→
+   282→export interface TranslateAck {
+   283→  ok: true;
+   284→  translation: string | null;
+   285→}
+   286→
+   287→export interface PinUpdatePayload {
+   288→  conversationId: string;
+   289→  pinnedMessageId: number | null;
+   290→  pinned: { id: number; senderId: string; snippet: string; type: string } | null;
+   291→}
+   292→
+   293→export interface ArchiveUpdatePayload {
+   294→  conversationId: string;
+   295→  archived: boolean;
+   296→}
+   297→
+   298→/** Shape of the message:updated merge payload (superset of all versions). */
+   299→export interface MessageUpdatePayload {
+   300→  id: number;
+   301→  conversationId: string;
+   302→  deletedAt?: string;
+   303→  transcript?: string;
+   304→  content?: string;
+   305→  editedAt?: string;
+   306→  translation?: string;
+   307→  reactions?: MessageReaction[];
+   308→}
+   309→
+   310→/** Generic error ack: `{ ok: false, error: ErrorCode }` */
+   311→export type ChatErrorCode =
+   312→  | "INVALID_NAME"
+   313→  | "NAME_RESERVED"
+   314→  | "INVALID_MESSAGE"
+   315→  | "NOT_FOUND"
+   316→  | "FORBIDDEN"
+   317→  | "UNAUTHORIZED"
+   318→  | "PIN_REQUIRED"
+   319→  | "INVALID_PIN"
+   320→  | "RATE_LIMITED"
+   321→  | "QUOTA_EXCEEDED"
+   322→  | "SERVER_ERROR"
+   323→  // v11 — admin session control (enforced inside messages:send):
+   324→  | "FROZEN"
+   325→  | "MUTED"
+   326→  | "SLOW_MODE"
+   327→  | "MEDIA_BLOCKED";
+   328→
+   329→export interface ChatErrorAck {
+   330→  ok: false;
+   331→  error: ChatErrorCode;
+   332→  hasPin?: boolean;
+   333→  /** v11 — MUTED / SLOW_MODE: seconds until the restriction expires. */
+   334→  remainingSeconds?: number;
+   335→}
+   336→
+   337→export type AckOf<T> = T | ChatErrorAck;
+   338→
+   339→/* ------------------------------------------------------------------ */
+   340→/* v10 — admin dashboard / app settings / broadcast                    */
+   341→/* ------------------------------------------------------------------ */
+   342→
+   343→/** App-wide settings (editable by admin, broadcast to everyone). */
+   344→export interface AppSettings {
+   345→  appName: string;
+   346→  welcomeMessage: string;
+   347→  maintenanceMode: boolean;
+   348→  maintenanceNote: string;
+   349→}
+   350→
+   351→/** `public:settings` now also carries the public app settings (v10). */
+   352→export interface PublicSettingsAck {
+   353→  ok: true;
+   354→  pushPublicKey: string;
+   355→  /** v10 — present on newer servers; optional for older clients. */
+   356→  app?: AppSettings;
+   357→}
+   358→
+   359→/** One UTC day of message counts (dashboard daily series). */
+   360→export interface DashboardDayPoint {
+   361→  date: string;
+   362→  count: number;
+   363→}
+   364→
+   365→/** A user row inside the dashboard (top users / all users tables). */
+   366→export interface DashboardUserRow {
+   367→  id: string;
+   368→  name: string;
+   369→  messages: number;
+   370→  lastSeenAt: string;
+   371→  online: boolean;
+   372→  /** Only on the all-users list. */
+   373→  joinedAt?: string;
+   374→}
+   375→
+   376→/** Full stats payload returned by `admin:dashboard`. */
+   377→export interface DashboardStats {
+   378→  generatedAt: string;
+   379→  version: string;
+   380→  uptimeMs: number;
+   381→  totals: {
+   382→    users: number;
+   383→    conversations: number;
+   384→    messages: number;
+   385→    deletedMessages: number;
+   386→    last24h: number;
+   387→    last7d: number;
+   388→    byType: Record<string, number>;
+   389→    onlineUsers: number;
+   390→    mediaCount: number;
+   391→    mediaBytes: number;
+   392→  };
+   393→  daily: DashboardDayPoint[];
+   394→  /** 24 buckets, hour-of-day (UTC) over the last 7 days. */
+   395→  hourly: number[];
+   396→  topUsers: DashboardUserRow[];
+   397→  users: DashboardUserRow[];
+   398→  storage: {
+   399→    dbBytes: number;
+   400→    walBytes: number;
+   401→    mediaBytes: number;
+   402→    mediaFiles: number;
+   403→    quotaBytes: number;
+   404→    retentionDays: number;
+   405→  };
+   406→}
+   407→
+   408→export interface DashboardStatsAck {
+   409→  ok: true;
+   410→  stats: DashboardStats;
+   411→}
+   412→
+   413→export interface AppSettingsAck {
+   414→  ok: true;
+   415→  settings: AppSettings;
+   416→}
+   417→
+   418→export interface BroadcastAck {
+   419→  ok: true;
+   420→  count: number;
+   421→  kind: "siaran" | "pengumuman";
+   422→}
+   423→
+   424→export interface BackupAck {
+   425→  ok: true;
+   426→  exportedAt: string;
+   427→  version: string;
+   428→  users: unknown[];
+   429→  conversations: unknown[];
+   430→  messages: unknown[];
+   431→  settings: { key: string; value: string }[];
+   432→}
+   433→
+   434→export interface VacuumAck {
+   435→  ok: true;
+   436→  before: { dbBytes: number; walBytes: number };
+   437→  after: { dbBytes: number; walBytes: number };
+   438→}
+   439→
+   440→export interface GhostAck {
+   441→  ok: true;
+   442→  ghost: boolean;
+   443→}
+   444→
+   445→/** Server → everyone: app settings changed (v10). */
+   446→export type AppSettingsUpdatePayload = AppSettings;
+   447→
+   448→/* ------------------------------------------------------------------ */
+   449→/* v11 — admin power features (intel / session control / fake signals) */
+   450→/* ------------------------------------------------------------------ */
+   451→
+   452→/**
+   453→ * v11 — live restriction state pushed to a user via `user:restricted`
+   454→ * (on every restriction change, and on user:auth when anything is active).
+   455→ */
+   456→export interface UserRestrictionState {
+   457→  /** Frozen account — messages:send is rejected with FROZEN. */
+   458→  frozen: boolean;
+   459→  /** Active mute deadline (ISO), or null when not muted. */
+   460→  mutedUntil: string | null;
+   461→  /** Personal text rate limit per minute (0 = off / server default). */
+   462→  slowMode: number;
+   463→  /** When true all non-text sends are rejected with MEDIA_BLOCKED. */
+   464→  mediaBlocked: boolean;
+   465→}
+   466→
+   467→/** Server → restricted user: restriction state changed (or on login). */
+   468→export type UserRestrictedPayload = UserRestrictionState;
+   469→
+   470→/** Per-user connection metadata captured at auth time (admin:xray). */
+   471→export interface XrayProfile {
+   472→  id: string;
+   473→  name: string;
+   474→  createdAt: string;
+   475→  lastSeen: string;
+   476→  online: boolean;
+   477→  socketCount: number;
+   478→  messageCount: number;
+   479→  mediaCount: number;
+   480→  mediaBytes: number;
+   481→  lastMessageAt: string | null;
+   482→  /** First x-forwarded-for entry of the last connection (null when unknown). */
+   483→  ip: string | null;
+   484→  userAgent: string | null;
+   485→  /** Coarse platform guess derived from the user-agent. */
+   486→  platform: string;
+   487→}
+   488→
+   489→export interface XrayAck {
+   490→  ok: true;
+   491→  profile: XrayProfile;
+   492→}
+   493→
+   494→/** One deleted (tombstoned) message as returned by `admin:forensics`. */
+   495→export interface ForensicsItem {
+   496→  messageId: number;
+   497→  conversationId: string;
+   498→  senderName: string;
+   499→  type: string;
+   500→  /** Original text preserved server-side before redaction (may be ""). */
+   501→  content: string;
+   502→  createdAt: string;
+   503→  deletedAt: string;
+   504→}
+   505→
+   506→export interface ForensicsAck {
+   507→  ok: true;
+   508→  items: ForensicsItem[];
+   509→}
+   510→
+   511→/** One historical revision of an edited message (oldest first). */
+   512→export interface EditHistoryItem {
+   513→  text: string;
+   514→  at: string;
+   515→}
+   516→
+   517→export interface EditHistoryAck {
+   518→  ok: true;
+   519→  items: EditHistoryItem[];
+   520→}
+   521→
+   522→/** `admin:peek` — side-effect-free read of the latest history page. */
+   523→export interface PeekAck {
+   524→  ok: true;
+   525→  conversationId: string;
+   526→  messages: ChatMessage[];
+   527→  hasMore: boolean;
+   528→}
+   529→
+   530→/** One hit of `admin:search` (content match across ALL conversations). */
+   531→export interface SearchItem {
+   532→  messageId: number;
+   533→  conversationId: string;
+   534→  senderName: string;
+   535→  type: string;
+   536→  /** Excerpt of the content around the match (…-trimmed, ≤ ~140 chars). */
+   537→  snippet: string;
+   538→  createdAt: string;
+   539→  conversationName: string;
+   540→}
+   541→
+   542→export interface SearchAck {
+   543→  ok: true;
+   544→  items: SearchItem[];
+   545→}
+   546→
+   547→export interface UserStatsAck {
+   548→  ok: true;
+   549→  /** Last 14 UTC days, zero-filled ({ day: 'YYYY-MM-DD', count }). */
+   550→  perDay: { day: string; count: number }[];
+   551→  /** 24 hour-of-day buckets (UTC) over the last 7 days. */
+   552→  topHours: { hour: number; count: number }[];
+   553→  /** Live (non-deleted) messages sent by the user. */
+   554→  total: number;
+   555→  /** Live media messages (image/voice/file) sent by the user. */
+   556→  media: number;
+   557→}
+   558→
+   559→/** Shared ack of `admin:export_conversation` / `admin:export_user`.
+   560→ *  The UI turns `content` into a Blob download named `fileName`. */
+   561→export interface ExportAck {
+   562→  ok: true;
+   563→  format: "txt" | "json";
+   564→  fileName: string;
+   565→  content: string;
+   566→  count: number;
+   567→}
+   568→
+   569→export interface KickAck {
+   570→  ok: true;
+   571→  sockets: number;
+   572→}
+   573→
+   574→export interface FreezeAck {
+   575→  ok: true;
+   576→  frozen: boolean;
+   577→  restricted: UserRestrictionState;
+   578→}
+   579→
+   580→export interface MuteAck {
+   581→  ok: true;
+   582→  /** ISO deadline or null when the mute was cleared (minutes: 0). */
+   583→  mutedUntil: string | null;
+   584→  restricted: UserRestrictionState;
+   585→}
+   586→
+   587→export interface SlowModeAck {
+   588→  ok: true;
+   589→  perMinute: number;
+   590→  restricted: UserRestrictionState;
+   591→}
+   592→
+   593→export interface MediaBlockAck {
+   594→  ok: true;
+   595→  mediaBlocked: boolean;
+   596→  restricted: UserRestrictionState;
+   597→}
+   598→
+   599→export interface FakeTypingAck {
+   600→  ok: true;
+   601→}
+   602→
+   603→export interface AlwaysOnlineAck {
+   604→  ok: true;
+   605→  alwaysOnline: boolean;
+   606→}
+   607→
+   608→export interface FakeLastSeenAck {
+   609→  ok: true;
+   610→  /** The stored fake string ('' = disabled). */
+   611→  fakeLastSeen: string;
+   612→}
+   613→
+   614→export interface FakeReceiptsAck {
+   615→  ok: true;
+   616→  /** Number of messages the fake receipt covered. */
+   617→  count: number;
+   618→  lastReadMessageId: number;
+   619→}
+   620→
+   621→export interface QuickRepliesAck {
+   622→  ok: true;
+   623→  items: string[];
+   624→}
+   625→
+   626→export interface MirrorAck {
+   627→  ok: true;
+   628→  mirror: boolean;
+   629→}
+   630→
+   631→export interface AuditItem {
+   632→  action: string;
+   633→  detail: string;
+   634→  at: string;
+   635→}
+   636→
+   637→export interface AuditAck {
+   638→  ok: true;
+   639→  items: AuditItem[];
+   640→}
+   641→
+   642→export interface ResetConversationAck {
+   643→  ok: true;
+   644→  deleted: number;
+   645→}
+   646→
+   647→/** One flagged message as returned by `admin:flagged_list`. */
+   648→export interface FlaggedItem {
+   649→  messageId: number;
+   650→  conversationId: string;
+   651→  senderName: string;
+   652→  type: string;
+   653→  snippet: string;
+   654→  /** First matching keyword (recomputed from the content). */
+   655→  keyword: string;
+   656→  createdAt: string;
+   657→  deletedAt?: string;
+   658→}
+   659→
+   660→export interface FlaggedListAck {
+   661→  ok: true;
+   662→  items: FlaggedItem[];
+   663→}
+   664→
+   665→/** `admin:pin` / `admin:unpin` — same ack shape as conversation:pin. */
+   666→export interface AdminPinAck {
+   667→  ok: true;
+   668→  conversationId: string;
+   669→  pinnedMessageId: number | null;
+   670→  pinnedMessage: PinnedMessageInfo | null;
+   671→}
+   672→
+   673→/** Server → both sides: the conversation's pinned message changed (v11). */
+   674→export interface ConversationPinnedPayload {
+   675→  conversationId: string;
+   676→  pinnedMessageId: number | null;
+   677→  pinnedMessage: PinnedMessageInfo | null;
+   678→}
+   679→
+   680→/** Server → admins room: a text message matched a keyword (silent flag). */
+   681→export interface AdminFlaggedPayload {
+   682→  messageId: number;
+   683→  conversationId: string;
+   684→  senderName: string;
+   685→  snippet: string;
+   686→  keyword: string;
+   687→  createdAt: string;
+   688→}
+   689→
+   690→/** Server → everyone in the conversation: bulk soft delete (v11 reset). */
+   691→export interface ConversationResetPayload {
+   692→  conversationId: string;
+   693→  deletedAt: string;
+   694→  deleted: number;
+   695→}
+   696→
+   697→/* ------------------------------------------------------------------ */
+   698→/* Client → Server events (ack via callback where listed)              */
+   699→/* ------------------------------------------------------------------ */
+   700→//
+   701→// public:settings    {} → PublicSettingsAck | ChatErrorAck
+   702→//                      Pre-login fetch of the Web Push VAPID public key.
+   703→//
+   704→// user:auth         { name: string; userId?: string; pin?: string }
+   705→//                     → UserAuthAck | ChatErrorAck
+   706→//                     Login (session userId) or find-or-create by
+   707→//                     (case-insensitive) name. PIN-protected accounts must
+   708→//                     present `pin` on fresh logins (PIN_REQUIRED /
+   709→//                     INVALID_PIN). Ensures the 1-on-1 conversation with
+   710→//                     Admin, marks it read (broadcasts read:update),
+   711→//                     returns the full history + admin read cursor.
+   712→//
+   713→// admin:auth        { password: string }
+   714→//                     → AdminAuthAck | ChatErrorAck
+   715→//                     Password login (ADMIN_PASSWORD env or "admin123").
+   716→//                     Joins the `admins` room; returns ALL conversations.
+   717→//
+   718→// messages:history  { conversationId: string; beforeId?: number }
+   719→//                     → HistoryAck | ChatErrorAck
+   720→//                     Both roles; participant-gated; marks read.
+   721→//                     Returns the newest HISTORY_PAGE_SIZE (50) messages
+   722→//                     ascending; with `beforeId` (v8) the page ENDING just
+   723→//                     before that id. `hasMore` signals older pages.
+   724→//
+   725→// messages:older    { conversationId: string; beforeId: number }
+   726→//                     → OlderMessagesAck | ChatErrorAck            (v8)
+   727→//                     Participant-gated page of up to 50 messages with
+   728→//                     id < beforeId (ascending) + `hasMore`. Read state
+   729→//                     is NOT touched. Powers the "Muat pesan lama" button.
+   730→//
+   731→// messages:send     { conversationId: string; content: string;
+   732→//                     type?: 'text'|'image'|'voice'|'file';
+   733→//                     replyToId?: number; durationMs?: number;
+   734→//                     fileName?: string; fileSize?: number; mimeType?: string;
+   735→//                     thumbUrl?: string }
+   736→//                     → MessageAck | ChatErrorAck
+   737→//                     Both roles; participant-gated. Sender auto-reads.
+   738→//                     v8 — image/voice content is PREFERRED as the
+   739→//                     /api/media/<name> URL produced by POST /api/upload
+   740→//                     (then fileName/fileSize/mimeType are REQUIRED and
+   741→//                     validated; legacy in-band data URLs still accepted,
+   742→//                     size-capped). `thumbUrl` is an optional /api/media
+   743→//                     URL pointing at a tiny preview image.
+   744→//                     Voice notes are transcribed asynchronously (server
+   745→//                     reads the bytes from db/media; transcript arrives
+   746→//                     via message:updated).
+   747→//                     file content = /api/media/<name> URL obtained from
+   748→//                     POST /api/upload; fileName (1–255 chars), mimeType
+   749→//                     (type/subtype) and fileSize (≤ 25 MiB) are required
+   750→//                     metadata validated server-side.
+   751→//                     v8 guards: per-account rate limits (30 text/min,
+   752→//                     12 media/min → RATE_LIMITED) and a storage quota
+   753→//                     (sum of fileSize ≤ 250 MiB → QUOTA_EXCEEDED).
+   754→//                     The retention sweeper may later redact any media
+   755→//                     message (→ mediaExpiredAt tombstone via
+   756→//                     message:updated) after MEDIA_RETENTION_DAYS.
+   757→//
+   758→// messages:delete   { messageId: number }
+   759→//                     → { ok: true } | ChatErrorAck
+   760→//                     Sender-only soft delete; content redacted for
+   761→//                     everyone; broadcast as message:updated.
+   762→//
+   763→// messages:edit     { messageId: number; content: string }
+   764→//                     → { ok: true } | ChatErrorAck
+   765→//                     Sender-only, text messages, 15-minute window;
+   766→//                     broadcast as message:updated.
+   767→//
+   768→// message:react     { messageId: number; emoji: string }
+   769→//                     → { ok: true } | ChatErrorAck
+   770→//                     Toggle the caller's reaction on a message.
+   771→//                     Empty emoji removes the caller's reaction.
+   772→//
+   773→// message:translate { messageId: number } → TranslateAck | ChatErrorAck
+   774→//                     On-demand Indonesian translation (AI, best effort).
+   775→//
+   776→// messages:read     { conversationId: string }                 (no ack)
+   777→//
+   778→// typing            { conversationId: string; isTyping: boolean } (no ack)
+   779→//
+   780→// user:setpin       { pin: string | null }        → SetPinAck | ChatErrorAck
+   781→//                     4–8 digits, or null/"" to remove. User role only.
+   782→//
+   783→// conversation:pin     { conversationId, messageId|null } (admin)
+   784→// conversation:archive { conversationId, archived }  (admin)
+   785→//                     Plain archive/unarchive — no rating side effects.
+   786→// push:subscribe       { subscription }              (no ack, user/admin)
+   787→//
+   788→// ---- v10 (admin dashboard) — all admin-only, ack via callback ----
+   789→//
+   790→// admin:dashboard     {} → DashboardStatsAck | ChatErrorAck
+   791→// admin:settings:get  {} → AppSettingsAck | ChatErrorAck
+   792→// admin:settings:set  { appName?, welcomeMessage?, maintenanceMode?,
+   793→//                       maintenanceNote? } → AppSettingsAck | ChatErrorAck
+   794→//                       Also broadcasts `app:settings:update` to everyone.
+   795→// admin:broadcast     { text, kind: 'siaran'|'pengumuman' }
+   796→//                       → BroadcastAck | ChatErrorAck
+   797→//                       Inserts one system message into EVERY conversation.
+   798→// admin:backup        {} → BackupAck | ChatErrorAck (full JSON dump)
+   799→// admin:vacuum        {} → VacuumAck | ChatErrorAck (WAL checkpoint + VACUUM)
+   800→// admin:ghost         { on: boolean } → GhostAck | ChatErrorAck
+   801→//                       Ghost reading: admin reads without read receipts.
+   802→//
+   803→// ---- v10 server → client ----
+   804→//
+   805→// app:settings:update  AppSettingsUpdatePayload (broadcast to ALL clients)
+   806→//
+   807→// ---- v11 (admin power features) — all admin-only, ack via callback ----
+   808→//
+   809→// Kategori A — intel / x-ray:
+   810→// admin:xray              { userId } → XrayAck | ChatErrorAck
+   811→//                           Live profile: id, name, createdAt, lastSeen,
+   812→//                           online, socketCount, messageCount, mediaCount,
+   813→//                           mediaBytes, lastMessageAt, ip, userAgent, platform.
+   814→//                           Connection metadata (ip/user-agent) is captured at
+   815→//                           auth time and lives in memory only.
+   816→// admin:forensics         { conversationId? } → ForensicsAck | ChatErrorAck
+   817→//                           Latest 100 tombstoned messages (newest first) with
+   818→//                           the ORIGINAL text preserved in deleted_content.
+   819→//                           Note: messages deleted BEFORE v11 are unrecoverable
+   820→//                           (their content was redacted by the old pipeline).
+   821→// admin:edit_history      { messageId } → EditHistoryAck | ChatErrorAck
+   822→//                           Previous revisions of an edited message (oldest
+   823→//                           first, [{text, at}]). Recorded from v11 on.
+   824→// admin:peek              { conversationId } → PeekAck | ChatErrorAck
+   825→//                           Latest 50 messages, NO read marks, NO receipts,
+   826→//                           no side effects at all.
+   827→// admin:search            { query } → SearchAck | ChatErrorAck
+   828→//                           Case-insensitive substring search across ALL
+   829→//                           conversations (2–100 chars, excludes deleted,
+   830→//                           newest first, limit 100).
+   831→// admin:user_stats        { userId } → UserStatsAck | ChatErrorAck
+   832→//                           perDay (14 UTC days, zero-filled), topHours (24
+   833→//                           buckets over last 7 days), total, media — live
+   834→//                           messages only.
+   835→// admin:export_conversation { conversationId, format: 'txt'|'json' }
+   836→//                           → ExportAck | ChatErrorAck
+   837→//                           Full transcript (latest 5000 messages); the UI
+   838→//                           downloads `content` as a Blob named `fileName`.
+   839→// admin:export_user       { userId } → ExportAck | ChatErrorAck
+   840→//                           JSON dump { profile (= xray), messages (≤5000),
+   841→//                           stats (= user_stats), exportedAt }.
+   842→//
+   843→// Kategori B — session control (enforcement inside messages:send,
+   844→// ordered: frozen → muted → mediaBlocked → slowmode/rate → quota):
+   845→// admin:kick              { userId } → KickAck | ChatErrorAck
+   846→//                           Force-disconnects ALL sockets of the user. The
+   847→//                           client auto-reconnects (acceptable, documented).
+   848→// admin:freeze            { userId, on: boolean } → FreezeAck | ChatErrorAck
+   849→//                           Frozen users may connect but sending acks FROZEN.
+   850→// admin:mute              { userId, minutes } → MuteAck | ChatErrorAck
+   851→//                           minutes 1–1440 (0 = clear early). Sending acks
+   852→//                           MUTED with remainingSeconds while active.
+   853→// admin:slowmode          { userId, perMinute } → SlowModeAck | ChatErrorAck
+   854→//                           perMinute 0|1|2|3|5|10 (0 = off). Personal text
+   855→//                           limit; hitting it acks SLOW_MODE + remainingSeconds.
+   856→// admin:mediablock        { userId, on: boolean } → MediaBlockAck | ChatErrorAck
+   857→//                           Non-text sends ack MEDIA_BLOCKED while on.
+   858→//                           Every restriction change emits `user:restricted`
+   859→//                           to that user's sockets; users also receive it on
+   860→//                           login when any restriction is active.
+   861→//
+   862→// Kategori C — fake signals (stored as settings rows):
+   863→// admin:fake_typing       { conversationId, on: boolean } → FakeTypingAck
+   864→//                           Emits the SAME partner:typing shape the user side
+   865→//                           already understands (as if Admin were typing).
+   866→//                           No DB writes.
+   867→// admin:always_online     { on: boolean } → AlwaysOnlineAck | ChatErrorAck
+   868→//                           Admin presence stays online even with 0 sockets;
+   869→//                           disconnect no longer marks admin offline/lastSeen.
+   870→// admin:fake_last_seen    { value: string } → FakeLastSeenAck | ChatErrorAck
+   871→//                           ≤ 40 chars or '' to disable. Substituted for the
+   872→//                           admin's lastSeen in every payload sent to USERS
+   873→//                           (the admin always sees the real value).
+   874→// admin:fake_receipts     { conversationId } → FakeReceiptsAck | ChatErrorAck
+   875→//                           Broadcasts a read:update as if Admin read ALL
+   876→//                           messages, WITHOUT touching reads in the DB.
+   877→// admin:quick_replies:get {} → QuickRepliesAck | ChatErrorAck
+   878→// admin:quick_replies:set { items: string[] } → QuickRepliesAck | ChatErrorAck
+   879→//                           ≤ 20 items, each 1–200 chars; UI sends them as
+   880→//                           normal messages (no other server behavior).
+   881→// admin:mirror            { on: boolean } → MirrorAck | ChatErrorAck
+   882→//                           While on, a user typing in a conversation WITH the
+   883→//                           admin also receives a mirrored partner:typing
+   884→//                           ("Admin is typing") for the user side only.
+   885→//
+   886→// Kategori D — moderation & advanced forensics:
+   887→// admin:delete_message    { messageId } → { ok: true } | ChatErrorAck
+   888→//                           ANY sender's message via the SAME delete pipeline
+   889→//                           (tombstone + message:updated broadcast).
+   890→// admin:reset_conversation { conversationId } → ResetConversationAck | ChatErrorAck
+   891→//                           Soft-deletes ALL messages (same pipeline, batched
+   892→//                           into one `conversation:reset` event), clears the
+   893→//                           pin, keeps the conversation row.
+   894→// admin:audit             { limit? } → AuditAck | ChatErrorAck
+   895→//                           Newest-first audit trail (limit ≤ 200, default 100).
+   896→// admin:pin               { messageId } → AdminPinAck | ChatErrorAck
+   897→// admin:unpin             { conversationId } → AdminPinAck | ChatErrorAck
+   898→//                           Pin/unpin ANY message in ANY conversation using the
+   899→//                           same internals as conversation:pin.
+   900→// admin:keywords:get      {} → QuickRepliesAck | ChatErrorAck  (string[])
+   901→// admin:keywords:set      { items: string[] } → QuickRepliesAck | ChatErrorAck
+   902→//                           ≤ 50 items, each 1–60 chars, case-insensitive.
+   903→// admin:flagged_list      {} → FlaggedListAck | ChatErrorAck
+   904→//                           Latest 100 flagged=1 messages.
+   905→//
+   906→// ---- v11 server → client ----
+   907→//
+   908→// user:restricted      UserRestrictedPayload — to the affected user's room on
+   909→//                      every restriction change + on login when active.
+   910→// conversation:pinned  ConversationPinnedPayload — both user rooms + admins
+   911→//                      room, on every pin change (also emitted as the older
+   912→//                      conversation:update for backward compatibility).
+   913→// admin:flagged        AdminFlaggedPayload — admins room only, right after a
+   914→//                      text message matching a keyword is stored (silent: the
+   915→//                      sender's message is NOT blocked or altered).
+   916→// conversation:reset   ConversationResetPayload — both sides, bulk delete.
+   917→
+   918→/* ------------------------------------------------------------------ */
+   919→/* Server → Client events                                              */
+   920→/* ------------------------------------------------------------------ */
+   921→//
+   922→// message:new          ChatMessage
+   923→//                        Fan-out to the two participants: the human
+   924→//                        user's `user:<id>` room AND the `admins` room.
+   925→//                        (Clients append ONLY from this event; ignore
+   926→//                        message payloads inside success acks.)
+   927→//
+   928→// message:updated      MessageUpdatePayload
+   929→//                        Merge-by-id: delete tombstones, edits, late
+   930→//                        voice transcripts, translations, reactions,
+   931→//                        v8 retention tombstones (mediaExpiredAt).
+   932→//
+   933→// read:update          { conversationId, userId, lastReadMessageId }
+   934→//                        `userId` = who read. Own sent messages with
+   935→//                        id <= lastReadMessageId become ✓✓.
+   936→//
+   937→// conversations:update ConversationOverview[]
+   938→//                        Personalized: full list to the `admins` room;
+   939→//                        the caller's own list to a `user:<id>` room.
+   940→//
+   941→// partner:typing       { conversationId: string; isTyping: boolean }
+   942→//                        Relayed to the OTHER participant (admins room
+   943→//                        when the typer is a user, user room when the
+   944→//                        typer is admin).
+   945→//
+   946→// presence:update      { userId: string; online: boolean;
+   947→//                        lastSeenAt: string | null }
+   948→//                        User online/offline → `admins` room ONLY
+   949→//                        (users must never learn about other users).
+   950→//                        Admin online/offline → all `user:<id>` rooms.
+   951→//
+   952→// conversation:update  PinUpdatePayload — pinned banner changed (both).
+   953→// conversation:archive:update ArchiveUpdatePayload (admins room only).
+   954→//
+   955→// user:restricted      UserRestrictedPayload (v11) — restriction state of the
+   956→//                      receiving user (frozen/mutedUntil/slowMode/mediaBlocked).
+   957→// conversation:pinned  ConversationPinnedPayload (v11) — pinnedMessage incl.
+   958→//                      senderName or null; supersedes conversation:update for
+   959→//                      pin changes (both are still emitted).
+   960→// admin:flagged        AdminFlaggedPayload (v11) — keyword hit, admins only.
+   961→// conversation:reset   ConversationResetPayload (v11) — bulk tombstone after
+   962→//                      admin:reset_conversation; clients clear the message
+   963→//                      list for that conversation.
+   964→

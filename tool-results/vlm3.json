@@ -1,0 +1,28 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "Based on the screenshot of the link-preview dialog:\n\n1.  **Title text:** \"GitHub - vercel/next.js: The React Framework\"\n2.  **Large OG image:** Yes, a large image is visible (showing the Next.js logo and \"The React Framework for the Web\" text).\n3.  **Description text visible:** Yes (\"The React Framework. Contribute to vercel/next.js development by creating an account on GitHub.\").\n4.  **Buttons at bottom:** \"Buka di browser\" (Open in browser) and \"Tutup\" (Close). *(Note: There is also a duplicate \"Buka di browser\" button floating above these two, which appears to be a UI glitch).*\n5.  **Anything broken:** Yes, there is a visual bug where an extra \"Buka di browser\" button is rendered floating awkwardly above the actual footer buttons.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1788222033,
+  "id": "202609010820318b2ea6ffb10e4739",
+  "model": "glm-5v-turbo",
+  "object": "chat.completion",
+  "request_id": "202609010820318b2ea6ffb10e4739",
+  "usage": {
+    "completion_tokens": 187,
+    "completion_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "prompt_tokens": 1471,
+    "prompt_tokens_details": {
+      "cached_tokens": 2
+    },
+    "total_tokens": 1658
+  }
+}

@@ -44,6 +44,20 @@
  *     push_subscriptions; dead endpoints pruned on 404/410)
  *   - Optional account PIN (SHA-256) protecting name-only logins
  *
+ * v11 — admin power features (server side):
+ *   - Intel: admin:xray (ip/ua/platform), message forensics (deleted_content
+ *     keeps the original text of deleted messages), edit history (edit_history),
+ *     side-effect-free peek, global search, per-user stats, conversation/user
+ *     export (txt/json, ≤ 5000 messages)
+ *   - Session control: kick / freeze / mute / slowmode / mediablock with
+ *     send-side enforcement (FROZEN → MUTED → MEDIA_BLOCKED → SLOW_MODE /
+ *     RATE_LIMITED → QUOTA_EXCEEDED) and live `user:restricted` pushes
+ *   - Fake signals: fake typing, always_online, fake last seen for users,
+ *     fake read receipts (no persistence), quick replies, mirror typing
+ *   - Moderation: admin delete any message, reset whole conversation,
+ *     audit_log table + admin:audit, export_user, admin pin (any message),
+ *     keyword scanner (silent flag → admin:flagged + admin:flagged_list)
+ *
  * Removed in v6 (v4/v5 customer-service tooling, no longer here): CRM
  * labels/notes, pre-chat topics, operating hours, quick replies, SLA
  * alerts, chatbot menu, star ratings, broadcast, CSV/print export,
@@ -70,8 +84,8 @@ import webpush from 'web-push'
 /* ------------------------------------------------------------------ */
 
 const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
-/** v10 — service version surfaced by the admin dashboard (Info aplikasi). */
-const SERVICE_VERSION = 'v10'
+/** v11 — service version surfaced by the admin dashboard (Info aplikasi). */
+const SERVICE_VERSION = 'v11'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -198,6 +212,29 @@ addColumn('messages', 'mime_type', 'TEXT')
 /* v8 migrations — server lightening (thumbnails + retention tombstones) */
 addColumn('messages', 'thumb_url', 'TEXT')
 addColumn('messages', 'media_expired_at', 'INTEGER')
+/* v11 migrations — admin power features.
+ * deleted_content keeps the ORIGINAL text of deleted messages (forensics);
+ * edit_history keeps previous revisions of edited messages (JSON array);
+ * flagged marks messages whose text matched an admin keyword.
+ * users.* columns power the session-control features (kick/freeze/mute/
+ * slowmode/mediablock). bun:sqlite has no ALTER guard — addColumn try/catches. */
+addColumn('messages', 'deleted_content', 'TEXT')
+addColumn('messages', 'edit_history', 'TEXT')
+addColumn('messages', 'flagged', 'INTEGER DEFAULT 0')
+addColumn('users', 'frozen', 'INTEGER DEFAULT 0')
+addColumn('users', 'muted_until', 'INTEGER DEFAULT 0')
+addColumn('users', 'slow_mode', 'INTEGER DEFAULT 0')
+addColumn('users', 'media_blocked', 'INTEGER DEFAULT 0')
+
+/** v11 — audit trail of admin actions (admin:audit). */
+db.run(`
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    at INTEGER NOT NULL
+  )
+`)
 
 db.run(`
   CREATE TABLE IF NOT EXISTS message_reactions (
@@ -227,6 +264,11 @@ interface UserRow {
   created_at: number
   last_seen_at: number
   pin_hash?: string | null
+  /* v11 — session control columns (0 = off). */
+  frozen?: number | null
+  muted_until?: number | null
+  slow_mode?: number | null
+  media_blocked?: number | null
 }
 
 interface ConversationRow {
@@ -259,6 +301,10 @@ interface MessageRow {
   /* v8 — tiny preview URL for photos/videos; retention tombstone stamp. */
   thumb_url?: string | null
   media_expired_at?: number | null
+  /* v11 — forensics / edit history / keyword flag. */
+  deleted_content?: string | null
+  edit_history?: string | null
+  flagged?: number | null
 }
 
 /* ------------------------------ API types ------------------------------ */
@@ -322,6 +368,8 @@ interface ConversationOverviewApi {
   /** v5 — pinned message (banner on both sides). */
   pinnedMessageId?: number | null
   pinned?: { id: number; senderId: string; snippet: string; type: string } | null
+  /** v11 — rich pinned snapshot incl. the sender display name. */
+  pinnedMessage?: { messageId: number; senderId: string; senderName: string; snippet: string; type: string } | null
 }
 
 /* ------------------- settings helpers (VAPID keys only) ------------------- */
@@ -364,6 +412,44 @@ const getAppSettings = (): AppSettingsApi => ({
 /** Fan out the freshest app settings to EVERY connected client. */
 const broadcastAppSettings = () => {
   io.emit('app:settings:update', getAppSettings())
+}
+
+/* -------- v11 — fake-signal settings + shared string helpers -------- */
+
+/** settings row as boolean ('1' = true). */
+const getBoolSetting = (key: string): boolean => getSetting(key) === '1'
+
+/** Parsed quick_replies / keywords JSON arrays (validated on write). */
+const getSettingList = (key: string): string[] => {
+  try {
+    const raw = getSetting(key)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * v11 — lastSeen string of `userId` as seen by `viewerId`. When a fake
+ * last-seen string is configured, USERS see the fake value for the ADMIN;
+ * the admin always sees the real timestamp.
+ */
+const lastSeenFor = (viewerId: string, userId: string, realIso: string | null): string | null => {
+  if (userId === ADMIN_ID && viewerId !== ADMIN_ID) {
+    const fake = getSetting('fake_last_seen')
+    if (typeof fake === 'string' && fake.length > 0) return fake
+  }
+  return realIso
+}
+
+/** First keyword (case-insensitive substring) matching `content`, if any. */
+const matchedKeyword = (content: string): string | null => {
+  const lower = content.toLowerCase()
+  for (const keyword of getSettingList('keywords')) {
+    if (keyword.length > 0 && lower.includes(keyword.toLowerCase())) return keyword
+  }
+  return null
 }
 
 /** Directory size helper (bytes) for the dashboard storage panel. */
@@ -722,11 +808,12 @@ const attachReplyPreviews = (rows: MessageRow[], messages: ChatMessageApi[]) => 
   }
 }
 
-const toPartnerInfo = (user: UserRow): PartnerInfoApi => ({
+const toPartnerInfo = (user: UserRow, viewerId?: string): PartnerInfoApi => ({
   id: user.id,
   name: user.name,
   online: isOnline(user.id),
-  lastSeenAt: new Date(user.last_seen_at).toISOString(),
+  // v11 — users may see a fake last-seen for the admin (fake_last_seen).
+  lastSeenAt: lastSeenFor(viewerId ?? user.id, user.id, new Date(user.last_seen_at).toISOString()),
 })
 
 /** Ordered pair so a conversation between two users is unique. */
@@ -889,6 +976,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         pm.type AS pin_type,
         pm.deleted_at AS pin_deleted,
         pm.file_name AS pin_file_name,
+        pu.name AS pin_sender_name,
         (SELECT r.last_read_message_id FROM reads r
           WHERE r.conversation_id = c.id
             AND r.user_id = (CASE WHEN c.user_a_id = $me THEN c.user_b_id ELSE c.user_a_id END)
@@ -910,6 +998,8 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
                     WHERE m2.conversation_id = c.id ORDER BY m2.id DESC LIMIT 1)
       LEFT JOIN messages pm
         ON pm.id = c.pinned_message_id
+      LEFT JOIN users pu
+        ON pu.id = pm.sender_id
       WHERE c.user_a_id = $me OR c.user_b_id = $me
       ORDER BY c.last_message_at DESC`
     )
@@ -935,6 +1025,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     pin_type: string | null
     pin_deleted: number | null
     pin_file_name: string | null
+    pin_sender_name: string | null
     partner_read: number | null
     unread: number
   }>
@@ -945,7 +1036,8 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
       id: r.partner_id,
       name: r.partner_name,
       online: isOnline(r.partner_id),
-      lastSeenAt: new Date(r.partner_last_seen).toISOString(),
+      // v11 — a user viewer may get the admin's fake last-seen here.
+      lastSeenAt: lastSeenFor(userId, r.partner_id, new Date(r.partner_last_seen).toISOString()),
     },
     lastMessage:
       r.last_id != null
@@ -983,6 +1075,22 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
             type: r.pin_type ?? 'text',
           }
         : null,
+    // v11 — rich pinned snapshot (sender display name included).
+    pinnedMessage:
+      r.pin_id != null
+        ? {
+            messageId: r.pin_id,
+            senderId: r.pin_sender as string,
+            senderName: r.pin_sender_name ?? '',
+            snippet: snippetOf({
+              type: r.pin_type ?? 'text',
+              content: r.pin_content ?? '',
+              deleted_at: r.pin_deleted,
+              file_name: r.pin_file_name,
+            }),
+            type: r.pin_type ?? 'text',
+          }
+        : null,
   }))
 }
 
@@ -992,7 +1100,14 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
 
 const onlineSockets = new Map<string, Set<string>>() // userId -> socket ids
 
-const isOnline = (userId: string) => (onlineSockets.get(userId)?.size ?? 0) > 0
+/**
+ * v11 — `always_online` fake signal: the ADMIN counts as online even with
+ * zero live sockets while the setting is on.
+ */
+const isOnline = (userId: string) => {
+  if (userId === ADMIN_ID && getBoolSetting('always_online')) return true
+  return (onlineSockets.get(userId)?.size ?? 0) > 0
+}
 
 /** Adds a socket for the user. Returns true if the user just came online. */
 const addOnlineSocket = (userId: string, socketId: string) => {
@@ -1065,12 +1180,14 @@ const insertAndFanOut = (
     mimeType?: string
     /* v8 — tiny preview URL for photos/videos. */
     thumbUrl?: string
+    /* v11 — 1 when the text matched an admin keyword (silent flag). */
+    flagged?: number
   } = {}
 ): ChatMessageApi => {
   const ts = now()
   const hasMediaMeta = type === 'file' || type === 'image' || type === 'voice'
   const result = db.run(
-    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     [
       conversation.id,
       senderId,
@@ -1083,6 +1200,7 @@ const insertAndFanOut = (
       hasMediaMeta && typeof opts.fileSize === 'number' ? opts.fileSize : null,
       hasMediaMeta ? (opts.mimeType ?? null) : null,
       opts.thumbUrl ?? null,
+      opts.flagged ?? 0,
     ]
   )
   db.run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [ts, conversation.id])
@@ -1357,6 +1475,450 @@ const pinHash = (pin: string, userId: string) =>
   createHash('sha256').update(`${userId}:${pin}`).digest('hex')
 
 /* ------------------------------------------------------------------ */
+/* v11 — admin power features: shared helpers                          */
+/* ------------------------------------------------------------------ */
+
+/** Cap for export payloads (admin:export_conversation / admin:export_user). */
+const MAX_EXPORT_MESSAGES = 5000
+/** edit_history keeps at most this many previous revisions. */
+const MAX_EDIT_HISTORY_ENTRIES = 50
+
+/** v11 — append-only audit trail (admin:audit). Detail is trimmed hard. */
+const audit = (action: string, detail: string) => {
+  try {
+    db.run('INSERT INTO audit_log (action, detail, at) VALUES (?, ?, ?)', [
+      action,
+      detail.slice(0, 400),
+      now(),
+    ])
+  } catch (err) {
+    console.error('[audit] gagal:', (err as Error)?.message ?? err)
+  }
+}
+
+/* -------------------- v11 — connection metadata (xray) -------------------- */
+
+interface ConnMeta {
+  ip: string | null
+  userAgent: string | null
+  firstSeen: number
+  socketIds: Set<string>
+}
+
+/** userId → last connection metadata. Memory only; cleaned on disconnect. */
+const connMeta = new Map<string, ConnMeta>()
+
+const firstForwardedIp = (socket: IoSocket): string | null => {
+  const fwd = socket.handshake.headers['x-forwarded-for']
+  const raw = Array.isArray(fwd) ? fwd[0] : typeof fwd === 'string' ? fwd : null
+  const first = raw?.split(',')[0]?.trim()
+  if (first) return first
+  return typeof socket.handshake.address === 'string' ? socket.handshake.address : null
+}
+
+/** Remember ip / user-agent / socket ids for `userId` at auth time. */
+const trackConnMeta = (socket: IoSocket, userId: string) => {
+  const ip = firstForwardedIp(socket)
+  const uaHeader = socket.handshake.headers['user-agent']
+  const userAgent = typeof uaHeader === 'string' ? uaHeader : null
+  const meta =
+    connMeta.get(userId) ?? { ip, userAgent, firstSeen: now(), socketIds: new Set<string>() }
+  meta.socketIds.add(socket.id)
+  if (ip) meta.ip = ip
+  if (userAgent) meta.userAgent = userAgent
+  connMeta.set(userId, meta)
+}
+
+/** Drop one socket id; the whole entry is cleared with the user's last socket. */
+const dropConnMeta = (userId: string, socketId: string) => {
+  const meta = connMeta.get(userId)
+  if (!meta) return
+  meta.socketIds.delete(socketId)
+  if (meta.socketIds.size === 0) connMeta.delete(userId)
+}
+
+/** Coarse platform guess derived from the user-agent string. */
+const platformOf = (userAgent: string | null): string => {
+  if (!userAgent) return 'unknown'
+  if (/android/i.test(userAgent)) return 'Android'
+  if (/iphone|ipad|ipod/i.test(userAgent)) return 'iOS'
+  if (/windows/i.test(userAgent)) return 'Windows'
+  if (/mac os x|macintosh/i.test(userAgent)) return 'macOS'
+  if (/linux/i.test(userAgent)) return 'Linux'
+  return 'other'
+}
+
+/* ------------------ v11 — session control (restrictions) ------------------ */
+
+/** Current restriction state of a user row (the admin is never restricted). */
+const restrictionsOf = (user: UserRow) => ({
+  frozen: (user.frozen ?? 0) === 1,
+  mutedUntil:
+    (user.muted_until ?? 0) > now() ? new Date(user.muted_until as number).toISOString() : null,
+  slowMode: user.slow_mode ?? 0,
+  mediaBlocked: (user.media_blocked ?? 0) === 1,
+})
+
+/**
+ * Push `user:restricted` (fresh state) to every socket of `userId`.
+ * Restriction-change handlers always push (so the UI can clear stale state);
+ * the auth-time push only fires when at least one restriction is ACTIVE
+ * (a clean login must not receive a pointless restriction event).
+ */
+const pushRestrictedTo = (userId: string, onlyWhenActive = false) => {
+  const user = findUserById(userId)
+  if (!user || userId === ADMIN_ID) return
+  const state = restrictionsOf(user)
+  const anyActive = state.frozen || !!state.mutedUntil || state.slowMode > 0 || state.mediaBlocked
+  if (onlyWhenActive && !anyActive) return
+  io.to(`user:${userId}`).emit('user:restricted', state)
+}
+
+/** Seconds until the oldest stamp in the user's sliding window expires. */
+const rateRetryAfterSeconds = (userId: string, bucket: string): number => {
+  const stamps = rateBuckets.get(`${bucket}:${userId}`) ?? []
+  if (stamps.length === 0) return 1
+  const oldest = Math.min(...stamps)
+  return Math.max(1, Math.ceil((oldest + 60_000 - now()) / 1000))
+}
+
+/* --------------- v11 — shared delete pipeline (forensics-safe) --------------- */
+
+/**
+ * Soft-delete one message with the EXACT existing pipeline, extended for
+ * v11 forensics: the original content is preserved in `deleted_content`
+ * BEFORE redaction (only on the first delete — never overwritten later).
+ * Broadcasts the same `message:updated` tombstone the old inline code sent.
+ */
+const tombstoneMessage = (row: MessageRow, conversation: ConversationRow, ts: number) => {
+  db.run(
+    `UPDATE messages SET
+       deleted_content = CASE WHEN deleted_at IS NULL AND content != '' THEN content ELSE deleted_content END,
+       content = '', transcript = NULL, file_name = NULL, file_size = NULL, mime_type = NULL,
+       deleted_at = COALESCE(deleted_at, ?)
+     WHERE id = ?`,
+    [ts, row.id]
+  )
+  const payload = {
+    id: row.id,
+    conversationId: conversation.id,
+    deletedAt: new Date(ts).toISOString(),
+    content: '',
+    type: row.type ?? 'text',
+  }
+  io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+  io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+  io.to('admins').emit('message:updated', payload)
+  pushConversationsTo(conversation.user_a_id)
+  pushConversationsTo(conversation.user_b_id)
+}
+
+/* ---------------------------- v11 — pin core ---------------------------- */
+
+/**
+ * Shared pin core for `conversation:pin` (v5) and the v11 `admin:pin` /
+ * `admin:unpin` events. `messageId = null` clears the pin. Emits BOTH the
+ * legacy `conversation:update` payload and the richer `conversation:pinned`.
+ */
+const applyConversationPin = (
+  conversation: ConversationRow,
+  messageId: number | null
+): 'ok' | 'not_found' => {
+  let pinned: { id: number; senderId: string; snippet: string; type: string } | null = null
+  if (messageId != null) {
+    const row = db
+      .query('SELECT * FROM messages WHERE id = ? AND conversation_id = ?')
+      .get(messageId, conversation.id) as MessageRow | null
+    if (!row) return 'not_found'
+    db.run('UPDATE conversations SET pinned_message_id = ? WHERE id = ?', [
+      messageId,
+      conversation.id,
+    ])
+    pinned = { id: row.id, senderId: row.sender_id, snippet: snippetOf(row), type: row.type ?? 'text' }
+  } else {
+    db.run('UPDATE conversations SET pinned_message_id = NULL WHERE id = ?', [conversation.id])
+  }
+  const pinnedMessage = pinned
+    ? {
+        messageId: pinned.id,
+        senderId: pinned.senderId,
+        senderName: findUserById(pinned.senderId)?.name ?? 'Admin',
+        snippet: pinned.snippet,
+        type: pinned.type,
+      }
+    : null
+  const legacyPayload = {
+    conversationId: conversation.id,
+    pinnedMessageId: pinned?.id ?? null,
+    pinned,
+  }
+  const payload = { conversationId: conversation.id, pinnedMessageId: pinned?.id ?? null, pinnedMessage }
+  for (const userId of [conversation.user_a_id, conversation.user_b_id]) {
+    io.to(`user:${userId}`).emit('conversation:update', legacyPayload)
+    io.to(`user:${userId}`).emit('conversation:pinned', payload)
+  }
+  io.to('admins').emit('conversation:update', legacyPayload)
+  io.to('admins').emit('conversation:pinned', payload)
+  pushConversationsTo(conversation.user_a_id)
+  pushConversationsTo(conversation.user_b_id)
+  return 'ok'
+}
+
+/* -------------------------- v11 — intel builders -------------------------- */
+
+/** Shared profile builder for `admin:xray` and `admin:export_user`. */
+const buildXrayProfile = (userId: string) => {
+  const user = findUserById(userId)
+  if (!user) return null
+  const counts = db
+    .query(
+      `SELECT COUNT(*) AS messages,
+              COALESCE(SUM(CASE WHEN type IN ('image','voice','file') THEN 1 ELSE 0 END), 0) AS media,
+              COALESCE(SUM(CASE WHEN file_size IS NOT NULL AND deleted_at IS NULL AND media_expired_at IS NULL THEN file_size ELSE 0 END), 0) AS bytes,
+              MAX(created_at) AS last_at
+         FROM messages WHERE sender_id = ?`
+    )
+    .get(userId) as { messages: number; media: number; bytes: number; last_at: number | null }
+  const meta = connMeta.get(userId)
+  return {
+    id: user.id,
+    name: user.name,
+    createdAt: new Date(user.created_at).toISOString(),
+    lastSeen: new Date(user.last_seen_at).toISOString(),
+    online: isOnline(user.id),
+    socketCount: onlineSockets.get(user.id)?.size ?? 0,
+    messageCount: Number(counts.messages ?? 0),
+    mediaCount: Number(counts.media ?? 0),
+    mediaBytes: Number(counts.bytes ?? 0),
+    lastMessageAt: counts.last_at ? new Date(counts.last_at).toISOString() : null,
+    ip: meta?.ip ?? null,
+    userAgent: meta?.userAgent ?? null,
+    platform: platformOf(meta?.userAgent ?? null),
+  }
+}
+
+/** Shared per-user stats builder (admin:user_stats / admin:export_user). */
+const buildUserStats = (userId: string) => {
+  const nowMs = now()
+  const DAY_MS = 86_400_000
+  const dailyRows = db
+    .query(
+      `SELECT CAST(created_at / 86400000 AS INTEGER) AS day, COUNT(*) AS c
+       FROM messages WHERE sender_id = ? AND deleted_at IS NULL AND created_at >= ?
+       GROUP BY day`
+    )
+    .all(userId, nowMs - 13 * DAY_MS) as { day: number; c: number }[]
+  const dailyMap = new Map(dailyRows.map((r) => [r.day, r.c]))
+  const perDay: { day: string; count: number }[] = []
+  for (let i = 13; i >= 0; i -= 1) {
+    const epochDay = Math.floor(nowMs / DAY_MS) - i
+    perDay.push({
+      day: new Date(epochDay * DAY_MS).toISOString().slice(0, 10),
+      count: dailyMap.get(epochDay) ?? 0,
+    })
+  }
+  const hourlyRows = db
+    .query(
+      `SELECT CAST(strftime('%H', created_at / 1000, 'unixepoch') AS INTEGER) AS h, COUNT(*) AS c
+       FROM messages WHERE sender_id = ? AND deleted_at IS NULL AND created_at >= ?
+       GROUP BY h`
+    )
+    .all(userId, nowMs - 7 * DAY_MS) as { h: number; c: number }[]
+  const topHours = Array.from({ length: 24 }, (_, hour) => ({ hour, count: 0 }))
+  for (const r of hourlyRows) {
+    if (r.h >= 0 && r.h < 24) topHours[r.h].count = r.c
+  }
+  const totals = db
+    .query(
+      `SELECT COUNT(*) AS total,
+              COALESCE(SUM(CASE WHEN type IN ('image','voice','file') THEN 1 ELSE 0 END), 0) AS media
+         FROM messages WHERE sender_id = ? AND deleted_at IS NULL`
+    )
+    .get(userId) as { total: number; media: number }
+  return {
+    perDay,
+    topHours,
+    total: Number(totals.total ?? 0),
+    media: Number(totals.media ?? 0),
+  }
+}
+
+/** Latest tombstoned messages (admin:forensics) — newest deletions first. */
+const forensicsItems = (conversationId: string | null) => {
+  const sql = `SELECT m.id, m.conversation_id, m.type, m.content, m.deleted_content, m.created_at, m.deleted_at, u.name AS sender_name
+                 FROM messages m LEFT JOIN users u ON u.id = m.sender_id
+                WHERE m.deleted_at IS NOT NULL ${
+                  conversationId ? 'AND m.conversation_id = ?' : ''
+                }
+                ORDER BY m.deleted_at DESC, m.id DESC LIMIT 100`
+  const rows = (conversationId ? db.query(sql).all(conversationId) : db.query(sql).all()) as Array<{
+    id: number
+    conversation_id: string
+    type: string | null
+    content: string
+    deleted_content: string | null
+    created_at: number
+    deleted_at: number
+    sender_name: string | null
+  }>
+  return rows.map((r) => ({
+    messageId: r.id,
+    conversationId: r.conversation_id,
+    senderName: r.sender_name ?? 'Tidak diketahui',
+    type: r.type ?? 'text',
+    // v11 keeps the original in deleted_content; older tombstones are empty.
+    content: r.deleted_content ?? (r.content || ''),
+    createdAt: new Date(r.created_at).toISOString(),
+    deletedAt: new Date(r.deleted_at).toISOString(),
+  }))
+}
+
+/** Global case-insensitive content search (admin:search), newest first. */
+const searchItems = (query: string) => {
+  const rows = db
+    .query(
+      `SELECT m.id, m.conversation_id, m.content, m.type, m.created_at, m.file_name,
+              u.name AS sender_name
+         FROM messages m LEFT JOIN users u ON u.id = m.sender_id
+        WHERE m.deleted_at IS NULL AND instr(lower(m.content), lower(?)) > 0
+        ORDER BY m.id DESC LIMIT 100`
+    )
+    .all(query) as Array<{
+    id: number
+    conversation_id: string
+    content: string
+    type: string | null
+    created_at: number
+    file_name: string | null
+    sender_name: string | null
+  }>
+  const convNames = new Map<string, string>()
+  const needle = query.toLowerCase()
+  return rows.map((r) => {
+    let conversationName = convNames.get(r.conversation_id)
+    if (conversationName === undefined) {
+      const conv = getConversation(r.conversation_id)
+      conversationName = conv ? (findUserById(getPartnerId(conv, ADMIN_ID))?.name ?? '') : ''
+      convNames.set(r.conversation_id, conversationName)
+    }
+    const idx = r.content.toLowerCase().indexOf(needle)
+    const start = Math.max(0, idx - 40)
+    const excerpt = r.content.slice(start, start + 140)
+    const snippet = `${start > 0 ? '…' : ''}${excerpt}${
+      start + 140 < r.content.length ? '…' : ''
+    }`
+    return {
+      messageId: r.id,
+      conversationId: r.conversation_id,
+      senderName: r.sender_name ?? '',
+      type: r.type ?? 'text',
+      snippet,
+      createdAt: new Date(r.created_at).toISOString(),
+      conversationName,
+    }
+  })
+}
+
+/* ------------------------- v11 — export builders ------------------------- */
+
+/** txt transcript timestamp, e.g. "[12/08/2025 14:03]". */
+const exportStamp = (ms: number) => {
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `[${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}]`
+}
+
+/** File-name-safe slug of a display name. */
+const sanitizeFileNamePart = (name: string) =>
+  name
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'chat'
+
+/** Full conversation transcript (admin:export_conversation). */
+const buildConversationExport = (conversation: ConversationRow, format: 'txt' | 'json') => {
+  const rows = db
+    .query(
+      `SELECT * FROM (
+         SELECT * FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?
+       ) ORDER BY id ASC`
+    )
+    .all(conversation.id, MAX_EXPORT_MESSAGES) as MessageRow[]
+  const nameById = new Map<string, string>()
+  for (const uid of [conversation.user_a_id, conversation.user_b_id]) {
+    nameById.set(uid, findUserById(uid)?.name ?? uid)
+  }
+  const partnerName =
+    nameById.get(getPartnerId(conversation, ADMIN_ID)) ?? nameById.get(ADMIN_ID) ?? 'pengguna'
+  const date = new Date().toISOString().slice(0, 10)
+  const fileName = `chatkita-${sanitizeFileNamePart(partnerName)}-${date}.${format}`
+  if (format === 'json') {
+    const content = JSON.stringify(
+      {
+        exportedAt: new Date().toISOString(),
+        conversationId: conversation.id,
+        participants: [...nameById.entries()].map(([id, name]) => ({ id, name })),
+        messages: rows.map((r) => ({
+          id: r.id,
+          senderId: r.sender_id,
+          senderName: nameById.get(r.sender_id) ?? r.sender_id,
+          type: r.type ?? 'text',
+          content: r.deleted_at ? '' : r.content,
+          deletedContent: r.deleted_content ?? null,
+          deletedAt: r.deleted_at ? new Date(r.deleted_at).toISOString() : null,
+          createdAt: new Date(r.created_at).toISOString(),
+          fileName: r.file_name ?? null,
+          fileSize: r.file_size ?? null,
+          mimeType: r.mime_type ?? null,
+        })),
+      },
+      null,
+      2
+    )
+    return { format, fileName, content, count: rows.length }
+  }
+  const lines: string[] = [
+    'Transkrip percakapan ChatKita',
+    `Percakapan: ${conversation.id}`,
+    `Partisipan: ${[...nameById.values()].join(' & ')}`,
+    `Diekspor: ${new Date().toISOString()}`,
+    `Jumlah pesan: ${rows.length}`,
+    '',
+  ]
+  for (const r of rows) {
+    const who = nameById.get(r.sender_id) ?? r.sender_id
+    const what = r.deleted_at
+      ? `[dihapus]${r.deleted_content ? ` (asli: ${r.deleted_content.slice(0, 200)})` : ''}`
+      : snippetOf(r)
+    lines.push(`${exportStamp(r.created_at)} ${who}: ${what}`)
+  }
+  return { format, fileName, content: lines.join('\n'), count: rows.length }
+}
+
+/** JSON dump of one user (profile + stats + messages) for admin:export_user. */
+const buildUserExport = (userId: string) => {
+  const user = findUserById(userId)
+  const rows = db
+    .query(
+      `SELECT * FROM (SELECT * FROM messages WHERE sender_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`
+    )
+    .all(userId, MAX_EXPORT_MESSAGES) as MessageRow[]
+  const content = JSON.stringify(
+    {
+      exportedAt: new Date().toISOString(),
+      profile: buildXrayProfile(userId),
+      stats: buildUserStats(userId),
+      messages: rows.map(toChatMessage),
+    },
+    null,
+    2
+  )
+  const date = new Date().toISOString().slice(0, 10)
+  const fileName = `chatkita-user-${sanitizeFileNamePart(user?.name ?? userId)}-${date}.json`
+  return { fileName, content, count: rows.length }
+}
+
+/* ------------------------------------------------------------------ */
 /* Connection                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -1442,6 +2004,8 @@ io.on('connection', (socket) => {
 
       socket.data.userId = user.id
       socket.join(`user:${user.id}`)
+      // v11 — remember connection metadata (ip/user-agent) for admin:xray.
+      trackConnMeta(socket, user.id)
       const becameOnline = addOnlineSocket(user.id, socket.id)
       if (becameOnline) {
         // User presence is private: only the admins room may know.
@@ -1460,7 +2024,7 @@ io.on('connection', (socket) => {
         user: { id: user.id, name: user.name, hasPin: !!user.pin_hash },
         conversationId: conversation.id,
         partner: admin
-          ? toPartnerInfo(admin)
+          ? toPartnerInfo(admin, user.id)
           : { id: ADMIN_ID, name: ADMIN_NAME, online: false, lastSeenAt: null },
         messages: page.messages,
         // v8 — older pages load on demand via `messages:older`.
@@ -1475,6 +2039,9 @@ io.on('connection', (socket) => {
 
       // A (newly registered) user must immediately appear in the admin sidebar.
       pushConversationsTo(ADMIN_ID)
+      // v11 — a restricted user learns their restriction state right after
+      // login (only sent when at least one restriction is active).
+      pushRestrictedTo(user.id, true)
     })
   )
 
@@ -1491,6 +2058,8 @@ io.on('connection', (socket) => {
 
       socket.data.userId = ADMIN_ID
       socket.join('admins')
+      // v11 — remember connection metadata (ip/user-agent) for admin:xray.
+      trackConnMeta(socket, ADMIN_ID)
       const becameOnline = addOnlineSocket(ADMIN_ID, socket.id)
       if (becameOnline) {
         // Admin presence is public by design.
@@ -1537,7 +2106,7 @@ io.on('connection', (socket) => {
         messages: page.messages,
         // v8 — older pages load on demand via `messages:older`.
         hasMore: page.hasMore,
-        partner: toPartnerInfo(partner),
+        partner: toPartnerInfo(partner, me),
         partnerLastReadId: getReadUpTo(conversation.id, partner.id),
         // v5 — where I had read BEFORE this call → "new messages" divider.
         lastReadBefore,
@@ -1598,6 +2167,30 @@ io.on('connection', (socket) => {
 
       const type = (typeof data?.type === 'string' ? data.type : 'text') as MessageType
       const content = typeof data?.content === 'string' ? data.content : ''
+
+      // v11 — admin session control, enforced in order:
+      // frozen → muted → mediaBlocked (rate/slowmode/quota checks follow below).
+      const senderRow = me !== ADMIN_ID ? findUserById(me) : null
+      if (senderRow) {
+        if ((senderRow.frozen ?? 0) === 1) {
+          ack({ ok: false, error: 'FROZEN' })
+          return
+        }
+        const mutedUntil = senderRow.muted_until ?? 0
+        if (mutedUntil > now()) {
+          ack({
+            ok: false,
+            error: 'MUTED',
+            remainingSeconds: Math.max(1, Math.ceil((mutedUntil - now()) / 1000)),
+          })
+          return
+        }
+        if (type !== 'text' && (senderRow.media_blocked ?? 0) === 1) {
+          ack({ ok: false, error: 'MEDIA_BLOCKED' })
+          return
+        }
+      }
+
       let trimmed: string
       let fileMeta: { fileName: string; fileSize: number; mimeType: string } | null = null
       let thumbUrlRef: string | undefined
@@ -1688,9 +2281,21 @@ io.on('connection', (socket) => {
           : undefined
 
       // v8 guards — per-account flood & storage protection.
+      // v11 — a personal slow_mode tightens the TEXT limit; hitting it acks
+      // SLOW_MODE (with the retry window) instead of the generic RATE_LIMITED.
       if (type === 'text') {
-        if (!rateAllowed(me, 'text', RATE_TEXT_PER_MIN)) {
-          ack({ ok: false, error: 'RATE_LIMITED' })
+        const slowMode = senderRow?.slow_mode ?? 0
+        const textLimit = slowMode > 0 ? Math.min(slowMode, RATE_TEXT_PER_MIN) : RATE_TEXT_PER_MIN
+        if (!rateAllowed(me, 'text', textLimit)) {
+          if (slowMode > 0 && slowMode < RATE_TEXT_PER_MIN) {
+            ack({
+              ok: false,
+              error: 'SLOW_MODE',
+              remainingSeconds: rateRetryAfterSeconds(me, 'text'),
+            })
+          } else {
+            ack({ ok: false, error: 'RATE_LIMITED' })
+          }
           return
         }
       } else if (!rateAllowed(me, 'media', RATE_MEDIA_PER_MIN)) {
@@ -1701,13 +2306,30 @@ io.on('connection', (socket) => {
         return
       }
 
+      // v11 — keyword scanner: silent flag only; the send is NEVER blocked
+      // or altered. The first matching keyword wins.
+      const flagKeyword = type === 'text' ? matchedKeyword(trimmed) : null
+
       const message = insertAndFanOut(conversation, me, trimmed, type, {
         replyToId,
         durationMs,
         ...(fileMeta ?? {}),
         ...(thumbUrlRef ? { thumbUrl: thumbUrlRef } : {}),
+        ...(flagKeyword ? { flagged: 1 } : {}),
       })
       ack({ ok: true, message })
+
+      // v11 — keyword hit → live intel to the admins room.
+      if (flagKeyword) {
+        io.to('admins').emit('admin:flagged', {
+          messageId: message.id,
+          conversationId: conversation.id,
+          senderName: senderRow?.name ?? findUserById(me)?.name ?? me,
+          snippet: trimmed.slice(0, 140),
+          keyword: flagKeyword,
+          createdAt: message.createdAt,
+        })
+      }
 
       // Voice notes: transcribe in the background (data URL or db/media file).
       if (type === 'voice') void transcribeVoice(message.id, conversation.id, trimmed)
@@ -1754,25 +2376,10 @@ io.on('connection', (socket) => {
         return
       }
       const ts = now()
-      // Redact content (and v7 file metadata) so deleted messages leave no
-      // trace in any future payload.
-      db.run(
-        `UPDATE messages SET content = '', transcript = NULL, file_name = NULL, file_size = NULL, mime_type = NULL, deleted_at = ? WHERE id = ?`,
-        [ts, id]
-      )
-      const payload = {
-        id,
-        conversationId: conversation.id,
-        deletedAt: new Date(ts).toISOString(),
-        content: '',
-        type: row.type ?? 'text',
-      }
+      // v11 — shared delete pipeline: the ORIGINAL content is preserved in
+      // messages.deleted_content (forensics) before the tombstone redaction.
+      tombstoneMessage(row, conversation, ts)
       ack({ ok: true })
-      io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
-      io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
-      io.to('admins').emit('message:updated', payload)
-      pushConversationsTo(conversation.user_a_id)
-      pushConversationsTo(conversation.user_b_id)
       console.log(`Message ${id} deleted by ${me.slice(0, 8)}`)
     })
   )
@@ -1810,6 +2417,18 @@ io.on('connection', (socket) => {
       // relay must additionally reach the `admins` room.
       io.to(`user:${partnerId}`).emit('partner:typing', payload)
       if (partnerId === ADMIN_ID) io.to('admins').emit('partner:typing', payload)
+      // v11 — mirror_mode fake signal: when a USER types to the admin, the
+      // user ALSO sees "Admin sedang mengetik" (user-side audience only).
+      if (
+        getBoolSetting('mirror_mode') &&
+        me !== ADMIN_ID &&
+        isParticipant(conversation, ADMIN_ID)
+      ) {
+        io.to(`user:${me}`).emit('partner:typing', {
+          conversationId: conversation.id,
+          isTyping: data?.isTyping === true,
+        })
+      }
     })
   )
 
@@ -1892,7 +2511,29 @@ io.on('connection', (socket) => {
         return
       }
       const ts = now()
-      db.run('UPDATE messages SET content = ?, edited_at = ? WHERE id = ?', [content, ts, id])
+      // v11 — keep the previous text as an edit_history revision (forensics).
+      let history: { text: string; at: number }[] = []
+      try {
+        const parsed = row.edit_history ? JSON.parse(row.edit_history) : []
+        if (Array.isArray(parsed)) {
+          history = parsed.filter(
+            (e): e is { text: string; at: number } =>
+              !!e && typeof e === 'object' && typeof (e as any).text === 'string'
+          )
+        }
+      } catch {
+        /* corrupt history — start fresh */
+      }
+      history.push({ text: row.content, at: row.edited_at ?? row.created_at })
+      if (history.length > MAX_EDIT_HISTORY_ENTRIES) {
+        history = history.slice(-MAX_EDIT_HISTORY_ENTRIES)
+      }
+      db.run('UPDATE messages SET content = ?, edited_at = ?, edit_history = ? WHERE id = ?', [
+        content,
+        ts,
+        JSON.stringify(history),
+        id,
+      ])
       ack({ ok: true })
       const payload = {
         id,
@@ -1973,33 +2614,25 @@ io.on('connection', (socket) => {
         ack({ ok: false, error: 'NOT_FOUND' })
         return
       }
-      let pinned: { id: number; senderId: string; snippet: string; type: string } | null = null
-      if (data?.messageId != null) {
-        const id = Number(data.messageId)
-        const row =
-          Number.isInteger(id) && id > 0
-            ? (db
-                .query('SELECT * FROM messages WHERE id = ? AND conversation_id = ?')
-                .get(id, conversation.id) as MessageRow | null)
-            : null
-        if (!row) {
-          ack({ ok: false, error: 'NOT_FOUND' })
-          return
-        }
-        db.run('UPDATE conversations SET pinned_message_id = ? WHERE id = ?', [id, conversation.id])
-        pinned = { id: row.id, senderId: row.sender_id, snippet: snippetOf(row), type: row.type ?? 'text' }
-      } else {
-        db.run('UPDATE conversations SET pinned_message_id = NULL WHERE id = ?', [conversation.id])
+      // v11 — the pin core is shared with admin:pin / admin:unpin; it emits
+      // both the legacy conversation:update and the new conversation:pinned.
+      const messageId = data?.messageId != null ? Number(data.messageId) : null
+      if (messageId != null && (!Number.isInteger(messageId) || messageId <= 0)) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
       }
-      const payload = {
+      const result = applyConversationPin(conversation, messageId)
+      if (result === 'not_found') {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const fresh = getConversation(conversation.id)
+      ack({
+        ok: true,
         conversationId: conversation.id,
-        pinnedMessageId: pinned?.id ?? null,
-        pinned,
-      }
-      ack({ ok: true, ...payload })
-      io.to(`user:${conversation.user_a_id}`).emit('conversation:update', payload)
-      io.to(`user:${conversation.user_b_id}`).emit('conversation:update', payload)
-      io.to('admins').emit('conversation:update', payload)
+        pinnedMessageId: fresh?.pinned_message_id ?? null,
+        pinned: pinnedSnapshotOf(fresh ?? conversation),
+      })
     })
   )
 
@@ -2102,6 +2735,8 @@ io.on('connection', (socket) => {
     setSetting('maintenanceMode', next.maintenanceMode ? '1' : '0')
     setSetting('maintenanceNote', next.maintenanceNote)
     broadcastAppSettings()
+    // v11 — audit trail.
+    audit('settings', `appName=${next.appName}; maintenance=${next.maintenanceMode}`)
     console.log(`App settings updated (maintenance: ${next.maintenanceMode})`)
     ack({ ok: true, settings: next })
   }))
@@ -2125,6 +2760,8 @@ io.on('connection', (socket) => {
       insertAndFanOut(conversation, ADMIN_ID, content, 'system')
     }
     console.log(`${kind} broadcast to ${rows.length} conversation(s)`)
+    // v11 — audit trail.
+    audit('broadcast', `${kind}: ${content}`)
     ack({ ok: true, count: rows.length, kind })
   }))
 
@@ -2134,6 +2771,8 @@ io.on('connection', (socket) => {
     const settingsRows = (
       db.query('SELECT key, value FROM settings').all() as { key: string; value: string }[]
     ).filter((r) => !r.key.startsWith('vapid')) // never export push secrets
+    // v11 — audit trail.
+    audit('backup', 'dump JSON penuh')
     ack({
       ok: true,
       exportedAt: new Date().toISOString(),
@@ -2158,6 +2797,8 @@ io.on('connection', (socket) => {
     const before = { dbBytes: sizeOf(DB_PATH), walBytes: sizeOf(`${DB_PATH}-wal`) }
     dbMaintenance()
     const after = { dbBytes: sizeOf(DB_PATH), walBytes: sizeOf(`${DB_PATH}-wal`) }
+    // v11 — audit trail.
+    audit('vacuum', `db ${before.dbBytes} → ${after.dbBytes} bytes`)
     ack({ ok: true, before, after })
   }))
 
@@ -2165,9 +2806,512 @@ io.on('connection', (socket) => {
   socket.on('admin:ghost', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
     socket.data.ghost = data?.on === true
+    // v11 — audit trail.
+    audit('ghost', socket.data.ghost ? 'on' : 'off')
     console.log(`Ghost mode ${socket.data.ghost ? 'ON' : 'OFF'} (socket ${socket.id})`)
     ack({ ok: true, ghost: socket.data.ghost })
   }))
+
+  /* ------------------------------------------------------------------ */
+  /* v11 — admin power features                                          */
+  /* ------------------------------------------------------------------ */
+
+  /** Loads the target user for restriction events (never the admin itself). */
+  const restrictionTarget = (data: any, ack: AckFn): UserRow | null => {
+    const target = typeof data?.userId === 'string' ? findUserById(data.userId) : null
+    if (!target) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return null
+    }
+    if (target.id === ADMIN_ID) {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return null
+    }
+    return target
+  }
+
+  /** Fresh restriction snapshot after a users-table update. */
+  const freshRestrictions = (userId: string) => {
+    const fresh = findUserById(userId) as UserRow
+    return restrictionsOf(fresh)
+  }
+
+  /* v11 — intel / x-ray ---------------------------- */
+
+  socket.on('admin:xray', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const userId = typeof data?.userId === 'string' ? data.userId : ''
+    const profile = userId ? buildXrayProfile(userId) : null
+    if (!profile) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    ack({ ok: true, profile })
+  }))
+
+  socket.on('admin:forensics', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const conversationId =
+      typeof data?.conversationId === 'string' && data.conversationId ? data.conversationId : null
+    if (conversationId && !getConversation(conversationId)) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    ack({ ok: true, items: forensicsItems(conversationId) })
+  }))
+
+  socket.on('admin:edit_history', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    let items: { text: string; at: string }[] = []
+    try {
+      const parsed = row.edit_history ? JSON.parse(row.edit_history) : []
+      if (Array.isArray(parsed)) {
+        items = parsed
+          .filter((e): e is { text: string; at: number } => !!e && typeof e === 'object' && typeof (e as any).text === 'string')
+          .map((e) => ({ text: e.text, at: new Date(e.at ?? row.created_at).toISOString() }))
+      }
+    } catch {
+      /* corrupt history — report empty */
+    }
+    ack({ ok: true, items })
+  }))
+
+  socket.on('admin:peek', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    // Explicit no-side-effect read: no markRead, no receipts, no broadcasts.
+    const page = getMessagesPage(conversation.id)
+    ack({ ok: true, conversationId: conversation.id, messages: page.messages, hasMore: page.hasMore })
+  }))
+
+  socket.on('admin:search', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const query = typeof data?.query === 'string' ? data.query.trim() : ''
+    if (query.length < 2 || query.length > 100) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    ack({ ok: true, items: searchItems(query) })
+  }))
+
+  socket.on('admin:user_stats', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    ack({ ok: true, ...buildUserStats(target.id) })
+  }))
+
+  socket.on('admin:export_conversation', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const format = data?.format === 'json' ? 'json' : data?.format === 'txt' ? 'txt' : null
+    if (!format) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const dump = buildConversationExport(conversation, format)
+    audit('export_conversation', `${format}: ${dump.count} pesan (${conversation.id.slice(0, 8)})`)
+    ack({ ok: true, ...dump })
+  }))
+
+  socket.on('admin:export_user', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const dump = buildUserExport(target.id)
+    audit('export_user', `${target.name}: ${dump.count} pesan`)
+    ack({ ok: true, format: 'json', ...dump })
+  }))
+
+  /* v11 — session control -------------------------- */
+
+  socket.on('admin:kick', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const sockets = onlineSockets.get(target.id)?.size ?? 0
+    // Force-close every socket in the user's personal room. The client will
+    // auto-reconnect (documented behavior — this is a "disconnect whip").
+    io.in(`user:${target.id}`).disconnectSockets(true)
+    audit('kick', `${target.name} (${sockets} socket)`)
+    console.log(`Kicked ${target.name}: ${sockets} socket(s)`)
+    ack({ ok: true, sockets })
+  }))
+
+  socket.on('admin:freeze', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const on = data?.on !== false
+    db.run('UPDATE users SET frozen = ? WHERE id = ?', [on ? 1 : 0, target.id])
+    pushRestrictedTo(target.id)
+    audit('freeze', `${target.name}: ${on ? 'BEKU' : 'lepas'}`)
+    ack({ ok: true, frozen: on, restricted: freshRestrictions(target.id) })
+  }))
+
+  socket.on('admin:mute', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const minutes = Number(data?.minutes)
+    if (!Number.isInteger(minutes) || minutes < 0 || minutes > 1440) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    // minutes = 0 clears an active mute early (extension beyond the 1–1440 spec).
+    const mutedUntil = minutes > 0 ? now() + minutes * 60_000 : 0
+    db.run('UPDATE users SET muted_until = ? WHERE id = ?', [mutedUntil, target.id])
+    pushRestrictedTo(target.id)
+    audit('mute', `${target.name}: ${minutes} menit`)
+    ack({
+      ok: true,
+      mutedUntil: mutedUntil > 0 ? new Date(mutedUntil).toISOString() : null,
+      restricted: freshRestrictions(target.id),
+    })
+  }))
+
+  socket.on('admin:slowmode', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const perMinute = Number(data?.perMinute)
+    if (![0, 1, 2, 3, 5, 10].includes(perMinute)) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    db.run('UPDATE users SET slow_mode = ? WHERE id = ?', [perMinute, target.id])
+    pushRestrictedTo(target.id)
+    audit('slowmode', `${target.name}: ${perMinute}/menit`)
+    ack({ ok: true, perMinute, restricted: freshRestrictions(target.id) })
+  }))
+
+  socket.on('admin:mediablock', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const on = data?.on !== false
+    db.run('UPDATE users SET media_blocked = ? WHERE id = ?', [on ? 1 : 0, target.id])
+    pushRestrictedTo(target.id)
+    audit('mediablock', `${target.name}: ${on ? 'BLOK media' : 'lepas'}`)
+    ack({ ok: true, mediaBlocked: on, restricted: freshRestrictions(target.id) })
+  }))
+
+  /* v11 — fake signals ----------------------------- */
+
+  socket.on('admin:fake_typing', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation || !isParticipant(conversation, ADMIN_ID)) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    // Same event shape the user side already understands from real admin typing.
+    io.to(`user:${getPartnerId(conversation, ADMIN_ID)}`).emit('partner:typing', {
+      conversationId: conversation.id,
+      isTyping: data?.on === true,
+    })
+    ack({ ok: true })
+  }))
+
+  socket.on('admin:always_online', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const on = data?.on !== false
+    setSetting('always_online', on ? '1' : '0')
+    audit('always_online', on ? 'on' : 'off')
+    ack({ ok: true, alwaysOnline: on })
+  }))
+
+  socket.on('admin:fake_last_seen', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const value = typeof data?.value === 'string' ? data.value.trim() : ''
+    if (value.length > 40) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    setSetting('fake_last_seen', value) // '' = off
+    audit('fake_last_seen', value ? `"${value}"` : 'off')
+    ack({ ok: true, fakeLastSeen: value })
+  }))
+
+  socket.on('admin:fake_receipts', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const target =
+      (db
+        .query('SELECT MAX(id) AS max_id FROM messages WHERE conversation_id = ?')
+        .get(conversation.id) as { max_id: number | null }).max_id ?? 0
+    const count = Number(
+      (db
+        .query('SELECT COUNT(*) AS c FROM messages WHERE conversation_id = ?')
+        .get(conversation.id) as { c: number }).c
+    )
+    // Pure illusion: broadcast the receipt WITHOUT touching reads in the DB.
+    if (target > 0) broadcastRead(conversation, ADMIN_ID, target)
+    ack({ ok: true, count, lastReadMessageId: target })
+  }))
+
+  socket.on('admin:quick_replies:get', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    ack({ ok: true, items: getSettingList('quick_replies') })
+  }))
+
+  socket.on('admin:quick_replies:set', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const raw = Array.isArray(data?.items) ? data.items : null
+    if (!raw || raw.length > 20) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const items: string[] = []
+    for (const item of raw) {
+      if (typeof item !== 'string') {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const v = item.trim()
+      if (v.length < 1 || v.length > 200) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      items.push(v)
+    }
+    setSetting('quick_replies', JSON.stringify(items))
+    audit('quick_replies', `${items.length} template`)
+    ack({ ok: true, items })
+  }))
+
+  socket.on('admin:mirror', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const on = data?.on !== false
+    setSetting('mirror_mode', on ? '1' : '0')
+    audit('mirror', on ? 'on' : 'off')
+    ack({ ok: true, mirror: on })
+  }))
+
+  /* v11 — moderation & advanced forensics ---------- */
+
+  socket.on('admin:delete_message', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const conversation = getConversation(row.conversation_id)
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    if (row.deleted_at) {
+      ack({ ok: true }) // already a tombstone
+      return
+    }
+    tombstoneMessage(row, conversation, now())
+    const senderName = findUserById(row.sender_id)?.name ?? row.sender_id
+    audit('delete_message', `${senderName}: ${snippetOf(row).slice(0, 120)}`)
+    console.log(`Message ${id} deleted by ADMIN (owner: ${row.sender_id.slice(0, 8)})`)
+    ack({ ok: true })
+  }))
+
+  socket.on('admin:reset_conversation', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const rows = db
+      .query(
+        'SELECT id, content, thumb_url FROM messages WHERE conversation_id = ? AND deleted_at IS NULL'
+      )
+      .all(conversation.id) as Array<Pick<MessageRow, 'id' | 'content' | 'thumb_url'>>
+    const ts = now()
+    if (rows.length > 0) {
+      // Batched variant of the shared tombstone: originals land in
+      // deleted_content, then everything is redacted in one statement.
+      db.run(
+        `UPDATE messages SET
+           deleted_content = CASE WHEN content != '' THEN content ELSE deleted_content END,
+           content = '', transcript = NULL, file_name = NULL, file_size = NULL, mime_type = NULL,
+           deleted_at = ?
+         WHERE conversation_id = ? AND deleted_at IS NULL`,
+        [ts, conversation.id]
+      )
+      // Free disk media that no live message references anymore.
+      for (const r of rows) {
+        releaseMediaFile(mediaNameOf(r.content))
+        releaseMediaFile(mediaNameOf(r.thumb_url))
+      }
+    }
+    // A wiped conversation has nothing to pin anymore.
+    applyConversationPin(conversation, null)
+    const payload = {
+      conversationId: conversation.id,
+      deletedAt: new Date(ts).toISOString(),
+      deleted: rows.length,
+    }
+    io.to(`user:${conversation.user_a_id}`).emit('conversation:reset', payload)
+    io.to(`user:${conversation.user_b_id}`).emit('conversation:reset', payload)
+    io.to('admins').emit('conversation:reset', payload)
+    pushConversationsTo(conversation.user_a_id)
+    pushConversationsTo(conversation.user_b_id)
+    audit('reset_conversation', `${conversation.id.slice(0, 8)}: ${rows.length} pesan`)
+    console.log(`Conversation ${conversation.id.slice(0, 8)} reset: ${rows.length} messages`)
+    ack({ ok: true, deleted: rows.length })
+  }))
+
+  socket.on('admin:audit', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    let limit = Number(data?.limit)
+    if (!Number.isInteger(limit) || limit < 1) limit = 100
+    limit = Math.min(limit, 200)
+    const rows = db
+      .query('SELECT action, detail, at FROM audit_log ORDER BY id DESC LIMIT ?')
+      .all(limit) as Array<{ action: string; detail: string; at: number }>
+    ack({
+      ok: true,
+      items: rows.map((r) => ({ action: r.action, detail: r.detail, at: new Date(r.at).toISOString() })),
+    })
+  }))
+
+  socket.on('admin:pin', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const conversation = getConversation(row.conversation_id)
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const result = applyConversationPin(conversation, row.id)
+    if (result === 'not_found') {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const fresh = getConversation(conversation.id)
+    const pid = fresh?.pinned_message_id ?? null
+    const pinnedRow = pid
+      ? (db.query('SELECT * FROM messages WHERE id = ?').get(pid) as MessageRow | null)
+      : null
+    ack({
+      ok: true,
+      conversationId: conversation.id,
+      pinnedMessageId: pid,
+      pinnedMessage: pinnedRow
+        ? {
+            messageId: pinnedRow.id,
+            senderId: pinnedRow.sender_id,
+            senderName: findUserById(pinnedRow.sender_id)?.name ?? '',
+            snippet: snippetOf(pinnedRow),
+            type: pinnedRow.type ?? 'text',
+          }
+        : null,
+    })
+  }))
+
+  socket.on('admin:unpin', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    applyConversationPin(conversation, null)
+    ack({ ok: true, conversationId: conversation.id, pinnedMessageId: null, pinnedMessage: null })
+  }))
+
+  socket.on('admin:keywords:get', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    ack({ ok: true, items: getSettingList('keywords') })
+  }))
+
+  socket.on('admin:keywords:set', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const raw = Array.isArray(data?.items) ? data.items : null
+    if (!raw || raw.length > 50) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const items: string[] = []
+    for (const item of raw) {
+      if (typeof item !== 'string') {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const v = item.trim()
+      if (v.length < 1 || v.length > 60) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      items.push(v)
+    }
+    setSetting('keywords', JSON.stringify(items))
+    audit('keywords', `${items.length} kata kunci`)
+    ack({ ok: true, items })
+  }))
+
+  socket.on('admin:flagged_list', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    const rows = db
+      .query(
+        `SELECT m.*, u.name AS sender_name FROM messages m
+         LEFT JOIN users u ON u.id = m.sender_id
+         WHERE m.flagged = 1 ORDER BY m.id DESC LIMIT 100`
+      )
+      .all() as Array<MessageRow & { sender_name: string | null }>
+    ack({
+      ok: true,
+      items: rows.map((r) => ({
+        messageId: r.id,
+        conversationId: r.conversation_id,
+        senderName: r.sender_name ?? '',
+        type: r.type ?? 'text',
+        snippet: snippetOf(r),
+        keyword: matchedKeyword(r.deleted_content ?? r.content) ?? '',
+        createdAt: new Date(r.created_at).toISOString(),
+        ...(r.deleted_at ? { deletedAt: new Date(r.deleted_at).toISOString() } : {}),
+      })),
+    })
+  }))
+
 
   /* ---------------------------- account PIN ---------------------------- */
 
@@ -2202,17 +3346,46 @@ io.on('connection', (socket) => {
     const userId = socket.data?.userId
     console.log(`Socket disconnected: ${socket.id} (${reason})`)
     if (typeof userId !== 'string') return
-    const wentOffline = removeOnlineSocket(userId, socket.id)
+    // v11 — connection metadata for admin:xray is memory-only and cleaned here.
+    dropConnMeta(userId, socket.id)
+    // v11 — always_online fake signal: the admin never goes offline / never
+    // gets a fresh last_seen while the setting is on (socket bookkeeping in
+    // onlineSockets still happens so counts stay accurate).
+    const alwaysOn = userId === ADMIN_ID && getBoolSetting('always_online')
+    const wentOffline = !alwaysOn && removeOnlineSocket(userId, socket.id)
     if (wentOffline) {
       const ts = now()
       db.run('UPDATE users SET last_seen_at = ? WHERE id = ?', [ts, userId])
-      const payload = { userId, online: false, lastSeenAt: new Date(ts).toISOString() }
+      const realIso = new Date(ts).toISOString()
       if (userId === ADMIN_ID) {
-        // Admin presence is public: everyone may know.
-        io.emit('presence:update', payload)
+        // Admin presence is public: everyone may know. v11 — users receive a
+        // fake lastSeenAt when fake_last_seen is configured.
+        const fake = getSetting('fake_last_seen')
+        if (typeof fake === 'string' && fake.length > 0) {
+          io.to('admins').emit('presence:update', {
+            userId,
+            online: false,
+            lastSeenAt: realIso,
+          })
+          for (const u of db
+            .query("SELECT id FROM users WHERE role = 'user'")
+            .all() as Array<{ id: string }>) {
+            io.to(`user:${u.id}`).emit('presence:update', {
+              userId,
+              online: false,
+              lastSeenAt: fake,
+            })
+          }
+        } else {
+          io.emit('presence:update', { userId, online: false, lastSeenAt: realIso })
+        }
       } else {
         // User presence is private: only the admins room.
-        io.to('admins').emit('presence:update', payload)
+        io.to('admins').emit('presence:update', {
+          userId,
+          online: false,
+          lastSeenAt: realIso,
+        })
       }
       console.log(`User ${userId} went offline`)
     }
