@@ -169,3 +169,89 @@
   background-color: var(--border);
   border-radius: 9999px;
 }
+
+/* ------------------------------------------------------------------ */
+/* ChatKita v12 — premium visual layer                                 */
+/* ------------------------------------------------------------------ */
+
+/* Chat wallpaper — pola doodle halus ala WhatsApp (emerald tint).
+   Data-URI SVG agar nol request jaringan; warna di-bake per mode. */
+.chat-wallpaper {
+  background-color: #edf1ed;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240' viewBox='0 0 240 240'%3E%3Cg fill='none' stroke='%2310b981' stroke-opacity='0.08' stroke-width='2'%3E%3Ccircle cx='30' cy='30' r='8'/%3E%3Ccircle cx='150' cy='90' r='12'/%3E%3Ccircle cx='210' cy='200' r='7'/%3E%3Cpath d='M60 140 q10 -14 20 0 q-10 14 -20 0 z'/%3E%3Cpath d='M190 40 l8 8 m0 -8 l-8 8'/%3E%3Cpath d='M90 200 h16 m-8 -8 v16'/%3E%3Crect x='120' y='160' width='14' height='14' rx='4'/%3E%3Cpath d='M20 90 q8 8 0 16 q-8 -8 0 -16 z'/%3E%3Cpath d='M170 150 q8 10 16 0'/%3E%3C/g%3E%3Cg fill='%2310b981' fill-opacity='0.06'%3E%3Ccircle cx='200' cy='120' r='3'/%3E%3Ccircle cx='70' cy='60' r='2.5'/%3E%3Ccircle cx='110' cy='120' r='2'/%3E%3Ccircle cx='40' cy='180' r='3'/%3E%3Ccircle cx='230' cy='70' r='2'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: 240px 240px;
+}
+.dark .chat-wallpaper {
+  background-color: #0b1410;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240' viewBox='0 0 240 240'%3E%3Cg fill='none' stroke='%23ffffff' stroke-opacity='0.05' stroke-width='2'%3E%3Ccircle cx='30' cy='30' r='8'/%3E%3Ccircle cx='150' cy='90' r='12'/%3E%3Ccircle cx='210' cy='200' r='7'/%3E%3Cpath d='M60 140 q10 -14 20 0 q-10 14 -20 0 z'/%3E%3Cpath d='M190 40 l8 8 m0 -8 l-8 8'/%3E%3Cpath d='M90 200 h16 m-8 -8 v16'/%3E%3Crect x='120' y='160' width='14' height='14' rx='4'/%3E%3Cpath d='M20 90 q8 8 0 16 q-8 -8 0 -16 z'/%3E%3Cpath d='M170 150 q8 10 16 0'/%3E%3C/g%3E%3Cg fill='%23ffffff' fill-opacity='0.04'%3E%3Ccircle cx='200' cy='120' r='3'/%3E%3Ccircle cx='70' cy='60' r='2.5'/%3E%3Ccircle cx='110' cy='120' r='2'/%3E%3Ccircle cx='40' cy='180' r='3'/%3E%3Ccircle cx='230' cy='70' r='2'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+/* Login background — gradient premium dengan glow emerald/teal. */
+.login-bg {
+  background:
+    radial-gradient(60rem 60rem at 120% -10%, rgba(16, 185, 129, 0.18), transparent 60%),
+    radial-gradient(50rem 50rem at -20% 110%, rgba(20, 184, 166, 0.16), transparent 60%),
+    linear-gradient(165deg, #f6fbf8 0%, #e8f4ee 45%, #d9eee3 100%);
+}
+.dark .login-bg {
+  background:
+    radial-gradient(60rem 60rem at 120% -10%, rgba(16, 185, 129, 0.16), transparent 60%),
+    radial-gradient(50rem 50rem at -20% 110%, rgba(13, 148, 136, 0.14), transparent 60%),
+    linear-gradient(165deg, #07110c 0%, #0a1a12 50%, #0c231a 100%);
+}
+
+/* Dekorasi blob mengambang di layar login. */
+@keyframes float-slow {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-16px) scale(1.04);
+  }
+}
+.animate-float-slow {
+  animation: float-slow 9s ease-in-out infinite;
+  will-change: transform;
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-float-slow {
+    animation: none;
+  }
+}
+
+/* Kartu kaca (glassmorphism) untuk login. */
+.glass-card {
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  box-shadow:
+    0 24px 70px -18px rgba(6, 78, 59, 0.28),
+    0 4px 18px -6px rgba(6, 78, 59, 0.12);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+.dark .glass-card {
+  background: rgba(7, 26, 18, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 24px 70px -18px rgba(0, 0, 0, 0.55),
+    0 4px 18px -6px rgba(0, 0, 0, 0.35);
+}
+
+/* Tombol gradient emerald (primary aksi login). */
+.btn-gradient {
+  background-image: linear-gradient(135deg, #10b981 0%, #0d9e73 55%, #0b8a66 100%);
+  box-shadow: 0 10px 24px -8px rgba(16, 185, 129, 0.55);
+  transition: filter 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+.btn-gradient:hover:not(:disabled) {
+  filter: brightness(1.06);
+  box-shadow: 0 12px 28px -8px rgba(16, 185, 129, 0.65);
+}
+.btn-gradient:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn-gradient:disabled {
+  filter: grayscale(0.25) opacity(0.75);
+  box-shadow: none;
+}
