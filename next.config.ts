@@ -10,6 +10,8 @@ const nextConfig: NextConfig = {
   /* Sembunyikan tombol overlay DevTools "N" di sudut — tidak relevan bagi
      pengguna akhir yang melihat pratinjau dev. */
   devIndicators: false,
+  /* v13 — instrumentation.ts (auto-spawn chat-service) aktif. */
+  instrumentationHook: true,
 };
 
 export default nextConfig;

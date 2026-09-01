@@ -346,6 +346,18 @@ export interface AppSettings {
   welcomeMessage: string;
   maintenanceMode: boolean;
   maintenanceNote: string;
+  /* v13 — behaviour controls; optional so older servers stay compatible. */
+  allowRegistration?: boolean;
+  maxMessageLength?: number;
+  maxUploadMb?: number;
+  allowImages?: boolean;
+  allowVoice?: boolean;
+  allowFiles?: boolean;
+  allowLinks?: boolean;
+  linkPreview?: boolean;
+  allowReactions?: boolean;
+  readReceipts?: boolean;
+  slowmodeSeconds?: number;
 }
 
 /** `public:settings` now also carries the public app settings (v10). */
@@ -371,6 +383,9 @@ export interface DashboardUserRow {
   online: boolean;
   /** Only on the all-users list. */
   joinedAt?: string;
+  /* v13 — richer per-user analytics. */
+  mediaCount?: number;
+  lastMessageAt?: string;
 }
 
 /** Full stats payload returned by `admin:dashboard`. */
@@ -389,10 +404,24 @@ export interface DashboardStats {
     onlineUsers: number;
     mediaCount: number;
     mediaBytes: number;
+    /* v13 — engagement extras. */
+    newUsers7d?: number;
+    reactionsTotal?: number;
+    repliesTotal?: number;
+    editsTotal?: number;
+    pushSubs?: number;
   };
   daily: DashboardDayPoint[];
+  /* v13 — deeper analytics (optional for older servers). */
+  daily30?: DashboardDayPoint[];
+  newUsersDaily?: DashboardDayPoint[];
   /** 24 buckets, hour-of-day (UTC) over the last 7 days. */
   hourly: number[];
+  /** 7 buckets Sun..Sat over the last 28 days. */
+  weekday?: number[];
+  bySender?: { user: number; admin: number };
+  avgResponseMs?: number | null;
+  firstMessageAt?: string | null;
   topUsers: DashboardUserRow[];
   users: DashboardUserRow[];
   storage: {
@@ -435,6 +464,35 @@ export interface VacuumAck {
   ok: true;
   before: { dbBytes: number; walBytes: number };
   after: { dbBytes: number; walBytes: number };
+}
+
+/* v13 — dashboard: runtime info, audit tail, manual cleanup. */
+
+/** Runtime snapshot returned by `admin:system` (Sistem tab). */
+export interface SystemInfo {
+  generatedAt: string;
+  runtime: string;
+  platform: string;
+  pid: number;
+  memory: { rss: number; heapUsed: number; heapTotal: number };
+  socketClients: number;
+  onlineUsers: number;
+  auditCount: number;
+  pushSubs: number;
+  flaggedCount: number;
+  keywords: number;
+  audit: { action: string; detail: string; at: string }[];
+}
+
+export interface SystemInfoAck {
+  ok: true;
+  system: SystemInfo;
+}
+
+export interface CleanupAck {
+  ok: true;
+  before: { bytes: number; files: number };
+  after: { bytes: number; files: number };
 }
 
 export interface GhostAck {
@@ -790,7 +848,12 @@ export interface ConversationResetPayload {
 // admin:dashboard     {} → DashboardStatsAck | ChatErrorAck
 // admin:settings:get  {} → AppSettingsAck | ChatErrorAck
 // admin:settings:set  { appName?, welcomeMessage?, maintenanceMode?,
-//                       maintenanceNote? } → AppSettingsAck | ChatErrorAck
+//                       maintenanceNote?,
+//                       v13: allowRegistration?, maxMessageLength?,
+//                       maxUploadMb?, allowImages?, allowVoice?, allowFiles?,
+//                       allowLinks?, linkPreview?, allowReactions?,
+//                       readReceipts?, slowmodeSeconds? }
+//                       → AppSettingsAck | ChatErrorAck
 //                       Also broadcasts `app:settings:update` to everyone.
 // admin:broadcast     { text, kind: 'siaran'|'pengumuman' }
 //                       → BroadcastAck | ChatErrorAck
@@ -799,6 +862,10 @@ export interface ConversationResetPayload {
 // admin:vacuum        {} → VacuumAck | ChatErrorAck (WAL checkpoint + VACUUM)
 // admin:ghost         { on: boolean } → GhostAck | ChatErrorAck
 //                       Ghost reading: admin reads without read receipts.
+// admin:system        {} → SystemInfoAck | ChatErrorAck   (v13)
+//                       Runtime snapshot + audit tail (Sistem tab).
+// admin:cleanup       {} → CleanupAck | ChatErrorAck      (v13)
+//                       Manual retention sweep: expire old media, VACUUM.
 //
 // ---- v10 server → client ----
 //

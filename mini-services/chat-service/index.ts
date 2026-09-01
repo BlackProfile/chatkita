@@ -392,13 +392,42 @@ interface AppSettingsApi {
   welcomeMessage: string
   maintenanceMode: boolean
   maintenanceNote: string
+  // v13 — app behaviour controls (dashboard "Pengaturan").
+  /** When false, brand-new names cannot register (existing users still log in). */
+  allowRegistration: boolean
+  /** Effective per-message text cap for users (admin always gets the hard max). */
+  maxMessageLength: number
+  /** Per-file upload cap for users, in MiB (admin exempt). */
+  maxUploadMb: number
+  allowImages: boolean
+  allowVoice: boolean
+  allowFiles: boolean
+  allowLinks: boolean
+  /** Client-side link preview cards on text messages. */
+  linkPreview: boolean
+  allowReactions: boolean
+  /** When false, read receipts are never broadcast (local unread state still works). */
+  readReceipts: boolean
+  /** Global minimum seconds between two user messages (0 = off; admin exempt). */
+  slowmodeSeconds: number
 }
 
 const APP_SETTING_LIMITS = {
   appName: 40,
   welcomeMessage: 200,
   maintenanceNote: 200,
+  maxMessageLength: { min: 50, max: MAX_MESSAGE_LENGTH },
+  maxUploadMb: { min: 1, max: 25 },
+  slowmodeSeconds: { min: 0, max: 60 },
 } as const
+
+const getNumSetting = (key: string, dflt: number): number => {
+  const v = Number(getSetting(key))
+  return Number.isFinite(v) && v >= 0 ? v : dflt
+}
+
+const clampNum = (v: number, lim: { min: number; max: number }): number =>
+  Math.min(lim.max, Math.max(lim.min, Math.round(v)))
 
 const getAppSettings = (): AppSettingsApi => ({
   appName: getSetting('appName') ?? 'ChatKita',
@@ -407,6 +436,27 @@ const getAppSettings = (): AppSettingsApi => ({
   maintenanceNote:
     getSetting('maintenanceNote') ??
     'Sedang dalam pemeliharaan — beberapa fitur mungkin terbatas.',
+  // v13 — behaviour defaults (everything open, generous caps).
+  allowRegistration: getSetting('allowRegistration') !== '0',
+  maxMessageLength: clampNum(getNumSetting('maxMessageLength', MAX_MESSAGE_LENGTH), {
+    min: APP_SETTING_LIMITS.maxMessageLength.min,
+    max: APP_SETTING_LIMITS.maxMessageLength.max,
+  }),
+  maxUploadMb: clampNum(getNumSetting('maxUploadMb', 25), {
+    min: APP_SETTING_LIMITS.maxUploadMb.min,
+    max: APP_SETTING_LIMITS.maxUploadMb.max,
+  }),
+  allowImages: getSetting('allowImages') !== '0',
+  allowVoice: getSetting('allowVoice') !== '0',
+  allowFiles: getSetting('allowFiles') !== '0',
+  allowLinks: getSetting('allowLinks') !== '0',
+  linkPreview: getSetting('linkPreview') !== '0',
+  allowReactions: getSetting('allowReactions') !== '0',
+  readReceipts: getSetting('readReceipts') !== '0',
+  slowmodeSeconds: clampNum(getNumSetting('slowmodeSeconds', 0), {
+    min: APP_SETTING_LIMITS.slowmodeSeconds.min,
+    max: APP_SETTING_LIMITS.slowmodeSeconds.max,
+  }),
 })
 
 /** Fan out the freshest app settings to EVERY connected client. */
@@ -478,6 +528,9 @@ const dirStats = (dir: string): { bytes: number; files: number } => {
  * v10 — aggregated dashboard stats for `admin:dashboard`.
  * All aggregation happens in SQL; days are UTC epoch-day buckets.
  */
+/** v13 — userId → ts of last message, backing the global user slowmode. */
+const globalSlowAt = new Map<string, number>()
+
 const dashboardStats = () => {
   const nowMs = now()
   const DAY_MS = 86_400_000
@@ -509,13 +562,39 @@ const dashboardStats = () => {
     )
     .all(nowMs - 13 * DAY_MS) as { day: number; c: number }[]
   const dailyMap = new Map(dailyRows.map((r) => [r.day, r.c]))
+  const dayPoint = (epochDay: number, map: Map<number, number>) => ({
+    date: new Date(epochDay * DAY_MS).toISOString().slice(0, 10),
+    count: map.get(epochDay) ?? 0,
+  })
   const daily: { date: string; count: number }[] = []
   for (let i = 13; i >= 0; i -= 1) {
-    const epochDay = Math.floor(nowMs / DAY_MS) - i
-    daily.push({
-      date: new Date(epochDay * DAY_MS).toISOString().slice(0, 10),
-      count: dailyMap.get(epochDay) ?? 0,
-    })
+    daily.push(dayPoint(Math.floor(nowMs / DAY_MS) - i, dailyMap))
+  }
+
+  // v13 — 30-day series (range toggle in the analytics tab).
+  const daily30Rows = db
+    .query(
+      `SELECT CAST(created_at / 86400000 AS INTEGER) AS day, COUNT(*) AS c
+       FROM messages WHERE created_at >= ? GROUP BY day`
+    )
+    .all(nowMs - 29 * DAY_MS) as { day: number; c: number }[]
+  const daily30Map = new Map(daily30Rows.map((r) => [r.day, r.c]))
+  const daily30: { date: string; count: number }[] = []
+  for (let i = 29; i >= 0; i -= 1) {
+    daily30.push(dayPoint(Math.floor(nowMs / DAY_MS) - i, daily30Map))
+  }
+
+  // v13 — registrations per day (14 days, zero-filled) for the growth chart.
+  const newUsersRows = db
+    .query(
+      `SELECT CAST(created_at / 86400000 AS INTEGER) AS day, COUNT(*) AS c
+       FROM users WHERE role = 'user' AND created_at >= ? GROUP BY day`
+    )
+    .all(nowMs - 13 * DAY_MS) as { day: number; c: number }[]
+  const newUsersMap = new Map(newUsersRows.map((r) => [r.day, r.c]))
+  const newUsersDaily: { date: string; count: number }[] = []
+  for (let i = 13; i >= 0; i -= 1) {
+    newUsersDaily.push(dayPoint(Math.floor(nowMs / DAY_MS) - i, newUsersMap))
   }
 
   // Hour-of-day distribution over the last 7 days (0-23, UTC).
@@ -530,32 +609,119 @@ const dashboardStats = () => {
     if (r.h >= 0 && r.h < 24) hourly[r.h] = r.c
   }
 
+  // v13 — weekday distribution over the last 28 days (0=Sun..6=Sat).
+  const weekdayRows = db
+    .query(
+      `SELECT CAST(strftime('%w', created_at / 1000, 'unixepoch') AS INTEGER) AS d, COUNT(*) AS c
+       FROM messages WHERE created_at >= ? GROUP BY d`
+    )
+    .all(nowMs - 27 * DAY_MS) as { d: number; c: number }[]
+  const weekday: number[] = Array.from({ length: 7 }, () => 0)
+  for (const r of weekdayRows) {
+    if (r.d >= 0 && r.d < 7) weekday[r.d] = r.c
+  }
+
+  // v13 — user vs admin message share (excl. system broadcasts).
+  const bySenderRows = db
+    .query(
+      `SELECT CASE WHEN sender_id = ? THEN 'admin' ELSE 'user' END AS s, COUNT(*) AS c
+       FROM messages WHERE type != 'system' AND deleted_at IS NULL GROUP BY s`
+    )
+    .all(ADMIN_ID) as { s: string; c: number }[]
+  const bySender = { user: 0, admin: 0 }
+  for (const r of bySenderRows) {
+    if (r.s === 'admin') bySender.admin = r.c
+    else bySender.user = r.c
+  }
+
+  // v13 — average admin response time: for every user message in the last
+  // 7 days, find the earliest later admin message in the same conversation;
+  // ignore lags beyond 6h so offline gaps don't skew the average.
+  let avgResponseMs: number | null = null
+  try {
+    const respRow = db
+      .query(
+        `SELECT AVG(lag) AS v FROM (
+           SELECT MIN(m2.created_at - m1.created_at) AS lag
+           FROM messages m1
+           JOIN messages m2
+             ON m2.conversation_id = m1.conversation_id
+            AND m2.sender_id = ?
+            AND m2.created_at >= m1.created_at
+            AND m2.deleted_at IS NULL
+           WHERE m1.sender_id != ? AND m1.type != 'system'
+             AND m1.deleted_at IS NULL AND m1.created_at >= ?
+           GROUP BY m1.id
+         ) WHERE lag >= 0 AND lag < 21600000`
+      )
+      .get(ADMIN_ID, ADMIN_ID, nowMs - 7 * DAY_MS) as { v: number | null }
+    avgResponseMs = typeof respRow?.v === 'number' ? Math.round(respRow.v) : null
+  } catch {
+    avgResponseMs = null
+  }
+
+  // v13 — engagement counters.
+  const reactionsTotal = scalar('SELECT COUNT(*) AS v FROM message_reactions')
+  const repliesTotal = scalar('SELECT COUNT(*) AS v FROM messages WHERE reply_to_id IS NOT NULL')
+  const editsTotal = scalar('SELECT COUNT(*) AS v FROM messages WHERE edited_at IS NOT NULL')
+  const pushSubs = scalar('SELECT COUNT(*) AS v FROM push_subscriptions')
+  const newUsers7d = scalar(
+    "SELECT COUNT(*) AS v FROM users WHERE role = 'user' AND created_at >= ?",
+    nowMs - 7 * DAY_MS
+  )
+  const firstMessageAtRow = db
+    .query('SELECT MIN(created_at) AS v FROM messages')
+    .get() as { v: number | null }
+  const firstMessageAt =
+    typeof firstMessageAtRow?.v === 'number' ? new Date(firstMessageAtRow.v).toISOString() : null
+
   const topUsers = (
     db
       .query(
         `SELECT u.id, u.name, u.last_seen_at,
-           (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id) AS c
+           (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id) AS c,
+           (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id AND m.type != 'text') AS media,
+           (SELECT MAX(m.created_at) FROM messages m WHERE m.sender_id = u.id) AS last_msg
          FROM users u WHERE u.role = 'user'
          ORDER BY c DESC, u.name ASC LIMIT 10`
       )
-      .all() as { id: string; name: string; last_seen_at: number; c: number }[]
+      .all() as {
+      id: string
+      name: string
+      last_seen_at: number
+      c: number
+      media: number
+      last_msg: number | null
+    }[]
   ).map((r) => ({
     id: r.id,
     name: r.name,
     messages: r.c,
     lastSeenAt: new Date(r.last_seen_at).toISOString(),
     online: isOnline(r.id),
+    ...(typeof r.media === 'number' ? { mediaCount: r.media } : {}),
+    ...(r.last_msg ? { lastMessageAt: new Date(r.last_msg).toISOString() } : {}),
   }))
 
   const allUsers = (
     db
       .query(
         `SELECT u.id, u.name, u.created_at, u.last_seen_at,
-           (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id) AS c
+           (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id) AS c,
+           (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id AND m.type != 'text') AS media,
+           (SELECT MAX(m.created_at) FROM messages m WHERE m.sender_id = u.id) AS last_msg
          FROM users u WHERE u.role = 'user'
          ORDER BY u.last_seen_at DESC LIMIT 100`
       )
-      .all() as { id: string; name: string; created_at: number; last_seen_at: number; c: number }[]
+      .all() as {
+      id: string
+      name: string
+      created_at: number
+      last_seen_at: number
+      c: number
+      media: number
+      last_msg: number | null
+    }[]
   ).map((r) => ({
     id: r.id,
     name: r.name,
@@ -563,6 +729,8 @@ const dashboardStats = () => {
     lastSeenAt: new Date(r.last_seen_at).toISOString(),
     messages: r.c,
     online: isOnline(r.id),
+    ...(typeof r.media === 'number' ? { mediaCount: r.media } : {}),
+    ...(r.last_msg ? { lastMessageAt: new Date(r.last_msg).toISOString() } : {}),
   }))
 
   const mediaRow = db
@@ -602,9 +770,21 @@ const dashboardStats = () => {
       onlineUsers,
       mediaCount: Number(mediaRow.c),
       mediaBytes: Number(mediaRow.b),
+      // v13 — engagement extras.
+      newUsers7d,
+      reactionsTotal,
+      repliesTotal,
+      editsTotal,
+      pushSubs,
     },
     daily,
+    daily30,
+    newUsersDaily,
     hourly,
+    weekday,
+    bySender,
+    avgResponseMs,
+    firstMessageAt,
     topUsers,
     users: allUsers,
     storage: {
@@ -1962,6 +2142,12 @@ io.on('connection', (socket) => {
       if (!user) user = findUserByRoleAndName(name, 'user')
 
       if (!user) {
+        // v13 — registration may be closed from the dashboard (Pengaturan → Akses).
+        if (!getBoolSetting('allowRegistration')) {
+          console.log(`Rejected new registration "${name}" (registration closed)`)
+          ack({ ok: false, error: 'REGISTRATION_CLOSED' })
+          return
+        }
         const id = crypto.randomUUID()
         const ts = now()
         db.run(
@@ -2000,7 +2186,10 @@ io.on('connection', (socket) => {
       const conversation = ensureConversationWithAdmin(user.id)
       // The user is looking at the chat right now → mark everything read.
       const readUpTo = markRead(conversation.id, user.id)
-      broadcastRead(conversation, user.id, readUpTo)
+      // v13 — receipt broadcast honours the dashboard switch.
+      if (getBoolSetting('readReceipts')) {
+        broadcastRead(conversation, user.id, readUpTo)
+      }
 
       socket.data.userId = user.id
       socket.join(`user:${user.id}`)
@@ -2095,8 +2284,10 @@ io.on('connection', (socket) => {
       // v10 — admin ghost mode: reading leaves read receipts untouched
       // (users keep seeing ✓ instead of ✓✓ for their sent messages).
       const ghost = me === ADMIN_ID && socket.data?.ghost === true
-      if (!ghost) {
-        const readUpTo = markRead(conversation.id, me)
+      // v13 — local unread state always updates; the receipt broadcast is
+      // what draws ✓✓ on the partner's side and respects `readReceipts`.
+      const readUpTo = markRead(conversation.id, me)
+      if (!ghost && getBoolSetting('readReceipts')) {
         broadcastRead(conversation, me, readUpTo)
       }
       const partner = getPartnerUser(conversation, me)
@@ -2168,6 +2359,23 @@ io.on('connection', (socket) => {
       const type = (typeof data?.type === 'string' ? data.type : 'text') as MessageType
       const content = typeof data?.content === 'string' ? data.content : ''
 
+      // v13 — app-level feature switches from the dashboard (users only).
+      const appSet = getAppSettings()
+      if (me !== ADMIN_ID) {
+        if (type === 'image' && !appSet.allowImages) {
+          ack({ ok: false, error: 'FORBIDDEN' })
+          return
+        }
+        if (type === 'voice' && !appSet.allowVoice) {
+          ack({ ok: false, error: 'FORBIDDEN' })
+          return
+        }
+        if (type === 'file' && !appSet.allowFiles) {
+          ack({ ok: false, error: 'FORBIDDEN' })
+          return
+        }
+      }
+
       // v11 — admin session control, enforced in order:
       // frozen → muted → mediaBlocked (rate/slowmode/quota checks follow below).
       const senderRow = me !== ADMIN_ID ? findUserById(me) : null
@@ -2197,8 +2405,15 @@ io.on('connection', (socket) => {
 
       if (type === 'text') {
         trimmed = content.trim()
-        if (trimmed.length < 1 || trimmed.length > MAX_MESSAGE_LENGTH) {
+        // v13 — dynamic per-message cap (dashboard setting; admin keeps hard max).
+        const textMax = me !== ADMIN_ID ? appSet.maxMessageLength : MAX_MESSAGE_LENGTH
+        if (trimmed.length < 1 || trimmed.length > textMax) {
           ack({ ok: false, error: 'INVALID_MESSAGE' })
+          return
+        }
+        // v13 — links can be disallowed for users (admin always may).
+        if (me !== ADMIN_ID && !appSet.allowLinks && /https?:\/\/|www\./i.test(trimmed)) {
+          ack({ ok: false, error: 'FORBIDDEN' })
           return
         }
       } else if (type === 'image' || type === 'voice' || type === 'file') {
@@ -2233,11 +2448,13 @@ io.on('connection', (socket) => {
             return
           }
           const fileSize = data?.fileSize
+          // v13 — per-file cap for users comes from the dashboard (MiB).
+          const fileCap = me !== ADMIN_ID ? appSet.maxUploadMb * 1_048_576 : MAX_FILE_BYTES
           if (
             typeof fileSize !== 'number' ||
             !Number.isInteger(fileSize) ||
             fileSize < 0 ||
-            fileSize > MAX_FILE_BYTES
+            fileSize > fileCap
           ) {
             ack({ ok: false, error: 'INVALID_MESSAGE' })
             return
@@ -2281,6 +2498,21 @@ io.on('connection', (socket) => {
           : undefined
 
       // v8 guards — per-account flood & storage protection.
+      // v13 — global user slowmode from the dashboard (0 = off): minimum
+      // seconds between two messages of the same user (memory, per boot).
+      if (me !== ADMIN_ID && appSet.slowmodeSeconds > 0) {
+        const lastAt = globalSlowAt.get(me) ?? 0
+        const waitMs = appSet.slowmodeSeconds * 1000 - (now() - lastAt)
+        if (waitMs > 0) {
+          ack({
+            ok: false,
+            error: 'SLOW_MODE',
+            remainingSeconds: Math.max(1, Math.ceil(waitMs / 1000)),
+          })
+          return
+        }
+        globalSlowAt.set(me, now())
+      }
       // v11 — a personal slow_mode tightens the TEXT limit; hitting it acks
       // SLOW_MODE (with the retry window) instead of the generic RATE_LIMITED.
       if (type === 'text') {
@@ -2395,7 +2627,10 @@ io.on('connection', (socket) => {
       // v10 — ghost mode: no read receipts are sent while active.
       if (me === ADMIN_ID && socket.data?.ghost === true) return
       const readUpTo = markRead(conversation.id, me)
-      broadcastRead(conversation, me, readUpTo)
+      // v13 — receipts broadcast honours the dashboard switch.
+      if (getBoolSetting('readReceipts')) {
+        broadcastRead(conversation, me, readUpTo)
+      }
       pushConversationsTo(me)
     })
   )
@@ -2455,6 +2690,11 @@ io.on('connection', (socket) => {
       }
       const conversation = getConversation(row.conversation_id)
       if (!conversation || !isParticipant(conversation, me)) {
+        ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      // v13 — reactions can be switched off for users (admin keeps the power).
+      if (me !== ADMIN_ID && !getBoolSetting('allowReactions')) {
         ack({ ok: false, error: 'FORBIDDEN' })
         return
       }
@@ -2713,6 +2953,7 @@ io.on('connection', (socket) => {
   socket.on('admin:settings:set', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
     const next: AppSettingsApi = getAppSettings()
+    let touched = ''
     if (typeof data?.appName === 'string') {
       const v = data.appName.trim()
       if (v.length < 1 || v.length > APP_SETTING_LIMITS.appName) {
@@ -2720,24 +2961,71 @@ io.on('connection', (socket) => {
         return
       }
       next.appName = v
+      touched += ' appName'
     }
     if (typeof data?.welcomeMessage === 'string') {
       next.welcomeMessage = data.welcomeMessage.trim().slice(0, APP_SETTING_LIMITS.welcomeMessage)
+      touched += ' welcome'
     }
     if (typeof data?.maintenanceMode === 'boolean') {
       next.maintenanceMode = data.maintenanceMode
+      touched += ' maintenance'
     }
     if (typeof data?.maintenanceNote === 'string') {
       next.maintenanceNote = data.maintenanceNote.trim().slice(0, APP_SETTING_LIMITS.maintenanceNote)
+      touched += ' maintNote'
+    }
+    // v13 — behaviour settings (booleans default true → stored '0' when off).
+    if (typeof data?.allowRegistration === 'boolean') {
+      next.allowRegistration = data.allowRegistration
+      touched += ' registration'
+    }
+    if (typeof data?.maxMessageLength === 'number' && Number.isFinite(data.maxMessageLength)) {
+      next.maxMessageLength = clampNum(data.maxMessageLength, APP_SETTING_LIMITS.maxMessageLength)
+      touched += ' maxLen'
+    }
+    if (typeof data?.maxUploadMb === 'number' && Number.isFinite(data.maxUploadMb)) {
+      next.maxUploadMb = clampNum(data.maxUploadMb, APP_SETTING_LIMITS.maxUploadMb)
+      touched += ' maxUpload'
+    }
+    for (const key of [
+      'allowImages',
+      'allowVoice',
+      'allowFiles',
+      'allowLinks',
+      'linkPreview',
+      'allowReactions',
+      'readReceipts',
+    ] as const) {
+      if (typeof data?.[key] === 'boolean') {
+        next[key] = data[key]
+        touched += ` ${key}`
+      }
+    }
+    if (typeof data?.slowmodeSeconds === 'number' && Number.isFinite(data.slowmodeSeconds)) {
+      next.slowmodeSeconds = clampNum(data.slowmodeSeconds, APP_SETTING_LIMITS.slowmodeSeconds)
+      touched += ' slowmode'
     }
     setSetting('appName', next.appName)
     setSetting('welcomeMessage', next.welcomeMessage)
     setSetting('maintenanceMode', next.maintenanceMode ? '1' : '0')
     setSetting('maintenanceNote', next.maintenanceNote)
+    // v13 — persist behaviour keys.
+    setSetting('allowRegistration', next.allowRegistration ? '1' : '0')
+    setSetting('maxMessageLength', String(next.maxMessageLength))
+    setSetting('maxUploadMb', String(next.maxUploadMb))
+    setSetting('allowImages', next.allowImages ? '1' : '0')
+    setSetting('allowVoice', next.allowVoice ? '1' : '0')
+    setSetting('allowFiles', next.allowFiles ? '1' : '0')
+    setSetting('allowLinks', next.allowLinks ? '1' : '0')
+    setSetting('linkPreview', next.linkPreview ? '1' : '0')
+    setSetting('allowReactions', next.allowReactions ? '1' : '0')
+    setSetting('readReceipts', next.readReceipts ? '1' : '0')
+    setSetting('slowmodeSeconds', String(next.slowmodeSeconds))
     broadcastAppSettings()
     // v11 — audit trail.
-    audit('settings', `appName=${next.appName}; maintenance=${next.maintenanceMode}`)
-    console.log(`App settings updated (maintenance: ${next.maintenanceMode})`)
+    audit('settings', `appName=${next.appName}; maintenance=${next.maintenanceMode};${touched}`)
+    console.log(`App settings updated${touched ? ` (${touched.trim()})` : ''}`)
     ack({ ok: true, settings: next })
   }))
 
@@ -2800,6 +3088,71 @@ io.on('connection', (socket) => {
     // v11 — audit trail.
     audit('vacuum', `db ${before.dbBytes} → ${after.dbBytes} bytes`)
     ack({ ok: true, before, after })
+  }))
+
+  /**
+   * v13 — runtime info + audit tail for the Sistem tab: memory, runtime
+   * version, live socket count, push subscriptions and the last audit rows.
+   */
+  socket.on('admin:system', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    const mem = process.memoryUsage()
+    const auditRows = db
+      .query('SELECT action, detail, at FROM audit_log ORDER BY at DESC LIMIT 30')
+      .all() as { action: string; detail: string; at: number }[]
+    const scalarSys = (sql: string): number =>
+      Number((db.query(sql).get() as { v: number | null } | undefined)?.v ?? 0)
+    let onlineUserCount = 0
+    for (const [id, sockets] of onlineSockets) {
+      if (id !== ADMIN_ID && sockets.size > 0) onlineUserCount += 1
+    }
+    const auditCount = scalarSys('SELECT COUNT(*) AS v FROM audit_log')
+    const pushSubs = scalarSys('SELECT COUNT(*) AS v FROM push_subscriptions')
+    const flaggedCount = scalarSys('SELECT COUNT(*) AS v FROM messages WHERE flagged = 1')
+    const keywords = getSettingList('keywords').length
+    ack({
+      ok: true,
+      system: {
+        generatedAt: new Date().toISOString(),
+        runtime: typeof Bun !== 'undefined' ? `Bun ${Bun.version}` : `Node ${process.version}`,
+        platform: `${process.platform} ${process.arch}`,
+        pid: process.pid,
+        memory: {
+          rss: mem.rss,
+          heapUsed: mem.heapUsed,
+          heapTotal: mem.heapTotal,
+        },
+        socketClients: io.engine?.clientsCount ?? 0,
+        onlineUsers: onlineUserCount,
+        auditCount,
+        pushSubs,
+        flaggedCount,
+        keywords,
+        audit: auditRows.map((r) => ({
+          action: r.action,
+          detail: r.detail,
+          at: new Date(r.at).toISOString(),
+        })),
+      },
+    })
+  }))
+
+  /**
+   * v13 — run the retention sweep right now (expire old media + free disk
+   * files) so the admin does not have to wait for the periodic timer.
+   */
+  socket.on('admin:cleanup', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    const before = dirStats(MEDIA_DIR)
+    sweepExpiredMedia()
+    dbMaintenance()
+    const after = dirStats(MEDIA_DIR)
+    audit('cleanup', `media ${(before.bytes / 1048576).toFixed(1)} → ${(after.bytes / 1048576).toFixed(1)} MiB`)
+    ack({
+      ok: true,
+      before: { bytes: before.bytes, files: before.files },
+      after: { bytes: after.bytes, files: after.files },
+    })
   }))
 
   /** Admin ghost mode toggle (no read receipts while on). */
