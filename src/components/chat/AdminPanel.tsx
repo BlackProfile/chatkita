@@ -1389,27 +1389,39 @@ export function AdminPanel() {
   /* ---------------------------------------------------------------- */
   if (!authed) {
     return (
-      <div className="relative flex min-h-0 w-full flex-1 items-center justify-center px-4 pb-6">
+      <div className="login-bg relative flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden px-4 pb-10">
         {/* Toggle tema mengambang — layar login tidak punya header */}
-        <div className="absolute right-2 top-2">
+        <div className="absolute right-2 top-2 z-10">
           <ThemeToggle />
         </div>
-        <Card className="w-full max-w-md rounded-2xl">
-          <CardHeader>
+        {/* Blob dekoratif mengambang */}
+        <div
+          className="animate-float-slow pointer-events-none absolute -left-24 -top-24 size-72 rounded-full bg-emerald-400/25 blur-3xl"
+          aria-hidden="true"
+        />
+        <div
+          className="animate-float-slow pointer-events-none absolute -bottom-28 -right-20 size-80 rounded-full bg-teal-400/25 blur-3xl"
+          aria-hidden="true"
+        />
+        <div className="relative z-10 w-full max-w-md">
+          {/* Brand di luar kartu — konsisten dengan login user */}
+          <div className="mb-5 flex flex-col items-center gap-2.5 text-center">
             <span
-              className="w-fit rounded-lg bg-emerald-600/10 p-3 text-emerald-600"
+              className="flex size-16 items-center justify-center rounded-[1.4rem] bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-lg shadow-emerald-600/30"
               aria-hidden="true"
             >
-              <ShieldCheck className="size-6" />
+              <ShieldCheck className="size-8" />
             </span>
-            <CardTitle className="text-xl">Masuk Admin</CardTitle>
-            <CardDescription>
-              Baca dan balas pesan dari semua user di satu tempat
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight">Panel Admin</h1>
+              <p className="text-sm text-muted-foreground">
+                Baca dan balas pesan dari semua user di satu tempat
+              </p>
+            </div>
+          </div>
+          <div className="glass-card rounded-3xl p-6">
             <form
-              className="space-y-3"
+              className="space-y-3.5"
               onSubmit={(e) => {
                 e.preventDefault();
                 handleLogin();
@@ -1422,7 +1434,8 @@ export function AdminPanel() {
                   type="password"
                   value={password}
                   autoComplete="current-password"
-                  className="h-11"
+                  placeholder="••••••••"
+                  className="h-12 rounded-xl bg-white/70 dark:bg-white/5"
                   onChange={(e) => {
                     setPassword(e.target.value);
                     setAuthError(null);
@@ -1432,7 +1445,7 @@ export function AdminPanel() {
               {authError ? <p className="text-sm text-destructive">{authError}</p> : null}
               <Button
                 type="submit"
-                className="h-11 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+                className="btn-gradient h-12 w-full rounded-xl text-base font-semibold text-white"
                 disabled={!connected || !password.trim()}
               >
                 {connected ? "Masuk" : "Menghubungkan…"}
@@ -1442,8 +1455,8 @@ export function AdminPanel() {
                 Demo: password default {ADMIN_PASSWORD_HINT}
               </p>
             </form>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       </div>
     );
   }
@@ -1469,7 +1482,7 @@ export function AdminPanel() {
           <Card className="w-full max-w-sm rounded-2xl">
             <CardHeader className="items-center text-center">
               <span
-                className="mx-auto rounded-lg bg-emerald-600/10 p-3 text-emerald-600"
+                className="mx-auto flex size-14 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-lg shadow-emerald-600/30"
                 aria-hidden="true"
               >
                 <LockKeyhole className="size-6" />
@@ -1493,7 +1506,7 @@ export function AdminPanel() {
                   value={lockPin}
                   autoComplete="current-password"
                   aria-label="Password admin"
-                  className="h-11 text-center"
+                  className="h-12 rounded-xl text-center bg-white/70 dark:bg-white/5"
                   onChange={(e) => {
                     setLockPin(e.target.value);
                     setLockError(null);
@@ -1502,7 +1515,7 @@ export function AdminPanel() {
                 {lockError ? <p className="text-center text-sm text-destructive">{lockError}</p> : null}
                 <Button
                   type="submit"
-                  className="h-11 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+                  className="btn-gradient h-12 w-full rounded-xl font-semibold text-white"
                   disabled={!lockPin.trim() || !connected}
                 >
                   Buka kunci
@@ -1540,14 +1553,9 @@ export function AdminPanel() {
           {showSidebar ? (
             <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden md:border-r">
               {/* Profile */}
-              <div className="flex items-center gap-3 border-b p-3">
+              <div className="z-10 flex items-center gap-3 border-b bg-card/85 p-3 backdrop-blur-md">
                 <Avatar className="size-10">
-                  <AvatarFallback
-                    className={cn(
-                      "text-sm font-semibold text-white",
-                      avatarColorClass(ADMIN_NAME)
-                    )}
-                  >
+                  <AvatarFallback className="bg-gradient-to-br from-emerald-500 to-teal-600 text-sm font-semibold text-white">
                     {initials(ADMIN_NAME)}
                   </AvatarFallback>
                 </Avatar>
@@ -1847,7 +1855,7 @@ export function AdminPanel() {
           {showChatPane ? (
             activeId && activeConversation ? (
               <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">
-                <div className="flex items-center gap-2 border-b p-3">
+                <div className="z-10 flex items-center gap-2 border-b bg-card/85 p-3 backdrop-blur-md">
                   {isMobile ? (
                     <Button
                       variant="ghost"
@@ -2091,7 +2099,7 @@ export function AdminPanel() {
                 {/* Messages */}
                 <div
                   ref={scrollRef}
-                  className="chat-scroll relative min-h-0 flex-1 overflow-y-auto overscroll-contain"
+                  className="chat-scroll chat-wallpaper relative min-h-0 flex-1 overflow-y-auto overscroll-contain"
                   onScroll={(e) => {
                     const el = e.currentTarget;
                     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
@@ -2240,7 +2248,7 @@ export function AdminPanel() {
 
                 {/* Reply chip */}
                 {replyTo ? (
-                  <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border-l-2 border-emerald-500 bg-muted/60 px-2 py-1.5 text-xs">
+                  <div className="mx-3 mb-1 flex items-center gap-2 rounded-xl border-l-2 border-emerald-500 bg-card/90 px-2 py-1.5 text-xs backdrop-blur">
                     <div className="min-w-0 flex-1">
                       <p className="font-medium text-emerald-600">
                         Balas ke {replyTo.senderId === ADMIN_ID ? "diri sendiri" : activeConversation.partner.name}
@@ -2270,7 +2278,7 @@ export function AdminPanel() {
 
                 {/* Edit chip (v5) */}
                 {editing ? (
-                  <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border-l-2 border-amber-500 bg-amber-500/10 px-2 py-1.5 text-xs">
+                  <div className="mx-3 mb-1 flex items-center gap-2 rounded-xl border-l-2 border-amber-500 bg-amber-500/10 px-2 py-1.5 text-xs backdrop-blur">
                     <div className="min-w-0 flex-1">
                       <p className="font-medium text-amber-600">Mengedit pesan</p>
                       <p className="truncate text-muted-foreground">{editing.content}</p>
@@ -2288,7 +2296,7 @@ export function AdminPanel() {
 
                 {/* Pending image chip */}
                 {pendingImage ? (
-                  <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border bg-muted/60 px-2 py-1.5">
+                  <div className="mx-3 mb-1 flex items-center gap-2 rounded-xl border bg-card/90 px-2 py-1.5 backdrop-blur">
                     <img
                       src={pendingImage.previewUrl}
                       alt="Pratinjau foto"
@@ -2332,7 +2340,7 @@ export function AdminPanel() {
                 ) : null}
 
                 {/* Input row (or recording bar) */}
-                <div className="relative shrink-0 border-t p-3">
+                <div className="relative shrink-0 border-t bg-card/85 px-3 pt-2.5 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md">
                   {emojiOpen ? (
                     <EmojiPicker
                       onPick={(emoji) => {
@@ -2376,7 +2384,7 @@ export function AdminPanel() {
                       </Button>
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5">
                       <input
                         ref={fileInputRef}
                         type="file"
@@ -2387,49 +2395,51 @@ export function AdminPanel() {
                           e.target.value = "";
                         }}
                       />
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
-                        aria-label="Pilih emoji"
-                        onClick={() => setEmojiOpen((v) => !v)}
-                      >
-                        <Smile className="size-5" aria-hidden="true" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
-                        aria-label="Lampirkan foto atau file"
-                        title="Lampirkan foto atau file"
-                        onClick={() => fileInputRef.current?.click()}
-                      >
-                        <Paperclip className="size-5" aria-hidden="true" />
-                      </Button>
-                      <Input
-                        value={input}
-                        maxLength={MAX_MESSAGE_LENGTH}
-                        placeholder={editing ? "Simpan hasil edit…" : "Tulis balasan…"}
-                        aria-label={editing ? "Edit pesan" : "Tulis balasan"}
-                        autoComplete="off"
-                        disabled={!connected}
-                        className="h-11 flex-1"
-                        onChange={(e) => handleInputChange(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && !e.shiftKey) {
-                            e.preventDefault();
-                            handleSend();
-                          }
-                          if (e.key === "Escape" && editing) {
-                            e.preventDefault();
-                            handleEditCancel();
-                          }
-                        }}
-                      />
+                      <div className="flex min-w-0 flex-1 items-center gap-0.5 rounded-full border bg-card px-1.5 shadow-sm">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-10 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                          aria-label="Pilih emoji"
+                          onClick={() => setEmojiOpen((v) => !v)}
+                        >
+                          <Smile className="size-5" aria-hidden="true" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-10 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                          aria-label="Lampirkan foto atau file"
+                          title="Lampirkan foto atau file"
+                          onClick={() => fileInputRef.current?.click()}
+                        >
+                          <Paperclip className="size-5" aria-hidden="true" />
+                        </Button>
+                        <Input
+                          value={input}
+                          maxLength={MAX_MESSAGE_LENGTH}
+                          placeholder={editing ? "Simpan hasil edit…" : "Tulis balasan…"}
+                          aria-label={editing ? "Edit pesan" : "Tulis balasan"}
+                          autoComplete="off"
+                          disabled={!connected}
+                          className="h-11 min-w-0 flex-1 border-0 bg-transparent px-1 shadow-none focus-visible:ring-0 dark:bg-transparent"
+                          onChange={(e) => handleInputChange(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && !e.shiftKey) {
+                              e.preventDefault();
+                              handleSend();
+                            }
+                            if (e.key === "Escape" && editing) {
+                              e.preventDefault();
+                              handleEditCancel();
+                            }
+                          }}
+                        />
+                      </div>
                       {input.trim() || pendingImage ? (
                         <Button
                           size="icon"
-                          className="size-11 shrink-0 bg-emerald-600 text-white hover:bg-emerald-600/90"
+                          className="btn-gradient size-11 shrink-0 rounded-full text-white"
                           aria-label="Kirim"
                           disabled={!connected || uploading || (!input.trim() && !pendingImage)}
                           onClick={() => {
@@ -2443,7 +2453,7 @@ export function AdminPanel() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
+                          className="size-11 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
                           aria-label="Rekam pesan suara"
                           disabled={!connected}
                           onClick={() => void recorder.start()}
@@ -2470,14 +2480,19 @@ export function AdminPanel() {
                 </div>
               </section>
             ) : (
-              <section className="flex min-h-0 min-w-0 flex-col items-center justify-center gap-3 p-6 text-center">
-                <MessagesSquare
-                  className="size-10 text-muted-foreground/40"
+              <section className="chat-wallpaper flex min-h-0 min-w-0 flex-col items-center justify-center gap-4 p-6 text-center">
+                <span
+                  className="flex size-16 items-center justify-center rounded-[1.4rem] bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-lg shadow-emerald-600/30"
                   aria-hidden="true"
-                />
-                <p className="text-sm text-muted-foreground">
-                  Pilih percakapan untuk membaca dan membalas pesan
-                </p>
+                >
+                  <MessagesSquare className="size-8" />
+                </span>
+                <div>
+                  <p className="text-base font-semibold">Pilih percakapan</p>
+                  <p className="mt-0.5 text-sm text-muted-foreground">
+                    Pilih chat di kiri untuk membaca dan membalas pesan user
+                  </p>
+                </div>
               </section>
             )
           ) : null}
