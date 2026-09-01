@@ -130,13 +130,13 @@ function Kpi({
   sub?: string;
 }) {
   return (
-    <div className="flex items-center gap-3 rounded-xl border bg-card p-3">
-      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-emerald-600/10 text-emerald-600">
+    <div className="flex items-center gap-3 rounded-xl border bg-card p-3 transition-shadow hover:shadow-sm">
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm shadow-emerald-600/25">
         <Icon className="size-5" aria-hidden="true" />
       </span>
       <div className="min-w-0">
         <p className="truncate text-xs text-muted-foreground">{label}</p>
-        <p className="truncate text-lg font-semibold leading-tight">{value}</p>
+        <p className="truncate text-lg font-bold leading-tight tabular-nums">{value}</p>
         {sub ? <p className="truncate text-[11px] text-muted-foreground">{sub}</p> : null}
       </div>
     </div>
@@ -163,7 +163,7 @@ function BarChart({
         {values.map((v, i) => (
           <div key={i} className="flex h-full min-w-0 flex-1 flex-col justify-end">
             <div
-              className="w-full rounded-t-sm bg-emerald-500/80 transition-[height] hover:bg-emerald-500"
+              className="w-full rounded-t-sm bg-gradient-to-t from-emerald-600 to-emerald-400 transition-[height,filter] hover:brightness-110"
               style={{ height: `${Math.max(3, (v / max) * 100)}%` }}
               title={`${labels[i]}: ${v} pesan`}
             />
@@ -357,10 +357,10 @@ export function AdminDashboard({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[92vh] w-[calc(100vw-1rem)] max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-4xl">
-        <DialogHeader className="shrink-0 border-b px-4 py-3 sm:px-6 sm:py-4">
+      <DialogContent className="flex max-h-[92vh] w-[calc(100vw-1rem)] max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-5xl">
+        <DialogHeader className="shrink-0 border-b bg-muted/30 px-4 py-3 sm:px-6 sm:py-4">
           <DialogTitle className="flex items-center gap-2 text-base sm:text-lg">
-            <span className="flex size-8 items-center justify-center rounded-lg bg-emerald-600/10 text-emerald-600">
+            <span className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm shadow-emerald-600/25">
               <GaugeCircle className="size-4.5" aria-hidden="true" />
             </span>
             Dashboard Aplikasi
@@ -384,9 +384,9 @@ export function AdminDashboard({
               aria-pressed={tab === t.key}
               onClick={() => onTabChange(t.key)}
               className={cn(
-                "flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-medium transition-colors",
+                "flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-medium transition-all",
                 tab === t.key
-                  ? "bg-emerald-600 text-white"
+                  ? "bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-sm shadow-emerald-600/25"
                   : "bg-muted/60 text-muted-foreground hover:bg-accent hover:text-foreground"
               )}
             >
@@ -554,9 +554,9 @@ export function AdminDashboard({
                       aria-pressed={broadcastKind === k.key}
                       onClick={() => setBroadcastKind(k.key)}
                       className={cn(
-                        "h-8 rounded-full px-3 text-xs font-medium transition-colors",
+                        "h-8 rounded-full px-3 text-xs font-medium transition-all",
                         broadcastKind === k.key
-                          ? "bg-emerald-600 text-white"
+                          ? "bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-sm shadow-emerald-600/25"
                           : "bg-muted/60 text-muted-foreground hover:bg-accent"
                       )}
                     >
@@ -583,7 +583,7 @@ export function AdminDashboard({
                   </p>
                   <Button
                     size="sm"
-                    className="h-9 bg-emerald-600 text-white hover:bg-emerald-600/90"
+                    className="btn-gradient h-9 text-white"
                     disabled={!broadcastText.trim() || broadcasting}
                     onClick={sendBroadcast}
                   >
@@ -641,7 +641,7 @@ export function AdminDashboard({
                 </div>
                 <Button
                   size="sm"
-                  className="h-9 bg-emerald-600 text-white hover:bg-emerald-600/90"
+                  className="btn-gradient h-9 text-white"
                   onClick={() =>
                     saveSettings({
                       appName: settings?.appName,
