@@ -5,20 +5,39 @@ import type { Socket } from "socket.io-client";
 import {
   Activity,
   BarChart3,
+  Bell,
   Check,
   Clock,
+  Cpu,
   Database,
   Download,
+  Eye,
+  Flag,
   GaugeCircle,
   HardDrive,
+  Hourglass,
+  Image as ImageIcon,
+  Link2,
   Loader2,
   MessageSquare,
+  MessageSquareReply,
   MessagesSquare,
   Megaphone,
+  Mic,
+  Paperclip,
+  PencilLine,
   RefreshCw,
   Save,
+  ScrollText,
+  Search,
   Send,
   Settings2,
+  ShieldCheck,
+  Smile,
+  Timer,
+  Trash2,
+  TrendingUp,
+  UserPlus,
   Users,
 } from "lucide-react";
 
@@ -49,17 +68,23 @@ import type {
   BackupAck,
   BroadcastAck,
   ChatErrorAck,
+  CleanupAck,
   DashboardStats,
   DashboardStatsAck,
   DashboardUserRow,
+  SystemInfo,
+  SystemInfoAck,
   VacuumAck,
 } from "@/lib/chat-types";
 import { cn } from "@/lib/utils";
 
 /**
- * v10 — Dashboard aplikasi khusus admin: analitik penggunaan, pengelolaan
- * pengguna, siaran/pengumuman global, pengaturan aplikasi (nama, sambutan,
- * mode pemeliharaan), backup JSON, kompresi VACUUM, dan info sistem.
+ * v13 — Dashboard aplikasi khusus admin: analitik pemakaian mendalam
+ * (tren harian 14/30 hari, pengguna baru, distribusi weekday/jam, komposisi
+ * pengirim, kecepatan respons, engagement), pengelolaan pengguna (cari/
+ * urut/filter), siaran global, pengaturan perilaku aplikasi lengkap
+ * (identitas, akses, batas, fitur, pemeliharaan), backup JSON, VACUUM,
+ * pembersihan manual, info runtime + jejak audit.
  * Semua data diambil live dari chat-service via socket (admin-only events).
  */
 
@@ -115,6 +140,36 @@ const fmtDateTime = (iso: string): string => {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" });
+};
+
+/** v13 — durasi respons human-readable (ms → detik/menit/jam). */
+const fmtLag = (ms: number): string => {
+  if (ms < 60_000) return `${Math.round(ms / 1000)} detik`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)} menit`;
+  return `${(ms / 3_600_000).toFixed(1)} jam`;
+};
+
+const WEEKDAYS = ["Aha", "Sen", "Sel", "Rab", "Kam", "Jum", "Sab"];
+
+/** Label singkat aksi audit untuk chip. */
+const AUDIT_LABELS: Record<string, string> = {
+  settings: "Pengaturan",
+  broadcast: "Siaran",
+  backup: "Backup",
+  vacuum: "VACUUM",
+  cleanup: "Pembersihan",
+  ghost: "Mode hantu",
+  slowmode: "Slowmode",
+  freeze: "Bekukan",
+  mute: "Bisu",
+  kick: "Keluarkan",
+  mediablock: "Blokir media",
+  delete: "Hapus pesan",
+  reset: "Reset chat",
+  pin: "Pin",
+  unpin: "Lepas pin",
+  keywords: "Kata terlarang",
+  quick_replies: "Balasan cepat",
 };
 
 /** KPI kecil dengan ikon — dipakai di tab Ringkasan. */
@@ -178,6 +233,64 @@ function BarChart({
   );
 }
 
+/** v13 — chart 7 kolom berlabel (weekday) dengan nilai di atas batang. */
+function WeekdayChart({ weekday, title }: { weekday: number[]; title: string }) {
+  const max = Math.max(1, ...weekday);
+  // Tampilkan mulai Senin: index 1..6 lalu 0 (Ahad).
+  const order = [1, 2, 3, 4, 5, 6, 0];
+  return (
+    <div className="rounded-xl border bg-card p-3">
+      <p className="mb-2 text-xs font-medium text-muted-foreground">{title}</p>
+      <div className="flex h-24 items-end gap-2">
+        {order.map((idx) => (
+          <div key={idx} className="flex h-full min-w-0 flex-1 flex-col items-center justify-end gap-1">
+            <span className="text-[10px] tabular-nums text-muted-foreground">{weekday[idx]}</span>
+            <div
+              className="w-full rounded-t-sm bg-gradient-to-t from-teal-600 to-teal-400 transition-[height,filter] hover:brightness-110"
+              style={{ height: `${Math.max(4, (weekday[idx] / max) * 100)}%` }}
+              title={`${WEEKDAYS[idx]}: ${weekday[idx]} pesan`}
+            />
+            <span className="text-[10px] font-medium text-muted-foreground">{WEEKDAYS[idx]}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** v13 — bar proporsi dua kategori (pengguna vs admin). */
+function SenderSplit({ user, admin }: { user: number; admin: number }) {
+  const total = Math.max(1, user + admin);
+  const up = Math.round((user / total) * 100);
+  return (
+    <div className="rounded-xl border bg-card p-3">
+      <p className="mb-2 text-xs font-medium text-muted-foreground">Komposisi pengirim</p>
+      <div className="flex h-3 overflow-hidden rounded-full">
+        <div
+          className="bg-gradient-to-r from-emerald-600 to-emerald-400"
+          style={{ width: `${up}%` }}
+          title={`Pengguna: ${user} pesan (${up}%)`}
+        />
+        <div
+          className="bg-gradient-to-r from-teal-500 to-teal-600"
+          style={{ width: `${100 - up}%` }}
+          title={`Admin: ${admin} pesan (${100 - up}%)`}
+        />
+      </div>
+      <div className="mt-2 flex justify-between text-xs">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block size-2 rounded-full bg-emerald-500" aria-hidden="true" />
+          Pengguna · <span className="font-semibold tabular-nums">{user}</span>
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block size-2 rounded-full bg-teal-600" aria-hidden="true" />
+          Admin · <span className="font-semibold tabular-nums">{admin}</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function AdminDashboard({
   open,
   onOpenChange,
@@ -202,6 +315,15 @@ export function AdminDashboard({
   const [broadcasting, setBroadcasting] = useState(false);
   const [vacuumResult, setVacuumResult] = useState<string | null>(null);
   const [busy, setBusy] = useState<"backup" | "vacuum" | null>(null);
+  // v13 — analitik & sistem.
+  const [range, setRange] = useState<14 | 30>(14);
+  const [system, setSystem] = useState<SystemInfo | null>(null);
+  const [systemLoading, setSystemLoading] = useState(false);
+  const [cleanupResult, setCleanupResult] = useState<string | null>(null);
+  // v13 — tab Pengguna: pencarian / urutan / filter.
+  const [userQuery, setUserQuery] = useState("");
+  const [userSort, setUserSort] = useState<"messages" | "recent" | "name" | "new">("messages");
+  const [onlineOnly, setOnlineOnly] = useState(false);
 
   const fetchStats = useCallback(() => {
     if (!socket || !socket.connected) return;
@@ -209,6 +331,16 @@ export function AdminDashboard({
     socket.emit("admin:dashboard", {}, (res: AckOf<DashboardStatsAck>) => {
       setLoading(false);
       if (res.ok) setStats(res.stats);
+    });
+  }, [socket]);
+
+  /** v13 — muat info runtime + jejak audit (tab Sistem). */
+  const fetchSystem = useCallback(() => {
+    if (!socket || !socket.connected) return;
+    setSystemLoading(true);
+    socket.emit("admin:system", {}, (res: AckOf<SystemInfoAck>) => {
+      setSystemLoading(false);
+      if (res.ok) setSystem(res.system);
     });
   }, [socket]);
 
@@ -230,6 +362,45 @@ export function AdminDashboard({
       clearInterval(iv);
     };
   }, [open, fetchStats, socket]);
+
+  // v13 — tab Sistem memuat snapshot runtime + audit.
+  useEffect(() => {
+    if (!open || tab !== "sistem") return;
+    const t = setTimeout(fetchSystem, 0);
+    return () => clearTimeout(t);
+  }, [open, tab, fetchSystem]);
+
+  const runCleanup = () => {
+    if (!socket || busy) return;
+    setBusy("vacuum");
+    setCleanupResult(null);
+    socket.emit("admin:cleanup", {}, (res: AckOf<CleanupAck>) => {
+      setBusy(null);
+      if (!res.ok) return;
+      const freed = res.before.bytes - res.after.bytes;
+      setCleanupResult(
+        `Pembersihan selesai — ${res.after.files} file media (${formatFileSize(res.after.bytes)})${freed > 0 ? ` · hemat ${formatFileSize(freed)}` : ""}`
+      );
+      fetchStats();
+      fetchSystem();
+      setTimeout(() => setCleanupResult(null), 6000);
+    });
+  };
+
+  /** v13 — daftar pengguna hasil filter + urut untuk tab Pengguna. */
+  const visibleUsers = useMemo(() => {
+    if (!stats) return [];
+    const q = userQuery.trim().toLowerCase();
+    let rows = stats.users.filter((u) => (q ? u.name.toLowerCase().includes(q) : true));
+    if (onlineOnly) rows = rows.filter((u) => u.online);
+    const sorted = [...rows];
+    if (userSort === "messages") sorted.sort((a, b) => b.messages - a.messages);
+    else if (userSort === "name") sorted.sort((a, b) => a.name.localeCompare(b.name, "id"));
+    else if (userSort === "new")
+      sorted.sort((a, b) => (b.joinedAt ?? "").localeCompare(a.joinedAt ?? ""));
+    else sorted.sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+    return sorted;
+  }, [stats, userQuery, onlineOnly, userSort]);
 
   const totals = stats?.totals;
 
@@ -345,12 +516,18 @@ export function AdminDashboard({
           {u.name}
         </p>
         <p className="truncate text-[11px] text-muted-foreground">
-          {u.online ? "Online" : `Terakhir dilihat ${formatLastSeen(u.lastSeenAt)}`}
+          {u.online
+            ? "Online"
+            : `Terakhir dilihat ${formatLastSeen(u.lastSeenAt)}`}
+          {u.joinedAt ? ` · bergabung ${fmtDay(u.joinedAt)}` : ""}
         </p>
       </div>
       <div className="shrink-0 text-right">
         <p className="text-sm font-semibold tabular-nums">{u.messages}</p>
-        <p className="text-[10px] text-muted-foreground">pesan</p>
+        <p className="text-[10px] text-muted-foreground">
+          pesan
+          {u.mediaCount ? ` · ${u.mediaCount} media` : ""}
+        </p>
       </div>
     </div>
   );
@@ -408,7 +585,7 @@ export function AdminDashboard({
             </p>
           ) : tab === "ringkasan" ? (
             <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-3">
+              <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
                 <Kpi
                   icon={Users}
                   label="Total pengguna"
@@ -433,6 +610,19 @@ export function AdminDashboard({
                   sub={`${totals!.deletedMessages} dihapus`}
                 />
                 <Kpi
+                  icon={UserPlus}
+                  label="Pengguna baru (7 hari)"
+                  value={String(totals!.newUsers7d ?? 0)}
+                />
+                <Kpi
+                  icon={TrendingUp}
+                  label="Rata-rata / pengguna"
+                  value={String(
+                    totals!.users > 0 ? Math.round(totals!.messages / totals!.users) : 0
+                  )}
+                  sub="pesan sejak bergabung"
+                />
+                <Kpi
                   icon={HardDrive}
                   label="Media tersimpan"
                   value={formatFileSize(totals!.mediaBytes)}
@@ -450,6 +640,31 @@ export function AdminDashboard({
                 labels={stats.daily.map((d) => fmtDay(d.date))}
                 title="Pesan per hari (14 hari terakhir)"
               />
+
+              {(() => {
+                const busiest = [...(stats.daily30 ?? stats.daily)].sort(
+                  (a, b) => b.count - a.count
+                )[0];
+                if (!busiest || busiest.count === 0) return null;
+                return (
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border bg-card px-3 py-2 text-xs">
+                    <span className="flex items-center gap-1.5 font-medium">
+                      <TrendingUp className="size-3.5 text-emerald-600" aria-hidden="true" />
+                      Hari tersibuk: {fmtDay(busiest.date)} ({busiest.count} pesan)
+                    </span>
+                    {stats.firstMessageAt ? (
+                      <span className="text-muted-foreground">
+                        Pesan pertama: {fmtDateTime(stats.firstMessageAt)}
+                      </span>
+                    ) : null}
+                    {stats.avgResponseMs != null ? (
+                      <span className="text-muted-foreground">
+                        Respons admin rata-rata: {fmtLag(stats.avgResponseMs)}
+                      </span>
+                    ) : null}
+                  </div>
+                );
+              })()}
 
               <div className="rounded-xl border bg-card p-3">
                 <p className="mb-2 text-xs font-medium text-muted-foreground">
@@ -480,11 +695,104 @@ export function AdminDashboard({
             </div>
           ) : tab === "analitik" ? (
             <div className="space-y-3">
+              {/* Pemilih rentang */}
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-medium text-muted-foreground">
+                  Rentang tren harian
+                </p>
+                <div className="flex gap-1">
+                  {([14, 30] as const).map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      aria-pressed={range === r}
+                      onClick={() => setRange(r)}
+                      className={cn(
+                        "h-7 rounded-full px-3 text-xs font-medium transition-all",
+                        range === r
+                          ? "bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-sm shadow-emerald-600/25"
+                          : "bg-muted/60 text-muted-foreground hover:bg-accent"
+                      )}
+                    >
+                      {r} hari
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <BarChart
+                values={(range === 30 ? stats.daily30 : stats.daily).map((d) => d.count)}
+                labels={(range === 30 ? stats.daily30 : stats.daily).map((d) => fmtDay(d.date))}
+                title={`Pesan per hari (${range} hari terakhir)`}
+              />
+
+              <BarChart
+                values={stats.newUsersDaily?.map((d) => d.count) ?? []}
+                labels={stats.newUsersDaily?.map((d) => fmtDay(d.date)) ?? []}
+                title="Pengguna baru per hari (14 hari)"
+              />
+
+              {stats.weekday ? (
+                <WeekdayChart weekday={stats.weekday} title="Aktivitas per hari minggu (28 hari)" />
+              ) : null}
+
               <BarChart
                 values={stats.hourly}
                 labels={stats.hourly.map((_, i) => `${i}h`)}
                 title="Aktivitas per jam (7 hari terakhir, UTC)"
               />
+
+              {(() => {
+                const max = Math.max(...stats.hourly);
+                const top3 = [...stats.hourly]
+                  .map((c, i) => ({ c, i }))
+                  .sort((a, b) => b.c - a.c)
+                  .slice(0, 3)
+                  .filter((x) => x.c > 0);
+                if (top3.length === 0) return null;
+                return (
+                  <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card px-3 py-2 text-xs">
+                    <span className="flex items-center gap-1.5 font-medium">
+                      <Hourglass className="size-3.5 text-emerald-600" aria-hidden="true" />
+                      Jam tersibuk:
+                    </span>
+                    {top3.map((x) => (
+                      <Badge key={x.i} variant="secondary" className="font-mono text-[10px]">
+                        {String(x.i).padStart(2, "0")}:00–{String(x.i).padStart(2, "0")}:59 · {x.c}
+                        {x.c === max ? " 🏆" : ""}
+                      </Badge>
+                    ))}
+                  </div>
+                );
+              })()}
+
+              {stats.bySender ? (
+                <SenderSplit user={stats.bySender.user} admin={stats.bySender.admin} />
+              ) : null}
+
+              <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+                <Kpi
+                  icon={Timer}
+                  label="Respons admin (rata-rata)"
+                  value={stats.avgResponseMs != null ? fmtLag(stats.avgResponseMs) : "—"}
+                  sub="7 hari terakhir"
+                />
+                <Kpi
+                  icon={Smile}
+                  label="Reaksi dikirim"
+                  value={String(totals!.reactionsTotal ?? 0)}
+                />
+                <Kpi
+                  icon={MessageSquareReply}
+                  label="Pesan balasan"
+                  value={String(totals!.repliesTotal ?? 0)}
+                />
+                <Kpi
+                  icon={PencilLine}
+                  label="Pesan diedit"
+                  value={String(totals!.editsTotal ?? 0)}
+                />
+              </div>
 
               <div className="rounded-xl border bg-card p-3">
                 <p className="mb-1.5 text-xs font-medium text-muted-foreground">
@@ -501,16 +809,7 @@ export function AdminDashboard({
                 )}
               </div>
 
-              <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-3">
-                <Kpi
-                  icon={MessageSquare}
-                  label="Rata-rata pesan / hari (14d)"
-                  value={String(
-                    Math.round(
-                      stats.daily.reduce((s, d) => s + d.count, 0) / 14
-                    )
-                  )}
-                />
+              <div className="grid grid-cols-2 gap-2.5">
                 <Kpi
                   icon={HardDrive}
                   label="Pesan ber-media"
@@ -526,16 +825,73 @@ export function AdminDashboard({
               </div>
             </div>
           ) : tab === "pengguna" ? (
-            <div className="rounded-xl border bg-card p-2">
-              {stats.users.length === 0 ? (
-                <p className="py-8 text-center text-sm text-muted-foreground">
-                  Belum ada pengguna terdaftar.
-                </p>
-              ) : (
-                <div className="divide-y divide-border/60">
-                  {stats.users.map((u) => userRow(u))}
+            <div className="space-y-3">
+              {/* Toolbar: cari + urut + filter online */}
+              <div className="flex flex-col gap-2 rounded-xl border bg-card p-3 sm:flex-row sm:items-center">
+                <div className="relative min-w-0 flex-1">
+                  <Search
+                    className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                  <Input
+                    value={userQuery}
+                    onChange={(e) => setUserQuery(e.target.value)}
+                    placeholder="Cari pengguna…"
+                    className="h-9 pl-8"
+                    aria-label="Cari pengguna"
+                  />
                 </div>
-              )}
+                <div className="flex items-center gap-1">
+                  {(
+                    [
+                      { key: "messages", label: "Terbanyak" },
+                      { key: "recent", label: "Aktif" },
+                      { key: "new", label: "Terbaru" },
+                      { key: "name", label: "A–Z" },
+                    ] as const
+                  ).map((s) => (
+                    <button
+                      key={s.key}
+                      type="button"
+                      aria-pressed={userSort === s.key}
+                      onClick={() => setUserSort(s.key)}
+                      className={cn(
+                        "h-8 rounded-full px-2.5 text-xs font-medium transition-all",
+                        userSort === s.key
+                          ? "bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-sm shadow-emerald-600/25"
+                          : "bg-muted/60 text-muted-foreground hover:bg-accent"
+                      )}
+                    >
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+                <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                  <Switch
+                    checked={onlineOnly}
+                    onCheckedChange={setOnlineOnly}
+                    aria-label="Hanya pengguna online"
+                  />
+                  <span>Online saja</span>
+                </label>
+              </div>
+
+              <div className="rounded-xl border bg-card p-2">
+                <p className="px-2 pb-1.5 pt-1 text-[11px] text-muted-foreground">
+                  {visibleUsers.length} dari {stats.users.length} pengguna
+                </p>
+                {visibleUsers.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-muted-foreground">
+                    {stats.users.length === 0
+                      ? "Belum ada pengguna terdaftar."
+                      : "Tidak ada pengguna yang cocok."}
+                  </p>
+                ) : (
+                  <div className="max-h-80 divide-y divide-border/60 overflow-y-auto">
+                    {visibleUsers.map((u) => userRow(u))}
+                  </div>
+                )}
+              </div>
             </div>
           ) : tab === "siaran" ? (
             <div className="space-y-3">
@@ -655,6 +1011,190 @@ export function AdminDashboard({
                 </Button>
               </div>
 
+              {/* v13 — Akses & Pendaftaran */}
+              <div className="space-y-3 rounded-xl border bg-card p-3">
+                <p className="text-xs font-medium text-muted-foreground">
+                  Akses & pendaftaran
+                </p>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium">Buka pendaftaran</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      Bila dimatikan, nama baru tidak bisa masuk — akun lama tetap bisa.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings?.allowRegistration ?? true}
+                    onCheckedChange={(v) => {
+                      setSettings((s) => (s ? { ...s, allowRegistration: v } : s));
+                      saveSettings({ allowRegistration: v });
+                    }}
+                    aria-label="Buka pendaftaran"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="dash-slowmode">
+                    Slowmode global (detik antar pesan pengguna)
+                  </Label>
+                  <Input
+                    id="dash-slowmode"
+                    type="number"
+                    min={0}
+                    max={60}
+                    value={settings?.slowmodeSeconds ?? 0}
+                    onChange={(e) =>
+                      setSettings((s) =>
+                        s ? { ...s, slowmodeSeconds: Number(e.target.value) } : s
+                      )
+                    }
+                    className="h-9 w-28"
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    0 = nonaktif. Jeda minimum antara dua pesan beruntun tiap pengguna
+                    (0–60 detik); admin tidak terpengaruh.
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-9"
+                  onClick={() => saveSettings({ slowmodeSeconds: settings?.slowmodeSeconds })}
+                >
+                  <Save className="size-4" aria-hidden="true" />
+                  Simpan akses
+                </Button>
+              </div>
+
+              {/* v13 — Batas pesan & media */}
+              <div className="space-y-3 rounded-xl border bg-card p-3">
+                <p className="text-xs font-medium text-muted-foreground">Batas pesan & media</p>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="dash-maxlen">Maks. karakter pesan</Label>
+                    <Input
+                      id="dash-maxlen"
+                      type="number"
+                      min={50}
+                      max={1000}
+                      value={settings?.maxMessageLength ?? 1000}
+                      onChange={(e) =>
+                        setSettings((s) =>
+                          s ? { ...s, maxMessageLength: Number(e.target.value) } : s
+                        )
+                      }
+                      className="h-9"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      50–1000 karakter. Admin selalu boleh 1000.
+                    </p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="dash-maxupload">Maks. ukuran file (MiB)</Label>
+                    <Input
+                      id="dash-maxupload"
+                      type="number"
+                      min={1}
+                      max={25}
+                      value={settings?.maxUploadMb ?? 25}
+                      onChange={(e) =>
+                        setSettings((s) =>
+                          s ? { ...s, maxUploadMb: Number(e.target.value) } : s
+                        )
+                      }
+                      className="h-9"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      1–25 MiB per file (foto, suara, dokumen).
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-9"
+                  onClick={() =>
+                    saveSettings({
+                      maxMessageLength: settings?.maxMessageLength,
+                      maxUploadMb: settings?.maxUploadMb,
+                    })
+                  }
+                >
+                  <Save className="size-4" aria-hidden="true" />
+                  Simpan batas
+                </Button>
+              </div>
+
+              {/* v13 — Fitur percakapan */}
+              <div className="space-y-3 rounded-xl border bg-card p-3">
+                <p className="text-xs font-medium text-muted-foreground">Fitur percakapan</p>
+                {(
+                  [
+                    {
+                      key: "allowImages",
+                      icon: ImageIcon,
+                      label: "Foto",
+                      hint: "Pengguna boleh mengirim gambar.",
+                    },
+                    {
+                      key: "allowVoice",
+                      icon: Mic,
+                      label: "Pesan suara",
+                      hint: "Pengguna boleh merekam pesan suara.",
+                    },
+                    {
+                      key: "allowFiles",
+                      icon: Paperclip,
+                      label: "Dokumen/file",
+                      hint: "Pengguna boleh melampirkan file apa pun.",
+                    },
+                    {
+                      key: "allowLinks",
+                      icon: Link2,
+                      label: "Tautan",
+                      hint: "Bila dimatikan, pesan berisi URL ditolak.",
+                    },
+                    {
+                      key: "linkPreview",
+                      icon: Eye,
+                      label: "Pratinjau tautan",
+                      hint: "Kartu pratinjau pada pesan berisi URL.",
+                    },
+                    {
+                      key: "allowReactions",
+                      icon: Smile,
+                      label: "Reaksi emoji",
+                      hint: "Reaksi pada pesan oleh pengguna.",
+                    },
+                    {
+                      key: "readReceipts",
+                      icon: Check,
+                      label: "Tanda dibaca (✓✓)",
+                      hint: "Bila dimatikan, ✓✓ tidak pernah tampil di pihak lain.",
+                    },
+                  ] as const
+                ).map((f) => (
+                  <div key={f.key} className="flex items-center justify-between gap-3">
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
+                        <f.icon className="size-4 text-muted-foreground" aria-hidden="true" />
+                      </span>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium">{f.label}</p>
+                        <p className="truncate text-[11px] text-muted-foreground">{f.hint}</p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={settings?.[f.key] ?? true}
+                      onCheckedChange={(v) => {
+                        setSettings((s) => (s ? { ...s, [f.key]: v } : s));
+                        saveSettings({ [f.key]: v } as Partial<AppSettings>);
+                      }}
+                      aria-label={f.label}
+                    />
+                  </div>
+                ))}
+              </div>
+
               <div className="space-y-3 rounded-xl border bg-card p-3">
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
@@ -762,6 +1302,76 @@ export function AdminDashboard({
                 />
               </div>
 
+              {/* v13 — info runtime + keadaan aplikasi */}
+              <div className="rounded-xl border bg-card p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    Runtime & keadaan aplikasi
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 text-muted-foreground"
+                    onClick={fetchSystem}
+                    disabled={systemLoading}
+                  >
+                    <RefreshCw
+                      className={cn("size-3.5", systemLoading && "animate-spin")}
+                      aria-hidden="true"
+                    />
+                    Muat ulang
+                  </Button>
+                </div>
+                <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+                  {(
+                    [
+                      { icon: Cpu, label: "Runtime", value: system?.runtime ?? "—" },
+                      { icon: Database, label: "Platform", value: system?.platform ?? "—" },
+                      {
+                        icon: HardDrive,
+                        label: "Memori (RSS)",
+                        value: system ? formatFileSize(system.memory.rss) : "—",
+                      },
+                      {
+                        icon: Activity,
+                        label: "Koneksi socket",
+                        value: system ? String(system.socketClients) : "—",
+                      },
+                      {
+                        icon: Users,
+                        label: "Pengguna online",
+                        value: system ? String(system.onlineUsers) : "—",
+                      },
+                      {
+                        icon: Bell,
+                        label: "Langganan push",
+                        value: system ? String(system.pushSubs) : "—",
+                      },
+                      {
+                        icon: ShieldCheck,
+                        label: "Kata terlarang",
+                        value: system ? String(system.keywords) : "—",
+                      },
+                      {
+                        icon: Flag,
+                        label: "Pesan ditandai",
+                        value: system ? String(system.flaggedCount) : "—",
+                      },
+                    ] as const
+                  ).map((r) => (
+                    <div key={r.label} className="rounded-lg border bg-background/50 p-2">
+                      <p className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                        <r.icon className="size-3" aria-hidden="true" />
+                        {r.label}
+                      </p>
+                      <p className="truncate text-xs font-semibold tabular-nums" title={r.value}>
+                        {r.value}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
               <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3">
                 <Button
                   size="sm"
@@ -793,6 +1403,16 @@ export function AdminDashboard({
                 </Button>
                 <Button
                   size="sm"
+                  variant="outline"
+                  className="h-9 text-amber-700 dark:text-amber-400"
+                  onClick={runCleanup}
+                  disabled={busy !== null}
+                >
+                  <Trash2 className="size-4" aria-hidden="true" />
+                  Bersihkan media lama
+                </Button>
+                <Button
+                  size="sm"
                   variant="ghost"
                   className="h-9 text-muted-foreground"
                   onClick={fetchStats}
@@ -805,10 +1425,43 @@ export function AdminDashboard({
                   Segarkan
                 </Button>
                 {vacuumResult ? (
-                  <p className="w-full text-xs font-medium text-emerald-600">
-                    {vacuumResult}
-                  </p>
+                  <p className="w-full text-xs font-medium text-emerald-600">{vacuumResult}</p>
                 ) : null}
+                {cleanupResult ? (
+                  <p className="w-full text-xs font-medium text-emerald-600">{cleanupResult}</p>
+                ) : null}
+              </div>
+
+              {/* v13 — jejak audit */}
+              <div className="rounded-xl border bg-card p-3">
+                <p className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                  <ScrollText className="size-3.5" aria-hidden="true" />
+                  Jejak audit ({system?.auditCount ?? 0} total) — 30 terakhir
+                </p>
+                {!system || system.audit.length === 0 ? (
+                  <p className="py-4 text-center text-sm text-muted-foreground">
+                    {systemLoading ? "Memuat…" : "Belum ada aktivitas admin tercatat."}
+                  </p>
+                ) : (
+                  <div className="chat-scroll max-h-64 space-y-1.5 overflow-y-auto">
+                    {system.audit.map((a, i) => (
+                      <div
+                        key={`${a.at}-${i}`}
+                        className="flex items-start gap-2 rounded-lg border bg-background/50 px-2 py-1.5 text-xs"
+                      >
+                        <Badge variant="secondary" className="shrink-0 text-[10px]">
+                          {AUDIT_LABELS[a.action] ?? a.action}
+                        </Badge>
+                        <span className="min-w-0 flex-1 break-words text-muted-foreground">
+                          {a.detail}
+                        </span>
+                        <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground">
+                          {fmtDateTime(a.at)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="rounded-xl border bg-card p-3 text-xs leading-relaxed text-muted-foreground">

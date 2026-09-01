@@ -757,7 +757,9 @@ export function Messenger() {
               ? "Nama tidak valid (1–40 karakter)."
               : res.error === "NAME_RESERVED"
                 ? "Nama “Admin” tidak tersedia — coba nama lain."
-                : "Terjadi kesalahan, coba lagi."
+                : res.error === "REGISTRATION_CLOSED"
+                  ? "Pendaftaran sedang ditutup admin — masuk dengan akun yang sudah ada."
+                  : "Terjadi kesalahan, coba lagi."
           );
         }
       }
@@ -1699,6 +1701,7 @@ export function Messenger() {
                   translating={translatingId === m.id}
                   pinned={pinnedMsg?.id === m.id}
                   canEdit={canEditMessage(m, me.userId)}
+                  linkPreviewEnabled={appSettings?.linkPreview !== false}
                   onReply={() => setReplyTo(m)}
                   onDelete={() => handleDelete(m)}
                   onMediaOpen={() => setViewer(viewerStateForMessage(mediaGallery, m))}

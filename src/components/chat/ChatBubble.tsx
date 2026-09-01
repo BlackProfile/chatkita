@@ -80,6 +80,8 @@ interface ChatBubbleProps {
   canEdit?: boolean;
   /** v5 — show the "Sematkan" action (admin only). */
   canPin?: boolean;
+  /** v13 — kartu pratinjau tautan diaktifkan (setting aplikasi linkPreview). */
+  linkPreviewEnabled?: boolean;
   /** v11 — moderasi admin: hapus pesan pengguna lain (dengan konfirmasi di induk). */
   onModerate?: () => void;
   /** v11 — admin: lihat riwayat revisi pesan yang pernah diedit. */
@@ -131,6 +133,7 @@ export function ChatBubble({
   pinned = false,
   canEdit = false,
   canPin = false,
+  linkPreviewEnabled = true,
   onModerate,
   onEditHistory,
   onReply,
@@ -412,7 +415,7 @@ export function ChatBubble({
 
           {/* Task 19 — kartu pratinjau tautan (pesan teks ber-URL), di bawah
               teks, selebar bubble. Klik kartu TIDAK men-toggle baris aksi. */}
-          {!deleted && type === "text" && textLinkUrl ? (
+          {!deleted && type === "text" && textLinkUrl && linkPreviewEnabled ? (
             <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
               {/* key: remount per URL agar state hook/skeleton selalu segar */}
               <LinkPreviewCard key={textLinkUrl} url={textLinkUrl} dark={isRight} />
