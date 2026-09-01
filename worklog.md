@@ -728,3 +728,21 @@ Work Log:
 
 Stage Summary:
 - Fitur: TIDAK ada yang hilang — tak perlu recovery. Tampilan custom user: TIDAK ditemukan di manapun (disk/git/DB-history) → kesimpulan: hilang saat rollback sandbox sebelum tersimpan; hanya bisa dibangun ulang dari screenshot/deskripsi user atau file backup JSON yang dia unduh dulu. BELUM ada perubahan kode (user minta jawaban dulu). Menunggu: screenshot tampilan lama / backup JSON / deskripsi.
+
+---
+Task ID: 22
+Agent: main (Z.ai Code)
+Task: v12 UI — desain ulang premium tampilan (lanjutan recovery: user tidak punya backup/screenshot tampilan lama → rebuild dari nol), ANTI-ROLLBACK: tiap tahap di-commit
+
+Work Log:
+- Stage 1 (06682e9): globals.css +.chat-wallpaper (pola doodle SVG data-URI emerald, light #edf1ed / dark #0b1410 ala WhatsApp) +.login-bg (gradient premium + glow radial emerald/teal, varian dark) + @keyframes float-slow + .glass-card (glassmorphism blur-18px, light/dark) + .btn-gradient (gradient emerald 135deg + shadow glow + state disabled/hover/active).
+- Stage 2 (24b6dc3): login Messenger ditulis ulang — brand di luar kartu (tile gradient size-16 rounded-[1.4rem] + h1 appName + welcomeMessage), kartu kaca rounded-3xl, input h-12 rounded-xl bg-white/70 dark:bg-white/5, PIN tracking-[0.3em], tombol .btn-gradient h-12, divider "atau masuk sebagai nama lain", install outline glass, footer mini "Pesan real-time · Multi-perangkat · Gratis", 3 blob emerald/teal blur-3xl animate-float-slow. Import Card* dihapus (tak terpakai). SEMUA wiring lama utuh (handleAuth/lastName/needsPin/pinEntry/authError/install/maintenance).
+- Stage 3 (c6c194e): chat user — header bg-card/85 backdrop-blur-md z-10; area pesan + .chat-wallpaper; empty state premium (tile gradient + "Sapa Admin 👋" + subtitle); composer ala WhatsApp: pill rounded-full berisi emoji+paperclip+Input borderless (border-0 bg-transparent focus-visible:ring-0) + FAB kirim .btn-gradient rounded-full / mic ghost rounded-full; reply/edit/pending chip rounded-xl bg-card/90 backdrop-blur; bar input bg-card/85 backdrop-blur-md.
+- Stage 4 (af3ef66): ChatBubble kanan = gradient from-emerald-500 to-emerald-600 + shadow-emerald-600/25; kiri = bg-card border-black/5 (dipakai bersama admin → konsisten); DaySeparator chip bg-white/85 dark:bg-white/10 backdrop-blur ring.
+- (3fd9c8e): next.config.ts devIndicators:false — tombol overlay "N" Next DevTools menutupi tombol emoji composer di dev preview; dimatikan agar user akhir tidak melihatnya.
+- Insiden diperbaiki: Turbopack TIDAK me-recompile globals.css yang di-append via bash (chunk lama tersaji, kelas baru 0 match → tombol gradient tampil hitam). Solusi: restart dev server (2x; kedua untuk devIndicators). Pelajaran: setelah edit globals.css dari luar editor, verifikasi chunk CSS atau restart dev.
+- E2E agent-browser via gateway :81: login light+dark (gradient + glass + tombol emerald ✓), login → chat (wallpaper doodle terlihat, chip "Hari ini", bubble gradient kanan + ✓/✓✓, bubble putih kiri masuk LIVE dari admin sesi kedua, admin123 ✓), aksi bubble (Reaksi|Balas|Salin|Terjemahkan) muncul, dark mode chat (wallpaper gelap + bubble kontras), mobile 390px tanpa overflow-x, composer pill lengkap (emoji 📎 input mic, tanpa overlay N).
+- Lint 0/0. dev.log bersih (tanpa error). Cleanup: sesi admin ditutup; 3 pesan uji tersisa di percakapan akun uji "CekTampilan" (harmless).
+
+Stage Summary:
+- ChatKita v12 "premium visual": login gradient+glass+brand, chat user wallpaper WhatsApp + bubble gradient + composer pill + header glass + empty state + separator glass, dark mode menyeluruh, mobile aman. 5 commit terpisah (06682e9, 24b6dc3, c6c194e, af3ef66, 3fd9c8e) → tahan rollback sandbox (state bisa dipulihkan dari git). Fitur tidak berubah — hanya tampilan; seluruh wiring v10/v11 utuh.
