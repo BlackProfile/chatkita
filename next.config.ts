@@ -7,6 +7,9 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
+  /* Sembunyikan tombol overlay DevTools "N" di sudut — tidak relevan bagi
+     pengguna akhir yang melihat pratinjau dev. */
+  devIndicators: false,
 };
 
 export default nextConfig;
