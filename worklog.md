@@ -746,3 +746,19 @@ Work Log:
 
 Stage Summary:
 - ChatKita v12 "premium visual": login gradient+glass+brand, chat user wallpaper WhatsApp + bubble gradient + composer pill + header glass + empty state + separator glass, dark mode menyeluruh, mobile aman. 5 commit terpisah (06682e9, 24b6dc3, c6c194e, af3ef66, 3fd9c8e) → tahan rollback sandbox (state bisa dipulihkan dari git). Fitur tidak berubah — hanya tampilan; seluruh wiring v10/v11 utuh.
+
+---
+Task ID: 22 (lanjutan — Stage 5 & 6)
+Agent: main (Z.ai Code)
+Task: Polish panel admin/dashboard (permintaan user: "ikut memoles panel admin/dashboard") — konsisten dengan v12 premium visual
+
+Work Log:
+- Before-screenshot (gateway :81): /tmp/before-admin-login.png (kartu polos), /tmp/before-admin-inbox.png (flat), /tmp/before-admin-dash.png (KPI flat).
+- Commit A (a9f39be) — AdminPanel.tsx: (1) login admin premium ala login user: .login-bg + 2 blob animate-float-slow + brand tile gradient size-16 rounded-[1.4rem] "Panel Admin" DI LUAR kartu + .glass-card rounded-3xl + input h-12 rounded-xl bg-white/70 dark:bg-white/5 + placeholder dots + .btn-gradient h-12; wiring handleLogin/authError/connected UTUH. (2) Layar kunci: tile gradient + input h-12 rounded-xl + .btn-gradient "Buka kunci". (3) Header profil sidebar + header chat pane: bg-card/85 backdrop-blur-md z-10; avatar Admin kini gradient emerald→teal (bukan avatarColorClass). (4) Area pesan admin + empty state desktop: .chat-wallpaper; empty state baru = tile gradient MessagesSquare + judul + subteks. (5) Composer ala WhatsApp persis Messenger: pill rounded-full berisi emoji+paperclip (size-10 rounded-full) + Input borderless + FAB kirim .btn-gradient rounded-full / mic ghost rounded-full; container composer bg-card/85 backdrop-blur-md + safe-area-inset-bottom. (6) Chip reply/edit/pending rounded-xl bg-card/90 backdrop-blur.
+- Commit kecil (c43f6cd): tool-results/ di-exclude dari git.
+- Commit B (13bd1b6) — admin-dashboard.tsx: Kpi = tile ikon GRADIENT emerald→teal + shadow + value font-bold tabular-nums + hover:shadow-sm; BarChart bar = bg-gradient-to-t from-emerald-600 to-emerald-400 hover:brightness-110; DialogContent sm:max-w-4xl→5xl; DialogHeader bg-muted/30; tile judul gradient; tab aktif + tombol jenis siaran = gradient + shadow-sm shadow-emerald-600/25; tombol primer (Kirim siaran, Simpan identitas) = .btn-gradient. SEMUA wiring (fetchStats/settings/broadcast/backup/vacuum) tak disentuh.
+- E2E agent-browser gateway :81 (admin123): login admin light premium ✓; inbox + chat CekTampilan: wallpaper doodle + bubble gradient kanan ✓✓ + bubble putih kiri + composer pill ✓; dashboard Ringkasan: KPI gradient + chart gradient + tab gradient + dialog lebih lega ✓; tab Siaran: tombol aktif gradient + Kirim btn-gradient (disabled benar saat kosong) ✓; DARK MODE dashboard: kontras bagus ✓; mobile 390px: list + chat + composer pill tanpa overflow + safe-area ✓; kirim pesan live "Tes composer pill v12 ✅" → bubble gradient muncul ✓✓ ✓. Console 0 error, dev.log bersih. Lint 0/0.
+- Cleanup: viewport direset, sesi admin ditutup; 1 pesan uji tersisa di percakapan akun uji CekTampilan (harmless).
+
+Stage Summary:
+- v12 Stage 5-6 SELESAI: seluruh panel admin (login, lock screen, inbox, chat pane, composer, dashboard 6 tab) kini satu bahasa visual premium dengan sisi user — gradient emerald/teal, glass, wallpaper doodle, composer pill. 4 commit terpisah (a9f39be, c43f6cd, 13bd1b6) tahan rollback. Fitur/wiring v10/v11 TIDAK berubah — hanya tampilan.
