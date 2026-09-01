@@ -802,6 +802,9 @@ export function Messenger() {
     // "Lanjut chat sebagai …" button (server matches the account by
     // case-insensitive name and returns the full history).
     setName("");
+    // v12 — kartu kembali ke mode "lanjut" memakai lastName terbaru
+    // (lastName state sudah diperbarui saat auth sukses).
+    setLoginMode(lastName ? "continue" : "other");
     // Fresh socket ⇒ server cleanly forgets this client's rooms.
     setEpoch((e) => e + 1);
   };
