@@ -35,13 +35,6 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -1096,36 +1089,55 @@ export function Messenger() {
   /* ---------------------------------------------------------------- */
   if (!me) {
     return (
-      <div className="relative flex min-h-0 w-full flex-1 items-center justify-center px-4 pb-6">
+      <div className="login-bg relative flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden px-4 pb-10">
+        {/* Dekorasi latar: blob emerald mengambang */}
+        <span
+          aria-hidden="true"
+          className="animate-float-slow pointer-events-none absolute -left-24 -top-24 size-72 rounded-full bg-emerald-400/25 blur-3xl"
+        />
+        <span
+          aria-hidden="true"
+          className="animate-float-slow pointer-events-none absolute -bottom-28 -right-20 size-80 rounded-full bg-teal-400/25 blur-3xl"
+          style={{ animationDelay: "-4.5s" }}
+        />
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute left-1/2 top-28 size-40 -translate-x-1/2 rounded-full bg-emerald-300/15 blur-2xl"
+        />
+
         {/* Toggle tema mengambang — layar login tidak punya header */}
-        <div className="absolute right-2 top-2">
+        <div className="absolute right-3 top-3 z-10">
           <ThemeToggle />
         </div>
-        <Card className="w-full max-w-md rounded-2xl">
-          <CardHeader>
+
+        <div className="relative z-[1] w-full max-w-md">
+          {/* Brand */}
+          <div className="mb-5 flex flex-col items-center text-center">
             <span
-              className="w-fit rounded-lg bg-emerald-600/10 p-3 text-emerald-600"
+              className="mb-3 flex size-16 items-center justify-center rounded-[1.4rem] bg-gradient-to-br from-emerald-400 via-emerald-600 to-emerald-800 text-white shadow-xl shadow-emerald-600/30 ring-1 ring-white/50 dark:ring-white/10"
               aria-hidden="true"
             >
-              <MessageCircleMore className="size-6" />
+              <MessageCircleMore className="size-8" />
             </span>
-            <CardTitle className="text-xl">
-              Masuk {appSettings?.appName || "Chat"}
-            </CardTitle>
-            <CardDescription>
+            <h1 className="text-2xl font-bold tracking-tight text-emerald-950 dark:text-emerald-50">
+              {appSettings?.appName || "ChatKita"}
+            </h1>
+            <p className="mt-1.5 max-w-xs text-sm leading-snug text-emerald-900/65 dark:text-emerald-100/55">
               {appSettings?.welcomeMessage ||
                 "Cukup nama Anda untuk langsung terhubung & chat dengan Admin"}
-            </CardDescription>
+            </p>
+          </div>
+
+          {/* Kartu kaca */}
+          <div className="glass-card rounded-3xl p-6">
             {appSettings?.maintenanceMode ? (
-              <p className="mt-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+              <p className="mb-4 rounded-xl bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
                 🛠 Mode pemeliharaan aktif
                 {appSettings.maintenanceNote ? ` — ${appSettings.maintenanceNote}` : ""}
               </p>
             ) : null}
-          </CardHeader>
-          <CardContent>
             <form
-              className="space-y-3"
+              className="space-y-4"
               onSubmit={(e) => {
                 e.preventDefault();
                 handleAuth();
@@ -1135,7 +1147,7 @@ export function Messenger() {
                 <>
                   <Button
                     type="button"
-                    className="h-11 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+                    className="btn-gradient h-12 w-full rounded-xl text-base font-semibold text-white"
                     disabled={!connected}
                     onClick={() => handleAuth(lastName)}
                   >
@@ -1143,20 +1155,23 @@ export function Messenger() {
                       ? `Lanjut chat sebagai “${lastName}”`
                       : "Menghubungkan…"}
                   </Button>
-                  <p className="text-center text-xs text-muted-foreground">
+                  <p className="text-center text-xs text-emerald-900/55 dark:text-emerald-100/45">
                     Lanjutkan percakapan Anda sebelumnya — riwayat pesan tetap ada
                   </p>
                   <div className="flex items-center gap-3" aria-hidden="true">
-                    <span className="h-px flex-1 bg-border" />
-                    <span className="text-xs text-muted-foreground">
+                    <span className="h-px flex-1 bg-emerald-900/10 dark:bg-white/10" />
+                    <span className="text-xs text-emerald-900/50 dark:text-emerald-100/40">
                       atau masuk sebagai nama lain
                     </span>
-                    <span className="h-px flex-1 bg-border" />
+                    <span className="h-px flex-1 bg-emerald-900/10 dark:bg-white/10" />
                   </div>
                 </>
               ) : null}
               <div className="space-y-2">
-                <Label htmlFor="messenger-name">
+                <Label
+                  htmlFor="messenger-name"
+                  className="text-emerald-950/80 dark:text-emerald-100/70"
+                >
                   {lastName ? "Nama baru" : "Nama Anda"}
                 </Label>
                 <Input
@@ -1165,7 +1180,7 @@ export function Messenger() {
                   maxLength={MAX_NAME_LENGTH}
                   placeholder="cth. Budi Santoso"
                   autoComplete="name"
-                  className="h-11"
+                  className="h-12 rounded-xl border-emerald-900/10 bg-white/70 text-base dark:border-white/10 dark:bg-white/5"
                   onChange={(e) => {
                     setName(e.target.value);
                     setAuthError(null);
@@ -1174,7 +1189,12 @@ export function Messenger() {
               </div>
               {needsPin ? (
                 <div className="space-y-2">
-                  <Label htmlFor="messenger-pin">PIN akun</Label>
+                  <Label
+                    htmlFor="messenger-pin"
+                    className="text-emerald-950/80 dark:text-emerald-100/70"
+                  >
+                    PIN akun
+                  </Label>
                   <Input
                     id="messenger-pin"
                     type="password"
@@ -1182,7 +1202,7 @@ export function Messenger() {
                     maxLength={8}
                     value={pinEntry}
                     placeholder="••••"
-                    className="h-11"
+                    className="h-12 rounded-xl border-emerald-900/10 bg-white/70 tracking-[0.3em] dark:border-white/10 dark:bg-white/5"
                     onChange={(e) => {
                       setPinEntry(e.target.value.replace(/\D/g, ""));
                       setAuthError(null);
@@ -1190,21 +1210,20 @@ export function Messenger() {
                   />
                 </div>
               ) : null}
-              {authError ? <p className="text-sm text-destructive">{authError}</p> : null}
+              {authError ? (
+                <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {authError}
+                </p>
+              ) : null}
               <Button
                 type="submit"
-                variant={lastName ? "outline" : "default"}
-                className={
-                  lastName
-                    ? "h-11 w-full"
-                    : "h-11 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
-                }
+                className="btn-gradient h-12 w-full rounded-xl text-base font-semibold text-white"
                 disabled={!connected || !name.trim() || (needsPin && !pinEntry)}
               >
                 {connected ? "Masuk" : "Menghubungkan…"}
               </Button>
               {!lastName ? (
-                <p className="text-center text-xs text-muted-foreground">
+                <p className="text-center text-xs text-emerald-900/55 dark:text-emerald-100/45">
                   Nama yang sama = akun yang sama, jadi Anda bisa lanjut chat kapan saja
                 </p>
               ) : null}
@@ -1212,15 +1231,19 @@ export function Messenger() {
                 <Button
                   type="button"
                   variant="outline"
-                  className="h-10 w-full"
+                  className="h-10 w-full rounded-xl border-emerald-900/15 bg-white/40 hover:bg-white/70 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
                   onClick={() => promptInstall()}
                 >
                   📲 Install aplikasi di perangkat ini
                 </Button>
               ) : null}
             </form>
-          </CardContent>
-        </Card>
+          </div>
+
+          <p className="mt-5 text-center text-[11px] tracking-wide text-emerald-900/45 dark:text-emerald-100/35">
+            Pesan real-time · Multi-perangkat · Gratis
+          </p>
+        </div>
       </div>
     );
   }
