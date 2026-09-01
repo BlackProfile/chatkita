@@ -1291,7 +1291,7 @@ export function Messenger() {
         ) : null}
 
         {/* Chat header */}
-        <div className="flex shrink-0 items-center gap-2 border-b p-3">
+        <div className="z-10 flex shrink-0 items-center gap-2 border-b bg-card/85 px-3 py-2.5 backdrop-blur-md">
           <span className="relative shrink-0">
             <Avatar className="size-10">
               <AvatarFallback
@@ -1498,7 +1498,7 @@ export function Messenger() {
         {/* Messages */}
         <div
           ref={scrollRef}
-          className="chat-scroll relative min-h-0 flex-1 overflow-y-auto overscroll-contain"
+          className="chat-scroll chat-wallpaper relative min-h-0 flex-1 overflow-y-auto overscroll-contain"
           onScroll={(e) => {
             const el = e.currentTarget;
             const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
@@ -1532,13 +1532,31 @@ export function Messenger() {
             ) : null}
             {visibleMessages.length === 0 ? (
               query ? (
-                <p className="py-10 text-center text-sm text-muted-foreground">
-                  Tidak ada pesan yang cocok dengan “{searchQuery}”.
-                </p>
+                <div className="flex flex-col items-center gap-2 py-12 text-center">
+                  <span className="flex size-12 items-center justify-center rounded-full bg-muted/80 text-muted-foreground">
+                    <Search className="size-5" aria-hidden="true" />
+                  </span>
+                  <p className="text-sm text-muted-foreground">
+                    Tidak ada pesan yang cocok dengan “{searchQuery}”.
+                  </p>
+                </div>
               ) : (
-                <p className="py-10 text-center text-sm text-muted-foreground">
-                  Belum ada pesan. Sapa {partner?.name ?? "Admin"}!
-                </p>
+                <div className="flex flex-col items-center gap-3 py-14 text-center">
+                  <span
+                    aria-hidden="true"
+                    className="flex size-16 items-center justify-center rounded-[1.3rem] bg-gradient-to-br from-emerald-400 via-emerald-600 to-emerald-800 text-white shadow-lg shadow-emerald-600/25"
+                  >
+                    <MessageCircleMore className="size-8" />
+                  </span>
+                  <div>
+                    <p className="font-semibold text-foreground">
+                      Sapa {partner?.name ?? "Admin"} 👋
+                    </p>
+                    <p className="mt-0.5 text-sm text-muted-foreground">
+                      Kirim pesan pertama Anda — foto, file, dan pesan suara juga bisa.
+                    </p>
+                  </div>
+                </div>
               )
             ) : (
               visibleMessages.map((m, idx) => (
@@ -1627,7 +1645,7 @@ export function Messenger() {
 
         {/* Reply chip */}
         {replyTo ? (
-          <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border-l-2 border-emerald-500 bg-muted/60 px-2 py-1.5 text-xs">
+          <div className="mx-3 mb-1 flex items-center gap-2 rounded-xl border border-l-2 border-emerald-500/25 border-l-emerald-500 bg-card/90 px-2.5 py-1.5 text-xs shadow-sm backdrop-blur-sm">
             <div className="min-w-0 flex-1">
               <p className="font-medium text-emerald-600">
                 Balas ke {replyTo.senderId === me.userId ? "diri sendiri" : (partner?.name ?? "Admin")}
@@ -1657,7 +1675,7 @@ export function Messenger() {
 
         {/* Edit chip (v5) */}
         {editing ? (
-          <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border-l-2 border-amber-500 bg-amber-500/10 px-2 py-1.5 text-xs">
+          <div className="mx-3 mb-1 flex items-center gap-2 rounded-xl border border-l-2 border-amber-500/25 border-l-amber-500 bg-amber-500/10 px-2.5 py-1.5 text-xs backdrop-blur-sm">
             <div className="min-w-0 flex-1">
               <p className="font-medium text-amber-600">Mengedit pesan</p>
               <p className="truncate text-muted-foreground">{editing.content}</p>
@@ -1675,7 +1693,7 @@ export function Messenger() {
 
         {/* Pending image chip */}
         {pendingImage ? (
-          <div className="mx-3 mb-1 flex items-center gap-2 rounded-lg border bg-muted/60 px-2 py-1.5">
+          <div className="mx-3 mb-1 flex items-center gap-2 rounded-xl border bg-card/90 px-2.5 py-1.5 shadow-sm backdrop-blur-sm">
             <img
               src={pendingImage.previewUrl}
               alt="Pratinjau foto"
@@ -1697,7 +1715,7 @@ export function Messenger() {
         ) : null}
 
         {/* Input row (or recording bar) */}
-        <div className="relative shrink-0 border-t p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+        <div className="relative shrink-0 border-t bg-card/85 px-3 pt-2.5 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md">
           {emojiOpen ? (
             <EmojiPicker
               onPick={(emoji) => {
@@ -1741,7 +1759,7 @@ export function Messenger() {
               </Button>
             </div>
           ) : (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <input
                 ref={fileInputRef}
                 type="file"
@@ -1752,56 +1770,58 @@ export function Messenger() {
                   e.target.value = "";
                 }}
               />
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
-                aria-label="Pilih emoji"
-                onClick={() => setEmojiOpen((v) => !v)}
-              >
-                <Smile className="size-5" aria-hidden="true" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
-                aria-label="Lampirkan foto atau file"
-                title={
-                  mediaBlocked
-                    ? "Media diblokir admin"
-                    : sendBlocked
-                      ? "Pengiriman dibatasi admin"
-                      : "Lampirkan foto atau file"
-                }
-                disabled={!connected || mediaBlocked || sendBlocked}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Paperclip className="size-5" aria-hidden="true" />
-              </Button>
-              <Input
-                value={input}
-                maxLength={MAX_MESSAGE_LENGTH}
-                placeholder={composerPlaceholder}
-                aria-label={editing ? "Edit pesan" : "Tulis pesan"}
-                autoComplete="off"
-                disabled={!connected || sendBlocked}
-                className="h-11 flex-1"
-                onChange={(e) => handleInputChange(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
+              <div className="flex min-w-0 flex-1 items-center gap-0.5 rounded-full border bg-card px-1.5 shadow-sm">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-10 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                  aria-label="Pilih emoji"
+                  onClick={() => setEmojiOpen((v) => !v)}
+                >
+                  <Smile className="size-5" aria-hidden="true" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-10 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                  aria-label="Lampirkan foto atau file"
+                  title={
+                    mediaBlocked
+                      ? "Media diblokir admin"
+                      : sendBlocked
+                        ? "Pengiriman dibatasi admin"
+                        : "Lampirkan foto atau file"
                   }
-                  if (e.key === "Escape" && editing) {
-                    e.preventDefault();
-                    handleEditCancel();
-                  }
-                }}
-              />
+                  disabled={!connected || mediaBlocked || sendBlocked}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <Paperclip className="size-5" aria-hidden="true" />
+                </Button>
+                <Input
+                  value={input}
+                  maxLength={MAX_MESSAGE_LENGTH}
+                  placeholder={composerPlaceholder}
+                  aria-label={editing ? "Edit pesan" : "Tulis pesan"}
+                  autoComplete="off"
+                  disabled={!connected || sendBlocked}
+                  className="h-11 min-w-0 flex-1 border-0 bg-transparent px-1 shadow-none focus-visible:ring-0 dark:bg-transparent"
+                  onChange={(e) => handleInputChange(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                    if (e.key === "Escape" && editing) {
+                      e.preventDefault();
+                      handleEditCancel();
+                    }
+                  }}
+                />
+              </div>
               {input.trim() || pendingImage ? (
                 <Button
                   size="icon"
-                  className="size-11 shrink-0 bg-emerald-600 text-white hover:bg-emerald-600/90"
+                  className="btn-gradient size-11 shrink-0 rounded-full text-white"
                   aria-label="Kirim"
                   disabled={!connected || uploading || sendBlocked || (!input.trim() && !pendingImage)}
                   onClick={() => {
@@ -1815,7 +1835,7 @@ export function Messenger() {
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="size-11 shrink-0 text-muted-foreground hover:text-foreground"
+                  className="size-11 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
                   aria-label="Rekam pesan suara"
                   disabled={!connected || mediaBlocked || sendBlocked}
                   onClick={() => void recorder.start()}
