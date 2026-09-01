@@ -1,0 +1,2002 @@
+     1→/**
+     2→ * ChatKita chat-service — socket.io mini service (port 3003)
+     3→ *
+     4→ * Model (v7 — pure private messenger, like WhatsApp/Telegram):
+     5→ *   users(role, pin_hash) ──< conversations ──< messages
+     6→ *     messages: type text|image|voice|file|system, reply_to_id, duration_ms,
+     7→ *               transcript (AI speech-to-text), deleted_at (soft delete),
+     8→ *               edited_at/translation, file_name/file_size/mime_type
+     9→ *               (file messages only)
+    10→ *   + per-user read state (reads) → ✓✓ receipts broadcast live
+    11→ *   + settings table (only Web Push VAPID keys are stored server-side)
+    12→ *
+    13→ * Every person who opens the app logs in with a name and gets a private
+    14→ * 1-on-1 chat with the Admin account (the app owner), like messaging any
+    15→ * contact. The Admin sees ALL conversations in one list, like WhatsApp Web.
+    16→ *
+    17→ * v7 — file sharing (documents, video, audio, archives, …):
+    18→ *   Large files are uploaded OUT-OF-BAND. The bytes never touch this
+    19→ *   service: the client POSTs them to the Next.js HTTP route POST /api/upload
+    20→ *   (stored on disk under db/media/<random-name>), which returns the public
+    21→ *   URL path "/api/media/<storedName>". The chat message then carries
+    22→ *   type 'file' with that path as `content` plus the metadata
+    23→ *   fileName/fileSize/mimeType, which this service validates (path-only
+    24→ *   URL matching /api/media/<name>, name 1–255 chars, type/subtype mime,
+    25→ *   size ≤ 25 MiB) and stores in messages.file_name/file_size/mime_type.
+    26→ *   GET /api/media/<name> (Next.js route) streams the bytes back for
+    27→ *   preview/download. Web Push bodies for file messages render as
+    28→ *   "📎 <fileName>" via snippetOf.
+    29→ *
+    30→ * Feature set (pure messenger):
+    31→ *   - Text | image | voice | file messages (+ replies, media size caps)
+    32→ *   - Emoji reactions (message_reactions, one per user per message)
+    33→ *   - Edit own text messages (15-min window, edited_at marker)
+    34→ *   - Delete for everyone (soft delete + content redaction)
+    35→ *   - Live ✓✓ read receipts (`read:update` broadcast)
+    36→ *   - Presence (users' online state visible to the admins room ONLY)
+    37→ *   - Typing relay between the two participants
+    38→ *   - Pin a message per conversation (banner on both sides)
+    39→ *   - Archive / unarchive conversations (a new user message auto-unarchives)
+    40→ *   - Voice-note transcription (z-ai-web-dev-sdk ASR → message:updated)
+    41→ *   - On-demand AI translation (messages.translation, cached)
+    42→ *   - Web Push notifications when the recipient has no live socket
+    43→ *     (VAPID keys generated once, stored in settings; subscriptions in
+    44→ *     push_subscriptions; dead endpoints pruned on 404/410)
+    45→ *   - Optional account PIN (SHA-256) protecting name-only logins
+    46→ *
+    47→ * Removed in v6 (v4/v5 customer-service tooling, no longer here): CRM
+    48→ * labels/notes, pre-chat topics, operating hours, quick replies, SLA
+    49→ * alerts, chatbot menu, star ratings, broadcast, CSV/print export,
+    50→ * stats, AI auto-reply/suggestions/summary, `public:settings:update`.
+    51→ * Historical SQLite columns (users.label/note/topic, messages.kind) and
+    52→ * the old ratings table are left in existing databases but unused.
+    53→ *
+    54→ * Persistence: bun:sqlite (WAL mode) at ./chat.db
+    55→ * Connection path MUST stay '/' — the Caddy gateway forwards
+    56→ * /?XTransformPort=3003 to this port.
+    57→ */
+    58→
+    59→import { createServer } from 'http'
+    60→import { join, resolve } from 'path'
+    61→import { createHash } from 'crypto'
+    62→import { readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+    63→import { Database } from 'bun:sqlite'
+    64→import { Server, type Socket as IoSocket } from 'socket.io'
+    65→import ZAI from 'z-ai-web-dev-sdk'
+    66→import webpush from 'web-push'
+    67→
+    68→/* ------------------------------------------------------------------ */
+    69→/* Configuration                                                       */
+    70→/* ------------------------------------------------------------------ */
+    71→
+    72→const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
+    73→/** v10 — service version surfaced by the admin dashboard (Info aplikasi). */
+    74→const SERVICE_VERSION = 'v10'
+    75→const BOOT_AT = Date.now()
+    76→const ADMIN_ID = 'admin'
+    77→const ADMIN_NAME = 'Admin'
+    78→const MAX_NAME_LENGTH = 40
+    79→const MAX_MESSAGE_LENGTH = 1000
+    80→/** v8 — messages per history page (auth/history/older); older pages load
+    81→ *  on demand via `messages:older` instead of one huge payload. */
+    82→const HISTORY_PAGE_SIZE = 50
+    83→/** Max data-URL payload for LEGACY image/voice messages (base64 chars).
+    84→ *  v8 clients upload to /api/upload instead; data URLs still accepted. */
+    85→const MAX_MEDIA_LENGTH = 2_500_000
+    86→/** v7 — max size of out-of-band file messages in bytes (25 MiB). The
+    87→ * /api/upload route enforces the same cap; this is the message-side check. */
+    88→const MAX_FILE_BYTES = 26_214_400
+    89→/** v8 — per-account media retention: disk media older than this is swept
+    90→ *  (payload redacted → "media kedaluwarsa" tombstone). Days, env-overridable. */
+    91→const RETENTION_MS =
+    92→  Math.min(365, Math.max(1, Number(process.env.MEDIA_RETENTION_DAYS) || 30)) * 86_400_000
+    93→/** v8 — per-account storage quota for disk media (sum of messages.file_size). */
+    94→const QUOTA_BYTES = 268_435_456 // 250 MiB
+    95→/** v8 — per-account send rate limits (sliding 1-minute window). */
+    96→const RATE_TEXT_PER_MIN = 30
+    97→const RATE_MEDIA_PER_MIN = 12
+    98→/** v8 — media directory shared with the Next.js /api/upload + /api/media
+    99→ *  routes (project-root relative so the sweeper can free disk space). */
+   100→const MEDIA_DIR = resolve(import.meta.dir, '../../db/media')
+   101→/** v7 — file messages: `content` must be the bare /api/media/<name> URL
+   102→ * path returned by POST /api/upload (no protocol/host, no whitespace). */
+   103→const FILE_URL_PATTERN = /^\/api\/media\/[A-Za-z0-9._-]{1,120}$/
+   104→/** v7 — file messages: mimeType must be a bare type/subtype token (≤ 100). */
+   105→const MIME_TYPE_PATTERN = /^[\w.+-]+\/[\w.+-]+$/
+   106→/** v7 — file messages: display-name limit (characters). */
+   107→const MAX_FILE_NAME_LENGTH = 255
+   108→/** Fixed reaction palette (v5). */
+   109→const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const
+   110→/** Window in which a sender may edit their own text message. */
+   111→const EDIT_WINDOW_MS = 15 * 60_000
+   112→
+   113→/* ------------------------------------------------------------------ */
+   114→/* Storage (bun:sqlite, WAL)                                           */
+   115→/* ------------------------------------------------------------------ */
+   116→
+   117→const DB_PATH = join(import.meta.dir, 'chat.db')
+   118→const db = new Database(DB_PATH)
+   119→db.run('PRAGMA journal_mode = WAL')
+   120→
+   121→db.run(`
+   122→  CREATE TABLE IF NOT EXISTS users (
+   123→    id TEXT PRIMARY KEY,
+   124→    name TEXT NOT NULL,
+   125→    role TEXT NOT NULL DEFAULT 'user',
+   126→    created_at INTEGER NOT NULL,
+   127→    last_seen_at INTEGER NOT NULL
+   128→  )
+   129→`)
+   130→
+   131→db.run(`
+   132→  CREATE TABLE IF NOT EXISTS conversations (
+   133→    id TEXT PRIMARY KEY,
+   134→    user_a_id TEXT NOT NULL,
+   135→    user_b_id TEXT NOT NULL,
+   136→    created_at INTEGER NOT NULL,
+   137→    last_message_at INTEGER NOT NULL
+   138→  )
+   139→`)
+   140→
+   141→db.run('CREATE INDEX IF NOT EXISTS idx_conversations_users ON conversations(user_a_id, user_b_id)')
+   142→
+   143→db.run(`
+   144→  CREATE TABLE IF NOT EXISTS messages (
+   145→    id INTEGER PRIMARY KEY AUTOINCREMENT,
+   146→    conversation_id TEXT NOT NULL,
+   147→    sender_id TEXT NOT NULL,
+   148→    content TEXT NOT NULL,
+   149→    created_at INTEGER NOT NULL
+   150→  )
+   151→`)
+   152→
+   153→db.run('CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id)')
+   154→
+   155→db.run(`
+   156→  CREATE TABLE IF NOT EXISTS reads (
+   157→    conversation_id TEXT NOT NULL,
+   158→    user_id TEXT NOT NULL,
+   159→    last_read_message_id INTEGER NOT NULL DEFAULT 0,
+   160→    PRIMARY KEY (conversation_id, user_id)
+   161→  )
+   162→`)
+   163→
+   164→db.run(`
+   165→  CREATE TABLE IF NOT EXISTS settings (
+   166→    key TEXT PRIMARY KEY,
+   167→    value TEXT NOT NULL
+   168→  )
+   169→`)
+   170→
+   171→/** Idempotent column migrations (v3 → v4). */
+   172→const addColumn = (table: string, column: string, ddl: string) => {
+   173→  try {
+   174→    db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+   175→    console.log(`Migrated: ${table}.${column} added`)
+   176→  } catch {
+   177→    /* column already exists */
+   178→  }
+   179→}
+   180→addColumn('messages', 'type', "TEXT NOT NULL DEFAULT 'text'")
+   181→addColumn('messages', 'reply_to_id', 'INTEGER')
+   182→addColumn('messages', 'duration_ms', 'INTEGER')
+   183→addColumn('messages', 'transcript', 'TEXT')
+   184→addColumn('messages', 'deleted_at', 'INTEGER')
+   185→addColumn('users', 'pin_hash', 'TEXT')
+   186→/* v5 migrations */
+   187→addColumn('messages', 'edited_at', 'INTEGER')
+   188→addColumn('messages', 'translation', 'TEXT')
+   189→addColumn('conversations', 'archived_at', 'INTEGER')
+   190→addColumn('conversations', 'pinned_message_id', 'INTEGER')
+   191→/* v6 — the CRM columns (users.label/note/topic) and the rating-marker
+   192→ * column (messages.kind) are no longer added, read, nor written. Existing
+   193→ * databases keep the dormant columns; they are never dropped. */
+   194→/* v7 migrations — file sharing (out-of-band via /api/upload + /api/media) */
+   195→addColumn('messages', 'file_name', 'TEXT')
+   196→addColumn('messages', 'file_size', 'INTEGER')
+   197→addColumn('messages', 'mime_type', 'TEXT')
+   198→/* v8 migrations — server lightening (thumbnails + retention tombstones) */
+   199→addColumn('messages', 'thumb_url', 'TEXT')
+   200→addColumn('messages', 'media_expired_at', 'INTEGER')
+   201→
+   202→db.run(`
+   203→  CREATE TABLE IF NOT EXISTS message_reactions (
+   204→    message_id INTEGER NOT NULL,
+   205→    user_id TEXT NOT NULL,
+   206→    emoji TEXT NOT NULL,
+   207→    PRIMARY KEY (message_id, user_id)
+   208→  )
+   209→`)
+   210→
+   211→db.run(`
+   212→  CREATE TABLE IF NOT EXISTS push_subscriptions (
+   213→    endpoint TEXT PRIMARY KEY,
+   214→    user_id TEXT NOT NULL,
+   215→    p256dh TEXT NOT NULL,
+   216→    auth TEXT NOT NULL,
+   217→    created_at INTEGER NOT NULL
+   218→  )
+   219→`)
+   220→
+   221→/* ------------------------------ row types ------------------------------ */
+   222→
+   223→interface UserRow {
+   224→  id: string
+   225→  name: string
+   226→  role: string
+   227→  created_at: number
+   228→  last_seen_at: number
+   229→  pin_hash?: string | null
+   230→}
+   231→
+   232→interface ConversationRow {
+   233→  id: string
+   234→  user_a_id: string
+   235→  user_b_id: string
+   236→  created_at: number
+   237→  last_message_at: number
+   238→  archived_at?: number | null
+   239→  pinned_message_id?: number | null
+   240→}
+   241→
+   242→interface MessageRow {
+   243→  id: number
+   244→  conversation_id: string
+   245→  sender_id: string
+   246→  content: string
+   247→  created_at: number
+   248→  type?: string
+   249→  reply_to_id?: number | null
+   250→  duration_ms?: number | null
+   251→  transcript?: string | null
+   252→  deleted_at?: number | null
+   253→  edited_at?: number | null
+   254→  translation?: string | null
+   255→  /* v7 — file-message metadata (type 'file' only; redacted on delete). */
+   256→  file_name?: string | null
+   257→  file_size?: number | null
+   258→  mime_type?: string | null
+   259→  /* v8 — tiny preview URL for photos/videos; retention tombstone stamp. */
+   260→  thumb_url?: string | null
+   261→  media_expired_at?: number | null
+   262→}
+   263→
+   264→/* ------------------------------ API types ------------------------------ */
+   265→
+   266→interface ChatMessageApi {
+   267→  id: number
+   268→  conversationId: string
+   269→  senderId: string
+   270→  content: string
+   271→  createdAt: string
+   272→  type: 'text' | 'image' | 'voice' | 'file' | 'system'
+   273→  replyToId?: number
+   274→  replyTo?: { id: number; senderId: string; snippet: string; type: string }
+   275→  durationMs?: number
+   276→  transcript?: string
+   277→  deletedAt?: string
+   278→  editedAt?: string
+   279→  translation?: string
+   280→  /** file messages: original file name (display only). */
+   281→  fileName?: string
+   282→  /** file messages: size in bytes. */
+   283→  fileSize?: number
+   284→  /** file messages: MIME type (e.g. application/pdf, video/mp4). */
+   285→  mimeType?: string
+   286→  /** v8 — tiny preview image (<30 KB) for photos & videos. */
+   287→  thumbUrl?: string
+   288→  /** v8 — media was removed by the retention sweeper (tombstone). */
+   289→  mediaExpiredAt?: string
+   290→  /** Emoji reactions grouped by emoji with the reacting user ids. */
+   291→  reactions?: { emoji: string; userIds: string[] }[]
+   292→}
+   293→
+   294→interface PartnerInfoApi {
+   295→  id: string
+   296→  name: string
+   297→  online: boolean
+   298→  lastSeenAt: string | null
+   299→}
+   300→
+   301→interface ConversationOverviewApi {
+   302→  id: string
+   303→  partner: PartnerInfoApi
+   304→  lastMessage:
+   305→    | {
+   306→        id: number
+   307→        senderId: string
+   308→        content: string
+   309→        createdAt: string
+   310→        type: string
+   311→        deleted: boolean
+   312→        fileName?: string
+   313→        mediaExpired?: boolean
+   314→      }
+   315→    | null
+   316→  lastMessageAt: string
+   317→  unread: number
+   318→  /** How far the PARTNER has read → powers ✓✓ on own bubbles. */
+   319→  partnerLastReadId: number
+   320→  /** v5 — archive state (admin side). */
+   321→  archived?: boolean
+   322→  /** v5 — pinned message (banner on both sides). */
+   323→  pinnedMessageId?: number | null
+   324→  pinned?: { id: number; senderId: string; snippet: string; type: string } | null
+   325→}
+   326→
+   327→/* ------------------- settings helpers (VAPID keys only) ------------------- */
+   328→
+   329→const getSetting = (key: string): string | undefined =>
+   330→  (db.query('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | null)?.value
+   331→
+   332→const setSetting = (key: string, value: string) => {
+   333→  db.run(
+   334→    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+   335→    [key, value]
+   336→  )
+   337→}
+   338→
+   339→/* ------------- v10 — application settings (admin dashboard) ------------- */
+   340→
+   341→/** App-wide settings editable from the admin dashboard (persisted). */
+   342→interface AppSettingsApi {
+   343→  appName: string
+   344→  welcomeMessage: string
+   345→  maintenanceMode: boolean
+   346→  maintenanceNote: string
+   347→}
+   348→
+   349→const APP_SETTING_LIMITS = {
+   350→  appName: 40,
+   351→  welcomeMessage: 200,
+   352→  maintenanceNote: 200,
+   353→} as const
+   354→
+   355→const getAppSettings = (): AppSettingsApi => ({
+   356→  appName: getSetting('appName') ?? 'ChatKita',
+   357→  welcomeMessage: getSetting('welcomeMessage') ?? '',
+   358→  maintenanceMode: getSetting('maintenanceMode') === '1',
+   359→  maintenanceNote:
+   360→    getSetting('maintenanceNote') ??
+   361→    'Sedang dalam pemeliharaan — beberapa fitur mungkin terbatas.',
+   362→})
+   363→
+   364→/** Fan out the freshest app settings to EVERY connected client. */
+   365→const broadcastAppSettings = () => {
+   366→  io.emit('app:settings:update', getAppSettings())
+   367→}
+   368→
+   369→/** Directory size helper (bytes) for the dashboard storage panel. */
+   370→const dirStats = (dir: string): { bytes: number; files: number } => {
+   371→  let bytes = 0
+   372→  let files = 0
+   373→  try {
+   374→    for (const entry of readdirSync(dir)) {
+   375→      try {
+   376→        const st = statSync(join(dir, entry))
+   377→        if (st.isFile()) {
+   378→          bytes += st.size
+   379→          files += 1
+   380→        }
+   381→      } catch {
+   382→        /* file vanished mid-scan */
+   383→      }
+   384→    }
+   385→  } catch {
+   386→    /* directory missing yet */
+   387→  }
+   388→  return { bytes, files }
+   389→}
+   390→
+   391→/**
+   392→ * v10 — aggregated dashboard stats for `admin:dashboard`.
+   393→ * All aggregation happens in SQL; days are UTC epoch-day buckets.
+   394→ */
+   395→const dashboardStats = () => {
+   396→  const nowMs = now()
+   397→  const DAY_MS = 86_400_000
+   398→
+   399→  const scalar = (sql: string, ...params: (string | number)[]): number =>
+   400→    Number((db.query(sql).get(...params) as { v: number | null } | undefined)?.v ?? 0)
+   401→
+   402→  const users = scalar("SELECT COUNT(*) AS v FROM users WHERE role = 'user'")
+   403→  const conversations = scalar('SELECT COUNT(*) AS v FROM conversations')
+   404→  const messages = scalar('SELECT COUNT(*) AS v FROM messages')
+   405→  const deletedMessages = scalar('SELECT COUNT(*) AS v FROM messages WHERE deleted_at IS NOT NULL')
+   406→  const last24h = scalar('SELECT COUNT(*) AS v FROM messages WHERE created_at >= ?', nowMs - DAY_MS)
+   407→  const last7d = scalar('SELECT COUNT(*) AS v FROM messages WHERE created_at >= ?', nowMs - 7 * DAY_MS)
+   408→
+   409→  const byTypeRows = db
+   410→    .query('SELECT type, COUNT(*) AS c FROM messages GROUP BY type')
+   411→    .all() as { type: string | null; c: number }[]
+   412→  const byType: Record<string, number> = { text: 0, image: 0, voice: 0, file: 0, system: 0 }
+   413→  for (const r of byTypeRows) {
+   414→    const key = r.type && r.type in byType ? r.type : 'text'
+   415→    byType[key] += r.c
+   416→  }
+   417→
+   418→  // Daily series — last 14 UTC days, zero-filled.
+   419→  const dailyRows = db
+   420→    .query(
+   421→      `SELECT CAST(created_at / 86400000 AS INTEGER) AS day, COUNT(*) AS c
+   422→       FROM messages WHERE created_at >= ? GROUP BY day`
+   423→    )
+   424→    .all(nowMs - 13 * DAY_MS) as { day: number; c: number }[]
+   425→  const dailyMap = new Map(dailyRows.map((r) => [r.day, r.c]))
+   426→  const daily: { date: string; count: number }[] = []
+   427→  for (let i = 13; i >= 0; i -= 1) {
+   428→    const epochDay = Math.floor(nowMs / DAY_MS) - i
+   429→    daily.push({
+   430→      date: new Date(epochDay * DAY_MS).toISOString().slice(0, 10),
+   431→      count: dailyMap.get(epochDay) ?? 0,
+   432→    })
+   433→  }
+   434→
+   435→  // Hour-of-day distribution over the last 7 days (0-23, UTC).
+   436→  const hourlyRows = db
+   437→    .query(
+   438→      `SELECT CAST(strftime('%H', created_at / 1000, 'unixepoch') AS INTEGER) AS h, COUNT(*) AS c
+   439→       FROM messages WHERE created_at >= ? GROUP BY h`
+   440→    )
+   441→    .all(nowMs - 7 * DAY_MS) as { h: number; c: number }[]
+   442→  const hourly: number[] = Array.from({ length: 24 }, () => 0)
+   443→  for (const r of hourlyRows) {
+   444→    if (r.h >= 0 && r.h < 24) hourly[r.h] = r.c
+   445→  }
+   446→
+   447→  const topUsers = (
+   448→    db
+   449→      .query(
+   450→        `SELECT u.id, u.name, u.last_seen_at,
+   451→           (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id) AS c
+   452→         FROM users u WHERE u.role = 'user'
+   453→         ORDER BY c DESC, u.name ASC LIMIT 10`
+   454→      )
+   455→      .all() as { id: string; name: string; last_seen_at: number; c: number }[]
+   456→  ).map((r) => ({
+   457→    id: r.id,
+   458→    name: r.name,
+   459→    messages: r.c,
+   460→    lastSeenAt: new Date(r.last_seen_at).toISOString(),
+   461→    online: isOnline(r.id),
+   462→  }))
+   463→
+   464→  const allUsers = (
+   465→    db
+   466→      .query(
+   467→        `SELECT u.id, u.name, u.created_at, u.last_seen_at,
+   468→           (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id) AS c
+   469→         FROM users u WHERE u.role = 'user'
+   470→         ORDER BY u.last_seen_at DESC LIMIT 100`
+   471→      )
+   472→      .all() as { id: string; name: string; created_at: number; last_seen_at: number; c: number }[]
+   473→  ).map((r) => ({
+   474→    id: r.id,
+   475→    name: r.name,
+   476→    joinedAt: new Date(r.created_at).toISOString(),
+   477→    lastSeenAt: new Date(r.last_seen_at).toISOString(),
+   478→    messages: r.c,
+   479→    online: isOnline(r.id),
+   480→  }))
+   481→
+   482→  const mediaRow = db
+   483→    .query(
+   484→      `SELECT COUNT(*) AS c, COALESCE(SUM(file_size), 0) AS b FROM messages
+   485→       WHERE file_size IS NOT NULL AND deleted_at IS NULL AND media_expired_at IS NULL`
+   486→    )
+   487→    .get() as { c: number; b: number }
+   488→
+   489→  let dbBytes = 0
+   490→  let walBytes = 0
+   491→  try {
+   492→    dbBytes = statSync(DB_PATH).size
+   493→    walBytes = statSync(`${DB_PATH}-wal`).size
+   494→  } catch {
+   495→    /* WAL may not exist */
+   496→  }
+   497→  const media = dirStats(MEDIA_DIR)
+   498→
+   499→  let onlineUsers = 0
+   500→  for (const [id, sockets] of onlineSockets) {
+   501→    if (id !== ADMIN_ID && sockets.size > 0) onlineUsers += 1
+   502→  }
+   503→
+   504→  return {
+   505→    generatedAt: new Date(nowMs).toISOString(),
+   506→    version: SERVICE_VERSION,
+   507→    uptimeMs: nowMs - BOOT_AT,
+   508→    totals: {
+   509→      users,
+   510→      conversations,
+   511→      messages,
+   512→      deletedMessages,
+   513→      last24h,
+   514→      last7d,
+   515→      byType,
+   516→      onlineUsers,
+   517→      mediaCount: Number(mediaRow.c),
+   518→      mediaBytes: Number(mediaRow.b),
+   519→    },
+   520→    daily,
+   521→    hourly,
+   522→    topUsers,
+   523→    users: allUsers,
+   524→    storage: {
+   525→      dbBytes,
+   526→      walBytes,
+   527→      mediaBytes: media.bytes,
+   528→      mediaFiles: media.files,
+   529→      quotaBytes: QUOTA_BYTES,
+   530→      retentionDays: Math.round(RETENTION_MS / DAY_MS),
+   531→    },
+   532→  }
+   533→}
+   534→
+   535→/* --------------------- Web Push (v5, offline delivery) --------------------- */
+   536→
+   537→let VAPID_PUBLIC = ''
+   538→try {
+   539→  const pub = getSetting('vapidPublic')
+   540→  const priv = getSetting('vapidPrivate')
+   541→  if (pub && priv) {
+   542→    VAPID_PUBLIC = pub
+   543→    webpush.setVapidDetails('mailto:admin@chatkita.local', pub, priv)
+   544→  } else {
+   545→    const keys = webpush.generateVAPIDKeys()
+   546→    VAPID_PUBLIC = keys.publicKey
+   547→    setSetting('vapidPublic', keys.publicKey)
+   548→    setSetting('vapidPrivate', keys.privateKey)
+   549→    webpush.setVapidDetails('mailto:admin@chatkita.local', keys.publicKey, keys.privateKey)
+   550→    console.log('VAPID keys generated and stored')
+   551→  }
+   552→} catch (err) {
+   553→  console.error('VAPID bootstrap failed (push disabled):', (err as Error)?.message ?? err)
+   554→}
+   555→
+   556→interface PushPayload {
+   557→  title: string
+   558→  body: string
+   559→  /** URL to open/focus when the notification is clicked. */
+   560→  url: string
+   561→}
+   562→
+   563→/** Fire-and-forget push to every stored subscription of `userId`. */
+   564→const pushSend = async (userId: string, payload: PushPayload) => {
+   565→  if (!VAPID_PUBLIC) return
+   566→  try {
+   567→    const subs = db
+   568→      .query('SELECT * FROM push_subscriptions WHERE user_id = ?')
+   569→      .all(userId) as Array<{ endpoint: string; p256dh: string; auth: string }>
+   570→    if (subs.length === 0) return
+   571→    await Promise.all(
+   572→      subs.map(async (s) => {
+   573→        try {
+   574→          await webpush.sendNotification(
+   575→            { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
+   576→            JSON.stringify(payload),
+   577→            { TTL: 3600 }
+   578→          )
+   579→        } catch (err) {
+   580→          const status = (err as { statusCode?: number }).statusCode
+   581→          if (status === 404 || status === 410) {
+   582→            db.run('DELETE FROM push_subscriptions WHERE endpoint = ?', [s.endpoint])
+   583→          }
+   584→        }
+   585→      })
+   586→    )
+   587→  } catch (err) {
+   588→    console.error('Push send error:', (err as Error)?.message ?? err)
+   589→  }
+   590→}
+   591→
+   592→/** Push a new message to `recipientId` when they have no live socket. */
+   593→const pushNewMessageIfOffline = (recipientId: string, senderName: string, body: string) => {
+   594→  if (isOnline(recipientId)) return
+   595→  const isAdmin = recipientId === ADMIN_ID
+   596→  void pushSend(recipientId, {
+   597→    title: isAdmin ? `${senderName} · ChatKita` : senderName,
+   598→    body,
+   599→    url: isAdmin ? '/?admin' : '/',
+   600→  })
+   601→}
+   602→
+   603→/* ------------------------------ helpers ------------------------------ */
+   604→
+   605→const now = () => Date.now()
+   606→
+   607→const toChatMessage = (row: MessageRow): ChatMessageApi => ({
+   608→  id: row.id,
+   609→  conversationId: row.conversation_id,
+   610→  senderId: row.sender_id,
+   611→  content: row.deleted_at ? '' : row.content,
+   612→  createdAt: new Date(row.created_at).toISOString(),
+   613→  type: (row.type as ChatMessageApi['type']) ?? 'text',
+   614→  ...(row.reply_to_id ? { replyToId: row.reply_to_id } : {}),
+   615→  ...(row.duration_ms ? { durationMs: row.duration_ms } : {}),
+   616→  ...(row.transcript ? { transcript: row.transcript } : {}),
+   617→  ...(row.deleted_at ? { deletedAt: new Date(row.deleted_at).toISOString() } : {}),
+   618→  ...(row.edited_at ? { editedAt: new Date(row.edited_at).toISOString() } : {}),
+   619→  ...(row.translation && !row.deleted_at ? { translation: row.translation } : {}),
+   620→  // v7 — file metadata; like content, it is NEVER emitted once deleted.
+   621→  ...(row.file_name && !row.deleted_at ? { fileName: row.file_name } : {}),
+   622→  ...(typeof row.file_size === 'number' && !row.deleted_at ? { fileSize: row.file_size } : {}),
+   623→  ...(row.mime_type && !row.deleted_at ? { mimeType: row.mime_type } : {}),
+   624→  // v8 — thumbnail + retention tombstone (never emitted after delete).
+   625→  ...(row.thumb_url && !row.deleted_at && !row.media_expired_at
+   626→    ? { thumbUrl: row.thumb_url }
+   627→    : {}),
+   628→  ...(row.media_expired_at && !row.deleted_at
+   629→    ? { mediaExpiredAt: new Date(row.media_expired_at).toISOString() }
+   630→    : {}),
+   631→})
+   632→
+   633→/** Human-readable one-liner for previews and reply quotes. */
+   634→const snippetOf = (
+   635→  row: Pick<MessageRow, 'type' | 'content' | 'deleted_at' | 'file_name' | 'media_expired_at'>
+   636→): string => {
+   637→  if (row.deleted_at) return 'Pesan ini dihapus'
+   638→  if (row.media_expired_at) return '⏳ Media kedaluwarsa'
+   639→  const type = row.type ?? 'text'
+   640→  if (type === 'image') return '📷 Foto'
+   641→  if (type === 'voice') return '🎤 Pesan suara'
+   642→  if (type === 'file') return `📎 ${row.file_name ?? 'File'}`
+   643→  return row.content
+   644→}
+   645→
+   646→/** Grouped reactions for one message (message:updated payloads). */
+   647→const reactionsFor = (messageId: number): { emoji: string; userIds: string[] }[] => {
+   648→  const rows = db
+   649→    .query('SELECT user_id, emoji FROM message_reactions WHERE message_id = ?')
+   650→    .all(messageId) as Array<{ user_id: string; emoji: string }>
+   651→  const byEmoji = new Map<string, string[]>()
+   652→  for (const r of rows) {
+   653→    const users = byEmoji.get(r.emoji) ?? []
+   654→    users.push(r.user_id)
+   655→    byEmoji.set(r.emoji, users)
+   656→  }
+   657→  return [...byEmoji.entries()].map(([emoji, userIds]) => ({ emoji, userIds }))
+   658→}
+   659→
+   660→/** Attach grouped reactions to a batch of messages (single query). */
+   661→const attachReactions = (rows: MessageRow[], messages: ChatMessageApi[]) => {
+   662→  if (rows.length === 0) return
+   663→  const placeholders = rows.map(() => '?').join(',')
+   664→  const reRows = db
+   665→    .query(
+   666→      `SELECT message_id, user_id, emoji FROM message_reactions WHERE message_id IN (${placeholders})`
+   667→    )
+   668→    .all(...rows.map((r) => r.id)) as Array<{ message_id: number; user_id: string; emoji: string }>
+   669→  if (reRows.length === 0) return
+   670→  const byMsg = new Map<number, Map<string, string[]>>()
+   671→  for (const r of reRows) {
+   672→    let byEmoji = byMsg.get(r.message_id)
+   673→    if (!byEmoji) {
+   674→      byEmoji = new Map()
+   675→      byMsg.set(r.message_id, byEmoji)
+   676→    }
+   677→    const users = byEmoji.get(r.emoji) ?? []
+   678→    users.push(r.user_id)
+   679→    byEmoji.set(r.emoji, users)
+   680→  }
+   681→  for (const msg of messages) {
+   682→    const byEmoji = byMsg.get(msg.id)
+   683→    if (byEmoji && byEmoji.size > 0) {
+   684→      msg.reactions = [...byEmoji.entries()].map(([emoji, userIds]) => ({ emoji, userIds }))
+   685→    }
+   686→  }
+   687→}
+   688→
+   689→/** Snapshot of the conversation's pinned message (or null). */
+   690→const pinnedSnapshotOf = (conversation: ConversationRow) => {
+   691→  const pid = conversation.pinned_message_id
+   692→  if (!pid) return null
+   693→  const row = db
+   694→    .query('SELECT * FROM messages WHERE id = ? AND conversation_id = ?')
+   695→    .get(pid, conversation.id) as MessageRow | null
+   696→  if (!row) return null
+   697→  return {
+   698→    id: row.id,
+   699→    senderId: row.sender_id,
+   700→    snippet: snippetOf(row),
+   701→    type: row.type ?? 'text',
+   702→  }
+   703→}
+   704→
+   705→/** Fetch reply-quote snapshots for a batch of messages (single query). */
+   706→const attachReplyPreviews = (rows: MessageRow[], messages: ChatMessageApi[]) => {
+   707→  const ids = [...new Set(rows.filter((r) => r.reply_to_id).map((r) => r.reply_to_id as number))]
+   708→  if (ids.length === 0) return
+   709→  const placeholders = ids.map(() => '?').join(',')
+   710→  const originals = db
+   711→    .query(
+   712→      `SELECT id, sender_id, content, type, deleted_at, file_name, media_expired_at FROM messages WHERE id IN (${placeholders})`
+   713→    )
+   714→    .all(...ids) as Array<
+   715→    Pick<MessageRow, 'id' | 'sender_id' | 'content' | 'type' | 'deleted_at' | 'file_name' | 'media_expired_at'>
+   716→  >
+   717→  const byId = new Map(originals.map((o) => [o.id, o]))
+   718→  for (const m of messages) {
+   719→    if (!m.replyToId) continue
+   720→    const o = byId.get(m.replyToId)
+   721→    if (o) m.replyTo = { id: o.id, senderId: o.sender_id, snippet: snippetOf(o), type: o.type ?? 'text' }
+   722→  }
+   723→}
+   724→
+   725→const toPartnerInfo = (user: UserRow): PartnerInfoApi => ({
+   726→  id: user.id,
+   727→  name: user.name,
+   728→  online: isOnline(user.id),
+   729→  lastSeenAt: new Date(user.last_seen_at).toISOString(),
+   730→})
+   731→
+   732→/** Ordered pair so a conversation between two users is unique. */
+   733→const pairKey = (a: string, b: string): [string, string] => (a < b ? [a, b] : [b, a])
+   734→
+   735→const findUserById = (id: string): UserRow | null =>
+   736→  (db.query('SELECT * FROM users WHERE id = ?').get(id) as UserRow | null) ?? null
+   737→
+   738→/** Lookup restricted to one role (the admin account is unreachable via login). */
+   739→const findUserByRoleAndId = (id: string, role: string): UserRow | null =>
+   740→  (db.query('SELECT * FROM users WHERE id = ? AND role = ?').get(id, role) as UserRow | null) ?? null
+   741→
+   742→const findUserByRoleAndName = (name: string, role: string): UserRow | null =>
+   743→  (db
+   744→    .query('SELECT * FROM users WHERE lower(name) = lower(?) AND role = ? LIMIT 1')
+   745→    .get(name, role) as UserRow | null) ?? null
+   746→
+   747→const getConversation = (conversationId: string): ConversationRow | null =>
+   748→  (db
+   749→    .query('SELECT * FROM conversations WHERE id = ?')
+   750→    .get(conversationId) as ConversationRow | null) ?? null
+   751→
+   752→const findConversationBetween = (a: string, b: string): ConversationRow | null => {
+   753→  const [low, high] = pairKey(a, b)
+   754→  return (
+   755→    (db
+   756→      .query('SELECT * FROM conversations WHERE user_a_id = ? AND user_b_id = ?')
+   757→      .get(low, high) as ConversationRow | null) ?? null
+   758→  )
+   759→}
+   760→
+   761→/** Get-or-create the (only) conversation between a user and the admin. */
+   762→const ensureConversationWithAdmin = (userId: string): ConversationRow => {
+   763→  const existing = findConversationBetween(userId, ADMIN_ID)
+   764→  if (existing) return existing
+   765→  const [a, b] = pairKey(userId, ADMIN_ID)
+   766→  const id = crypto.randomUUID()
+   767→  const ts = now()
+   768→  db.run(
+   769→    'INSERT INTO conversations (id, user_a_id, user_b_id, created_at, last_message_at) VALUES (?, ?, ?, ?, ?)',
+   770→    [id, a, b, ts, ts]
+   771→  )
+   772→  console.log(`Conversation ${id} ensured: ${a} <-> ${b}`)
+   773→  return { id, user_a_id: a, user_b_id: b, created_at: ts, last_message_at: ts, archived_at: null, pinned_message_id: null }
+   774→}
+   775→
+   776→const getPartnerId = (conversation: ConversationRow, userId: string) =>
+   777→  conversation.user_a_id === userId ? conversation.user_b_id : conversation.user_a_id
+   778→
+   779→const isParticipant = (conversation: ConversationRow, userId: string) =>
+   780→  conversation.user_a_id === userId || conversation.user_b_id === userId
+   781→
+   782→const getPartnerUser = (conversation: ConversationRow, userId: string): UserRow => {
+   783→  const partner = findUserById(getPartnerId(conversation, userId))
+   784→  if (!partner) throw new Error(`Partner of conversation ${conversation.id} missing`)
+   785→  return partner
+   786→}
+   787→
+   788→/**
+   789→ * One history page (v8): the newest `limit` messages of `conversationId`,
+   790→ * optionally ending just before `beforeId` (exclusive), ascending. Reply
+   791→ * previews + reactions are attached and `hasMore` reports whether even
+   792→ * older pages exist — clients load them via `messages:older` on demand.
+   793→ */
+   794→const getMessagesPage = (
+   795→  conversationId: string,
+   796→  beforeId?: number,
+   797→  limit = HISTORY_PAGE_SIZE
+   798→): { messages: ChatMessageApi[]; hasMore: boolean } => {
+   799→  const fetched = (
+   800→    beforeId
+   801→      ? (db
+   802→          .query(
+   803→            `SELECT * FROM (
+   804→               SELECT * FROM messages WHERE conversation_id = ? AND id < ?
+   805→               ORDER BY id DESC LIMIT ?
+   806→             ) ORDER BY id ASC`
+   807→          )
+   808→          .all(conversationId, beforeId, limit + 1) as MessageRow[])
+   809→      : (db
+   810→          .query(
+   811→            `SELECT * FROM (
+   812→               SELECT * FROM messages WHERE conversation_id = ?
+   813→               ORDER BY id DESC LIMIT ?
+   814→             ) ORDER BY id ASC`
+   815→          )
+   816→          .all(conversationId, limit + 1) as MessageRow[])
+   817→  )
+   818→  const hasMore = fetched.length > limit
+   819→  // The extra row is the OLDEST of the DESC fetch → drop it (ASC order).
+   820→  const rows = hasMore ? fetched.slice(1) : fetched
+   821→  const messages = rows.map(toChatMessage)
+   822→  attachReplyPreviews(rows, messages)
+   823→  attachReactions(rows, messages)
+   824→  return { messages, hasMore }
+   825→}
+   826→
+   827→/** Current last_read_message_id for (conversation, user). */
+   828→const getReadUpTo = (conversationId: string, userId: string): number =>
+   829→  ((db
+   830→    .query('SELECT last_read_message_id FROM reads WHERE conversation_id = ? AND user_id = ?')
+   831→    .get(conversationId, userId) as { last_read_message_id?: number } | null)
+   832→    ?.last_read_message_id ?? 0)
+   833→
+   834→/** Upsert reads.last_read_message_id = GREATEST(existing, upTo). */
+   835→const markRead = (conversationId: string, userId: string, upTo?: number) => {
+   836→  const target =
+   837→    upTo ??
+   838→    ((db
+   839→      .query('SELECT MAX(id) AS max_id FROM messages WHERE conversation_id = ?')
+   840→      .get(conversationId) as { max_id: number | null }).max_id ?? 0)
+   841→  db.run(
+   842→    `INSERT INTO reads (conversation_id, user_id, last_read_message_id)
+   843→     VALUES (?, ?, ?)
+   844→     ON CONFLICT(conversation_id, user_id)
+   845→     DO UPDATE SET last_read_message_id = MAX(last_read_message_id, excluded.last_read_message_id)`,
+   846→    [conversationId, userId, target]
+   847→  )
+   848→  return target
+   849→}
+   850→
+   851→/**
+   852→ * Tell the OTHER side how far `readerId` has read, so their own bubbles
+   853→ * upgrade ✓ → ✓✓ in real time. Users' reads interest the admins room;
+   854→ * the admin's reads interest the human user.
+   855→ */
+   856→const broadcastRead = (conversation: ConversationRow, readerId: string, target: number) => {
+   857→  const payload = { conversationId: conversation.id, userId: readerId, lastReadMessageId: target }
+   858→  if (readerId === ADMIN_ID) {
+   859→    io.to(`user:${getPartnerId(conversation, readerId)}`).emit('read:update', payload)
+   860→  } else {
+   861→    io.to('admins').emit('read:update', payload)
+   862→  }
+   863→}
+   864→
+   865→/** Full conversation list for one user, newest activity first. Includes
+   866→ *  zero-message conversations (LEFT JOIN) so a fresh user shows up. */
+   867→const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
+   868→  const rows = db
+   869→    .query(
+   870→      `SELECT
+   871→        c.id,
+   872→        c.last_message_at,
+   873→        c.archived_at,
+   874→        c.pinned_message_id,
+   875→        CASE WHEN c.user_a_id = $me THEN c.user_b_id ELSE c.user_a_id END AS partner_id,
+   876→        p.name AS partner_name,
+   877→        p.last_seen_at AS partner_last_seen,
+   878→        lm.id AS last_id,
+   879→        lm.sender_id AS last_sender,
+   880→        lm.content AS last_content,
+   881→        lm.created_at AS last_at,
+   882→        lm.type AS last_type,
+   883→        lm.deleted_at AS last_deleted,
+   884→        lm.file_name AS last_file_name,
+   885→        lm.media_expired_at AS last_media_expired,
+   886→        pm.id AS pin_id,
+   887→        pm.sender_id AS pin_sender,
+   888→        pm.content AS pin_content,
+   889→        pm.type AS pin_type,
+   890→        pm.deleted_at AS pin_deleted,
+   891→        pm.file_name AS pin_file_name,
+   892→        (SELECT r.last_read_message_id FROM reads r
+   893→          WHERE r.conversation_id = c.id
+   894→            AND r.user_id = (CASE WHEN c.user_a_id = $me THEN c.user_b_id ELSE c.user_a_id END)
+   895→        ) AS partner_read,
+   896→        (
+   897→          SELECT COUNT(*) FROM messages m
+   898→          WHERE m.conversation_id = c.id
+   899→            AND m.sender_id != $me
+   900→            AND m.deleted_at IS NULL
+   901→            AND m.id > COALESCE(
+   902→              (SELECT r.last_read_message_id FROM reads r
+   903→               WHERE r.conversation_id = c.id AND r.user_id = $me), 0)
+   904→        ) AS unread
+   905→      FROM conversations c
+   906→      JOIN users p
+   907→        ON p.id = (CASE WHEN c.user_a_id = $me THEN c.user_b_id ELSE c.user_a_id END)
+   908→      LEFT JOIN messages lm
+   909→        ON lm.id = (SELECT m2.id FROM messages m2
+   910→                    WHERE m2.conversation_id = c.id ORDER BY m2.id DESC LIMIT 1)
+   911→      LEFT JOIN messages pm
+   912→        ON pm.id = c.pinned_message_id
+   913→      WHERE c.user_a_id = $me OR c.user_b_id = $me
+   914→      ORDER BY c.last_message_at DESC`
+   915→    )
+   916→    .all({ $me: userId }) as Array<{
+   917→    id: string
+   918→    last_message_at: number
+   919→    archived_at: number | null
+   920→    pinned_message_id: number | null
+   921→    partner_id: string
+   922→    partner_name: string
+   923→    partner_last_seen: number
+   924→    last_id: number | null
+   925→    last_sender: string | null
+   926→    last_content: string | null
+   927→    last_at: number | null
+   928→    last_type: string | null
+   929→    last_deleted: number | null
+   930→    last_file_name: string | null
+   931→    last_media_expired: number | null
+   932→    pin_id: number | null
+   933→    pin_sender: string | null
+   934→    pin_content: string | null
+   935→    pin_type: string | null
+   936→    pin_deleted: number | null
+   937→    pin_file_name: string | null
+   938→    partner_read: number | null
+   939→    unread: number
+   940→  }>
+   941→
+   942→  return rows.map((r) => ({
+   943→    id: r.id,
+   944→    partner: {
+   945→      id: r.partner_id,
+   946→      name: r.partner_name,
+   947→      online: isOnline(r.partner_id),
+   948→      lastSeenAt: new Date(r.partner_last_seen).toISOString(),
+   949→    },
+   950→    lastMessage:
+   951→      r.last_id != null
+   952→        ? {
+   953→            id: r.last_id,
+   954→            senderId: r.last_sender as string,
+   955→            content: r.last_deleted ? '' : (r.last_content as string),
+   956→            createdAt: new Date(r.last_at as number).toISOString(),
+   957→            type: r.last_type ?? 'text',
+   958→            deleted: !!r.last_deleted,
+   959→            ...(r.last_file_name && !r.last_deleted
+   960→              ? { fileName: r.last_file_name }
+   961→              : {}),
+   962→            ...(r.last_media_expired != null && !r.last_deleted
+   963→              ? { mediaExpired: true }
+   964→              : {}),
+   965→          }
+   966→        : null,
+   967→    lastMessageAt: new Date(r.last_message_at).toISOString(),
+   968→    unread: r.unread,
+   969→    partnerLastReadId: r.partner_read ?? 0,
+   970→    archived: r.archived_at != null,
+   971→    pinnedMessageId: r.pinned_message_id ?? null,
+   972→    pinned:
+   973→      r.pin_id != null
+   974→        ? {
+   975→            id: r.pin_id,
+   976→            senderId: r.pin_sender as string,
+   977→            snippet: snippetOf({
+   978→              type: r.pin_type ?? 'text',
+   979→              content: r.pin_content ?? '',
+   980→              deleted_at: r.pin_deleted,
+   981→              file_name: r.pin_file_name,
+   982→            }),
+   983→            type: r.pin_type ?? 'text',
+   984→          }
+   985→        : null,
+   986→  }))
+   987→}
+   988→
+   989→/* ------------------------------------------------------------------ */
+   990→/* Presence                                                            */
+   991→/* ------------------------------------------------------------------ */
+   992→
+   993→const onlineSockets = new Map<string, Set<string>>() // userId -> socket ids
+   994→
+   995→const isOnline = (userId: string) => (onlineSockets.get(userId)?.size ?? 0) > 0
+   996→
+   997→/** Adds a socket for the user. Returns true if the user just came online. */
+   998→const addOnlineSocket = (userId: string, socketId: string) => {
+   999→  const set = onlineSockets.get(userId) ?? new Set<string>()
+  1000→  const becameOnline = set.size === 0
+  1001→  set.add(socketId)
+  1002→  onlineSockets.set(userId, set)
+  1003→  return becameOnline
+  1004→}
+  1005→
+  1006→/** Removes a socket. Returns true if the user just went offline. */
+  1007→const removeOnlineSocket = (userId: string, socketId: string) => {
+  1008→  const set = onlineSockets.get(userId)
+  1009→  if (!set) return false
+  1010→  set.delete(socketId)
+  1011→  if (set.size === 0) {
+  1012→    onlineSockets.delete(userId)
+  1013→    return true
+  1014→  }
+  1015→  return false
+  1016→}
+  1017→
+  1018→/* ------------------------------------------------------------------ */
+  1019→/* Message persistence + fan-out (human sends: text/image/voice/file)  */
+  1020→/* ------------------------------------------------------------------ */
+  1021→
+  1022→type MessageType = 'text' | 'image' | 'voice' | 'file' | 'system'
+  1023→
+  1024→/* ------------------------------------------------------------------ */
+  1025→/* v8 guards — per-account rate limits + storage quota                 */
+  1026→/* ------------------------------------------------------------------ */
+  1027→
+  1028→/** Sliding 1-minute windows per user + bucket ("text" / "media"). */
+  1029→const rateBuckets = new Map<string, number[]>()
+  1030→const rateAllowed = (userId: string, bucket: string, max: number): boolean => {
+  1031→  const key = `${bucket}:${userId}`
+  1032→  const cutoff = now() - 60_000
+  1033→  const stamps = (rateBuckets.get(key) ?? []).filter((t) => t > cutoff)
+  1034→  if (stamps.length >= max) {
+  1035→    rateBuckets.set(key, stamps) // keep pruned list even when rejected
+  1036→    return false
+  1037→  }
+  1038→  stamps.push(now())
+  1039→  rateBuckets.set(key, stamps)
+  1040→  if (rateBuckets.size > 5000) rateBuckets.clear() // crude memory cap
+  1041→  return true
+  1042→}
+  1043→
+  1044→/** Total bytes of live disk media owned by `userId` (v8 storage quota). */
+  1045→const storedMediaBytes = (userId: string): number =>
+  1046→  ((db
+  1047→    .query(
+  1048→      `SELECT COALESCE(SUM(file_size), 0) AS total FROM messages
+  1049→       WHERE sender_id = ? AND file_size IS NOT NULL
+  1050→         AND deleted_at IS NULL AND media_expired_at IS NULL`
+  1051→    )
+  1052→    .get(userId) as { total: number | null })?.total ?? 0)
+  1053→
+  1054→const insertAndFanOut = (
+  1055→  conversation: ConversationRow,
+  1056→  senderId: string,
+  1057→  content: string,
+  1058→  type: MessageType,
+  1059→  opts: {
+  1060→    replyToId?: number
+  1061→    durationMs?: number
+  1062→    /* v7/v8 — media metadata (file always; image/voice when disk-backed). */
+  1063→    fileName?: string
+  1064→    fileSize?: number
+  1065→    mimeType?: string
+  1066→    /* v8 — tiny preview URL for photos/videos. */
+  1067→    thumbUrl?: string
+  1068→  } = {}
+  1069→): ChatMessageApi => {
+  1070→  const ts = now()
+  1071→  const hasMediaMeta = type === 'file' || type === 'image' || type === 'voice'
+  1072→  const result = db.run(
+  1073→    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+  1074→    [
+  1075→      conversation.id,
+  1076→      senderId,
+  1077→      content,
+  1078→      ts,
+  1079→      type,
+  1080→      opts.replyToId ?? null,
+  1081→      opts.durationMs ?? null,
+  1082→      hasMediaMeta ? (opts.fileName ?? null) : null,
+  1083→      hasMediaMeta && typeof opts.fileSize === 'number' ? opts.fileSize : null,
+  1084→      hasMediaMeta ? (opts.mimeType ?? null) : null,
+  1085→      opts.thumbUrl ?? null,
+  1086→    ]
+  1087→  )
+  1088→  db.run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [ts, conversation.id])
+  1089→  const id = Number(result.lastInsertRowid)
+  1090→  markRead(conversation.id, senderId, id) // sender has "read" up to own message
+  1091→
+  1092→  const row = db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow
+  1093→  const message = toChatMessage(row)
+  1094→  attachReplyPreviews([row], [message])
+  1095→
+  1096→  // (`user:admin` is empty — the admins room carries admin-side delivery.)
+  1097→  io.to(`user:${conversation.user_a_id}`).emit('message:new', message)
+  1098→  io.to(`user:${conversation.user_b_id}`).emit('message:new', message)
+  1099→  io.to('admins').emit('message:new', message)
+  1100→  pushConversationsTo(conversation.user_a_id)
+  1101→  pushConversationsTo(conversation.user_b_id)
+  1102→
+  1103→  // Web Push for recipients with zero live sockets (v5).
+  1104→  if (type !== 'system') {
+  1105→    const senderName = findUserById(senderId)?.name ?? 'ChatKita'
+  1106→    const body = snippetOf(row)
+  1107→    for (const rid of [conversation.user_a_id, conversation.user_b_id]) {
+  1108→      if (rid === senderId) continue
+  1109→      pushNewMessageIfOffline(rid, senderName, body)
+  1110→    }
+  1111→  }
+  1112→  return message
+  1113→}
+  1114→
+  1115→/* ------------------------------------------------------------------ */
+  1116→/* AI helpers (z-ai-web-dev-sdk) — voice transcription + translation   */
+  1117→/* ------------------------------------------------------------------ */
+  1118→
+  1119→let zaiPromise: ReturnType<typeof ZAI.create> | null = null
+  1120→const getZai = () => {
+  1121→  if (!zaiPromise) zaiPromise = ZAI.create()
+  1122→  return zaiPromise
+  1123→}
+  1124→
+  1125→const llmComplete = async (system: string, user: string, maxLen = 700): Promise<string | null> => {
+  1126→  try {
+  1127→    const zai = await getZai()
+  1128→    const completion = await zai.chat.completions.create({
+  1129→      messages: [
+  1130→        { role: 'assistant', content: system },
+  1131→        { role: 'user', content: user },
+  1132→      ],
+  1133→      thinking: { type: 'disabled' },
+  1134→    })
+  1135→    const text = completion?.choices?.[0]?.message?.content?.trim()
+  1136→    zaiPromise = null // don't pin a possibly-unhealthy instance forever
+  1137→    return text && text.length > 0 ? text.slice(0, maxLen) : null
+  1138→  } catch (err) {
+  1139→    zaiPromise = null
+  1140→    console.error('LLM error:', (err as Error)?.message ?? err)
+  1141→    return null
+  1142→  }
+  1143→}
+  1144→
+  1145→const asrTranscribe = async (dataUrl: string): Promise<string | null> => {
+  1146→  try {
+  1147→    const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
+  1148→    const zai = await getZai()
+  1149→    const res = await zai.audio.asr.create({ file_base64: base64 })
+  1150→    zaiPromise = null
+  1151→    const text = res?.text?.trim()
+  1152→    return text && text.length > 0 ? text.slice(0, 500) : null
+  1153→  } catch (err) {
+  1154→    zaiPromise = null
+  1155→    console.error('ASR error:', (err as Error)?.message ?? err)
+  1156→    return null
+  1157→  }
+  1158→}
+  1159→
+  1160→/**
+  1161→ * Resolve voice-message content into a data URL for the ASR engine.
+  1162→ * Legacy rows carry data URLs directly; v8 rows point at db/media files,
+  1163→ * whose bytes are read from the SHARED media directory on demand.
+  1164→ */
+  1165→const voiceDataUrlOf = (content: string): string | null => {
+  1166→  if (content.startsWith('data:')) return content
+  1167→  const m = /^\/api\/media\/([A-Za-z0-9._-]{1,120})$/.exec(content)
+  1168→  if (!m) return null
+  1169→  try {
+  1170→    const bytes = readFileSync(join(MEDIA_DIR, m[1]))
+  1171→    if (bytes.length === 0 || bytes.length > 25_000_000) return null
+  1172→    const name = m[1]
+  1173→    const mime = /\.(ogg|oga|opus)$/.test(name)
+  1174→      ? 'audio/ogg'
+  1175→      : /\.(mp4|m4a)$/.test(name)
+  1176→        ? 'audio/mp4'
+  1177→        : /\.wav$/.test(name)
+  1178→          ? 'audio/wav'
+  1179→          : 'audio/webm'
+  1180→    return `data:${mime};base64,${bytes.toString('base64')}`
+  1181→  } catch {
+  1182→    return null
+  1183→  }
+  1184→}
+  1185→
+  1186→/** Best-effort voice-note transcription → `message:updated` broadcast. */
+  1187→const transcribeVoice = async (messageId: number, conversationId: string, content: string) => {
+  1188→  const dataUrl = voiceDataUrlOf(content)
+  1189→  if (!dataUrl) return
+  1190→  const text = await asrTranscribe(dataUrl)
+  1191→  if (!text) return
+  1192→  db.run('UPDATE messages SET transcript = ? WHERE id = ? AND deleted_at IS NULL', [text, messageId])
+  1193→  const payload = { id: messageId, conversationId, transcript: text }
+  1194→  const conv = getConversation(conversationId)
+  1195→  if (!conv) return
+  1196→  io.to(`user:${conv.user_a_id}`).emit('message:updated', payload)
+  1197→  io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
+  1198→  io.to('admins').emit('message:updated', payload)
+  1199→  console.log(`Transcribed message ${messageId}: "${text.slice(0, 40)}…"`)
+  1200→}
+  1201→
+  1202→/* ------------------------------------------------------------------ */
+  1203→/* v8 — retention sweeper (media aging) + SQLite housekeeping          */
+  1204→/* ------------------------------------------------------------------ */
+  1205→
+  1206→/** Stored media file name from a /api/media/<name> URL (null otherwise). */
+  1207→const mediaNameOf = (content: string | null | undefined): string | null => {
+  1208→  if (!content) return null
+  1209→  const m = /^\/api\/media\/([A-Za-z0-9._-]{1,120})$/.exec(content)
+  1210→  return m ? m[1] : null
+  1211→}
+  1212→
+  1213→/** Live references (content or thumb_url) to a stored media file. */
+  1214→const mediaRefCount = (name: string): number =>
+  1215→  ((db
+  1216→    .query(
+  1217→      `SELECT
+  1218→        (SELECT COUNT(*) FROM messages
+  1219→          WHERE content = ? AND deleted_at IS NULL AND media_expired_at IS NULL) +
+  1220→        (SELECT COUNT(*) FROM messages
+  1221→          WHERE thumb_url = ? AND deleted_at IS NULL AND media_expired_at IS NULL)
+  1222→       AS refs`
+  1223→    )
+  1224→    .get(`/api/media/${name}`, `/api/media/${name}`) as { refs: number } | null)?.refs ?? 0)
+  1225→
+  1226→/** Delete the disk file when nothing references it anymore (SHA-256 dedup
+  1227→ *  means several messages may share one file — never delete shared copies). */
+  1228→const releaseMediaFile = (name: string | null) => {
+  1229→  if (!name) return
+  1230→  try {
+  1231→    if (mediaRefCount(name) === 0) {
+  1232→      unlinkSync(join(MEDIA_DIR, name))
+  1233→      console.log(`[retensi] file media dihapus: ${name}`)
+  1234→    }
+  1235→  } catch {
+  1236→    /* missing file or still referenced — fine */
+  1237→  }
+  1238→}
+  1239→
+  1240→/**
+  1241→ * Expire media older than RETENTION_MS: redact payloads (content, thumb,
+  1242→ * metadata), keep the message + text transcript as a "kedaluwarsa"
+  1243→ * tombstone, free disk space, and notify both sides live.
+  1244→ */
+  1245→const sweepExpiredMedia = () => {
+  1246→  const cutoff = now() - RETENTION_MS
+  1247→  const rows = db
+  1248→    .query(
+  1249→      `SELECT id, conversation_id, content, thumb_url FROM messages
+  1250→       WHERE media_expired_at IS NULL AND deleted_at IS NULL
+  1251→         AND type IN ('image', 'voice', 'file') AND created_at < ?`
+  1252→    )
+  1253→    .all(cutoff) as Array<Pick<MessageRow, 'id' | 'conversation_id' | 'content' | 'thumb_url'>>
+  1254→  if (rows.length === 0) return
+  1255→  const ts = now()
+  1256→  for (const row of rows) {
+  1257→    // Redact FIRST so the row's own reference no longer counts in
+  1258→    // mediaRefCount() — otherwise a single-message file is never freed.
+  1259→    db.run(
+  1260→      `UPDATE messages SET content = '', thumb_url = NULL, file_name = NULL,
+  1261→         file_size = NULL, mime_type = NULL, media_expired_at = ? WHERE id = ?`,
+  1262→      [ts, row.id]
+  1263→    )
+  1264→    const conv = getConversation(row.conversation_id)
+  1265→    if (conv) {
+  1266→      const payload = {
+  1267→        id: row.id,
+  1268→        conversationId: row.conversation_id,
+  1269→        content: '',
+  1270→        mediaExpiredAt: new Date(ts).toISOString(),
+  1271→      }
+  1272→      io.to(`user:${conv.user_a_id}`).emit('message:updated', payload)
+  1273→      io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
+  1274→      io.to('admins').emit('message:updated', payload)
+  1275→    }
+  1276→    // Then free the disk files when nothing live references them anymore.
+  1277→    releaseMediaFile(mediaNameOf(row.content))
+  1278→    releaseMediaFile(mediaNameOf(row.thumb_url))
+  1279→  }
+  1280→  console.log(`[retensi] ${rows.length} media kedaluwarsa dibersihkan`)
+  1281→}
+  1282→
+  1283→/** WAL checkpoint + VACUUM — return disk space and keep the DB lean. */
+  1284→const dbMaintenance = () => {
+  1285→  try {
+  1286→    db.run('PRAGMA wal_checkpoint(TRUNCATE)')
+  1287→    db.run('VACUUM')
+  1288→    console.log('[maintenance] wal_checkpoint + VACUUM selesai')
+  1289→  } catch (err) {
+  1290→    console.error('[maintenance] gagal:', (err as Error)?.message ?? err)
+  1291→  }
+  1292→}
+  1293→
+  1294→/* ------------------------------------------------------------------ */
+  1295→/* Socket.io server                                                    */
+  1296→/* ------------------------------------------------------------------ */
+  1297→
+  1298→const httpServer = createServer((req, res) => {
+  1299→  res.writeHead(200, { 'Content-Type': 'text/plain' })
+  1300→  res.end('ChatKita chat-service is running')
+  1301→})
+  1302→
+  1303→const io = new Server(httpServer, {
+  1304→  // DO NOT change the path, it is used by Caddy to forward the request to the correct port
+  1305→  path: '/',
+  1306→  cors: {
+  1307→    origin: '*',
+  1308→    methods: ['GET', 'POST'],
+  1309→  },
+  1310→  pingTimeout: 60000,
+  1311→  pingInterval: 25000,
+  1312→  // image/voice messages travel as base64 data URLs; file bytes never pass
+  1313→  // through here (out-of-band via POST /api/upload)
+  1314→  maxHttpBufferSize: 6e6,
+  1315→})
+  1316→
+  1317→type AckFn = (res: unknown) => void
+  1318→
+  1319→/**
+  1320→ * Wraps a handler with flexible ack extraction (last function argument)
+  1321→ * and a try/catch that acks SERVER_ERROR on unexpected exceptions.
+  1322→ * The socket is bound via closure (handlers are created per connection).
+  1323→ */
+  1324→const handler =
+  1325→  (socket: IoSocket, fn: (data: any, ack: AckFn) => void) =>
+  1326→  (...args: unknown[]) => {
+  1327→    const last = args[args.length - 1]
+  1328→    const ack: AckFn = typeof last === 'function' ? (last as AckFn) : () => {}
+  1329→    const data =
+  1330→      args.length > 0 && typeof args[0] === 'object' && args[0] !== null ? args[0] : {}
+  1331→    try {
+  1332→      fn(data, ack)
+  1333→    } catch (err) {
+  1334→      console.error('Handler error:', err)
+  1335→      ack({ ok: false, error: 'SERVER_ERROR' })
+  1336→    }
+  1337→  }
+  1338→
+  1339→/** Authenticated user id for a socket (set by `user:auth` / `admin:auth`). */
+  1340→const authedUserId = (socket: IoSocket): string | null => {
+  1341→  const id = socket.data?.userId
+  1342→  return typeof id === 'string' && id.length > 0 && !!findUserById(id) ? id : null
+  1343→}
+  1344→
+  1345→/**
+  1346→ * Push the freshest conversation list to every socket in `userId`'s scope.
+  1347→ * The admin's list goes to the `admins` room (covers all admin sockets);
+  1348→ * a normal user's list goes to their personal room.
+  1349→ */
+  1350→const pushConversationsTo = (userId: string) => {
+  1351→  const list = getConversationsFor(userId)
+  1352→  if (userId === ADMIN_ID) io.to('admins').emit('conversations:update', list)
+  1353→  else io.to(`user:${userId}`).emit('conversations:update', list)
+  1354→}
+  1355→
+  1356→const pinHash = (pin: string, userId: string) =>
+  1357→  createHash('sha256').update(`${userId}:${pin}`).digest('hex')
+  1358→
+  1359→/* ------------------------------------------------------------------ */
+  1360→/* Connection                                                          */
+  1361→/* ------------------------------------------------------------------ */
+  1362→
+  1363→io.on('connection', (socket) => {
+  1364→  console.log(`Socket connected: ${socket.id}`)
+  1365→
+  1366→  /* ---------------------- public config (pre-login) ---------------------- */
+  1367→
+  1368→  socket.on('public:settings', handler(socket, (_data, ack) => {
+  1369→    // Pre-login Web Push config: just the VAPID public key ("" when push
+  1370→    // is unavailable). v10 — also carries the public app settings so the
+  1371→    // login card can show the app name + maintenance notice.
+  1372→    ack({ ok: true, pushPublicKey: VAPID_PUBLIC, app: getAppSettings() })
+  1373→  }))
+  1374→
+  1375→  /* ---------------------------- auth ---------------------------- */
+  1376→
+  1377→  socket.on(
+  1378→    'user:auth',
+  1379→    handler(socket, (data, ack) => {
+  1380→      const name = typeof data?.name === 'string' ? data.name.trim() : ''
+  1381→      if (name.length < 1 || name.length > MAX_NAME_LENGTH) {
+  1382→        ack({ ok: false, error: 'INVALID_NAME' })
+  1383→        return
+  1384→      }
+  1385→      if (name.toLowerCase() === ADMIN_NAME.toLowerCase()) {
+  1386→        console.log(`Rejected reserved name "${name}" (socket ${socket.id})`)
+  1387→        ack({ ok: false, error: 'NAME_RESERVED' })
+  1388→        return
+  1389→      }
+  1390→
+  1391→      // Find-or-create among role='user' rows only:
+  1392→      // 1) stored userId login, 2) case-insensitive name, 3) create.
+  1393→      let user: UserRow | null =
+  1394→        typeof data?.userId === 'string' && data.userId.length > 0
+  1395→          ? findUserByRoleAndId(data.userId, 'user')
+  1396→          : null
+  1397→      // A userId login is only trusted without PIN when the name matches
+  1398→      // the stored account (it was validated when the session was created).
+  1399→      if (user && user.name.toLowerCase() !== name.toLowerCase()) user = null
+  1400→      if (!user) user = findUserByRoleAndName(name, 'user')
+  1401→
+  1402→      if (!user) {
+  1403→        const id = crypto.randomUUID()
+  1404→        const ts = now()
+  1405→        db.run(
+  1406→          "INSERT INTO users (id, name, role, created_at, last_seen_at) VALUES (?, ?, 'user', ?, ?)",
+  1407→          [id, name, ts, ts]
+  1408→        )
+  1409→        user = { id, name, role: 'user', created_at: ts, last_seen_at: ts }
+  1410→        console.log(`New user registered: "${name}" (${id})`)
+  1411→      } else {
+  1412→        // PIN gate: fresh (name-only) logins must present the PIN.
+  1413→        if (user.pin_hash) {
+  1414→          const pin = typeof data?.pin === 'string' ? data.pin : ''
+  1415→          const cameFromSession =
+  1416→            typeof data?.userId === 'string' &&
+  1417→            data.userId.length > 0 &&
+  1418→            data.userId === user.id &&
+  1419→            typeof data?.name === 'string' &&
+  1420→            data.name.toLowerCase() === user.name.toLowerCase()
+  1421→          if (!cameFromSession) {
+  1422→            if (!pin) {
+  1423→              ack({ ok: false, error: 'PIN_REQUIRED', hasPin: true })
+  1424→              return
+  1425→            }
+  1426→            if (pinHash(pin, user.id) !== user.pin_hash) {
+  1427→              ack({ ok: false, error: 'INVALID_PIN', hasPin: true })
+  1428→              return
+  1429→            }
+  1430→          }
+  1431→        }
+  1432→        const ts = now()
+  1433→        db.run('UPDATE users SET last_seen_at = ? WHERE id = ?', [ts, user.id])
+  1434→        user.last_seen_at = ts
+  1435→      }
+  1436→
+  1437→      // A user's single conversation is the one with the admin.
+  1438→      const conversation = ensureConversationWithAdmin(user.id)
+  1439→      // The user is looking at the chat right now → mark everything read.
+  1440→      const readUpTo = markRead(conversation.id, user.id)
+  1441→      broadcastRead(conversation, user.id, readUpTo)
+  1442→
+  1443→      socket.data.userId = user.id
+  1444→      socket.join(`user:${user.id}`)
+  1445→      const becameOnline = addOnlineSocket(user.id, socket.id)
+  1446→      if (becameOnline) {
+  1447→        // User presence is private: only the admins room may know.
+  1448→        io.to('admins').emit('presence:update', {
+  1449→          userId: user.id,
+  1450→          online: true,
+  1451→          lastSeenAt: null,
+  1452→        })
+  1453→      }
+  1454→
+  1455→      console.log(`User "${user.name}" authenticated (socket ${socket.id})`)
+  1456→      const admin = findUserById(ADMIN_ID) // seeded on boot — always exists
+  1457→      const page = getMessagesPage(conversation.id)
+  1458→      ack({
+  1459→        ok: true,
+  1460→        user: { id: user.id, name: user.name, hasPin: !!user.pin_hash },
+  1461→        conversationId: conversation.id,
+  1462→        partner: admin
+  1463→          ? toPartnerInfo(admin)
+  1464→          : { id: ADMIN_ID, name: ADMIN_NAME, online: false, lastSeenAt: null },
+  1465→        messages: page.messages,
+  1466→        // v8 — older pages load on demand via `messages:older`.
+  1467→        hasMore: page.hasMore,
+  1468→        // How far the admin has read → ✓✓ on my sent messages.
+  1469→        partnerLastReadId: getReadUpTo(conversation.id, ADMIN_ID),
+  1470→        // VAPID public key for Web Push ("" when push is unavailable).
+  1471→        pushPublicKey: VAPID_PUBLIC,
+  1472→        pinnedMessageId: conversation.pinned_message_id ?? null,
+  1473→        pinned: pinnedSnapshotOf(conversation),
+  1474→      })
+  1475→
+  1476→      // A (newly registered) user must immediately appear in the admin sidebar.
+  1477→      pushConversationsTo(ADMIN_ID)
+  1478→    })
+  1479→  )
+  1480→
+  1481→  socket.on(
+  1482→    'admin:auth',
+  1483→    handler(socket, (data, ack) => {
+  1484→      const password = typeof data?.password === 'string' ? data.password : ''
+  1485→      const expected = process.env.ADMIN_PASSWORD || 'admin123'
+  1486→      if (password !== expected) {
+  1487→        console.log(`Rejected admin login (wrong password, socket ${socket.id})`)
+  1488→        ack({ ok: false, error: 'UNAUTHORIZED' })
+  1489→        return
+  1490→      }
+  1491→
+  1492→      socket.data.userId = ADMIN_ID
+  1493→      socket.join('admins')
+  1494→      const becameOnline = addOnlineSocket(ADMIN_ID, socket.id)
+  1495→      if (becameOnline) {
+  1496→        // Admin presence is public by design.
+  1497→        io.emit('presence:update', { userId: ADMIN_ID, online: true, lastSeenAt: null })
+  1498→      }
+  1499→
+  1500→      console.log(`Admin authenticated (socket ${socket.id})`)
+  1501→      ack({ ok: true, conversations: getConversationsFor(ADMIN_ID) })
+  1502→    })
+  1503→  )
+  1504→
+  1505→  /* --------------------------- messaging --------------------------- */
+  1506→
+  1507→  socket.on(
+  1508→    'messages:history',
+  1509→    handler(socket, (data, ack) => {
+  1510→      const me = authedUserId(socket)
+  1511→      if (!me) {
+  1512→        ack({ ok: false, error: 'UNAUTHORIZED' })
+  1513→        return
+  1514→      }
+  1515→      const conversation =
+  1516→        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+  1517→      if (!conversation) {
+  1518→        ack({ ok: false, error: 'NOT_FOUND' })
+  1519→        return
+  1520→      }
+  1521→      if (!isParticipant(conversation, me)) {
+  1522→        ack({ ok: false, error: 'FORBIDDEN' })
+  1523→        return
+  1524→      }
+  1525→      const lastReadBefore = getReadUpTo(conversation.id, me)
+  1526→      // v10 — admin ghost mode: reading leaves read receipts untouched
+  1527→      // (users keep seeing ✓ instead of ✓✓ for their sent messages).
+  1528→      const ghost = me === ADMIN_ID && socket.data?.ghost === true
+  1529→      if (!ghost) {
+  1530→        const readUpTo = markRead(conversation.id, me)
+  1531→        broadcastRead(conversation, me, readUpTo)
+  1532→      }
+  1533→      const partner = getPartnerUser(conversation, me)
+  1534→      const page = getMessagesPage(conversation.id)
+  1535→      ack({
+  1536→        ok: true,
+  1537→        messages: page.messages,
+  1538→        // v8 — older pages load on demand via `messages:older`.
+  1539→        hasMore: page.hasMore,
+  1540→        partner: toPartnerInfo(partner),
+  1541→        partnerLastReadId: getReadUpTo(conversation.id, partner.id),
+  1542→        // v5 — where I had read BEFORE this call → "new messages" divider.
+  1543→        lastReadBefore,
+  1544→        pinnedMessageId: conversation.pinned_message_id ?? null,
+  1545→        pinned: pinnedSnapshotOf(conversation),
+  1546→      })
+  1547→      pushConversationsTo(me)
+  1548→    })
+  1549→  )
+  1550→
+  1551→  // v8 — pagination: load one OLDER history page ("Muat pesan lama").
+  1552→  socket.on(
+  1553→    'messages:older',
+  1554→    handler(socket, (data, ack) => {
+  1555→      const me = authedUserId(socket)
+  1556→      if (!me) {
+  1557→        ack({ ok: false, error: 'UNAUTHORIZED' })
+  1558→        return
+  1559→      }
+  1560→      const conversation =
+  1561→        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+  1562→      if (!conversation) {
+  1563→        ack({ ok: false, error: 'NOT_FOUND' })
+  1564→        return
+  1565→      }
+  1566→      if (!isParticipant(conversation, me)) {
+  1567→        ack({ ok: false, error: 'FORBIDDEN' })
+  1568→        return
+  1569→      }
+  1570→      const beforeId = Number(data?.beforeId)
+  1571→      if (!Number.isInteger(beforeId) || beforeId <= 0) {
+  1572→        ack({ ok: false, error: 'INVALID_MESSAGE' })
+  1573→        return
+  1574→      }
+  1575→      // Read state is intentionally NOT touched by paging through history.
+  1576→      ack({ ok: true, ...getMessagesPage(conversation.id, beforeId) })
+  1577→    })
+  1578→  )
+  1579→
+  1580→  socket.on(
+  1581→    'messages:send',
+  1582→    handler(socket, (data, ack) => {
+  1583→      const me = authedUserId(socket)
+  1584→      if (!me) {
+  1585→        ack({ ok: false, error: 'UNAUTHORIZED' })
+  1586→        return
+  1587→      }
+  1588→      const conversation =
+  1589→        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+  1590→      if (!conversation) {
+  1591→        ack({ ok: false, error: 'NOT_FOUND' })
+  1592→        return
+  1593→      }
+  1594→      if (!isParticipant(conversation, me)) {
+  1595→        ack({ ok: false, error: 'FORBIDDEN' })
+  1596→        return
+  1597→      }
+  1598→
+  1599→      const type = (typeof data?.type === 'string' ? data.type : 'text') as MessageType
+  1600→      const content = typeof data?.content === 'string' ? data.content : ''
+  1601→      let trimmed: string
+  1602→      let fileMeta: { fileName: string; fileSize: number; mimeType: string } | null = null
+  1603→      let thumbUrlRef: string | undefined
+  1604→
+  1605→      if (type === 'text') {
+  1606→        trimmed = content.trim()
+  1607→        if (trimmed.length < 1 || trimmed.length > MAX_MESSAGE_LENGTH) {
+  1608→          ack({ ok: false, error: 'INVALID_MESSAGE' })
+  1609→          return
+  1610→        }
+  1611→      } else if (type === 'image' || type === 'voice' || type === 'file') {
+  1612→        trimmed = content
+  1613→        const legacyPattern =
+  1614→          type === 'image'
+  1615→            ? /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/
+  1616→            : type === 'voice'
+  1617→              ? /^data:audio\/(webm|ogg|mp4|mpeg|wav);base64,[A-Za-z0-9+/=]+$/
+  1618→              : null
+  1619→        if (legacyPattern?.test(trimmed)) {
+  1620→          // v7 legacy in-band data URL — still accepted, size-capped.
+  1621→          if (trimmed.length > MAX_MEDIA_LENGTH) {
+  1622→            ack({ ok: false, error: 'INVALID_MESSAGE' })
+  1623→            return
+  1624→          }
+  1625→        } else {
+  1626→          // v8 — disk media produced by POST /api/upload: URL + REQUIRED
+  1627→          // metadata; bytes live in db/media, only metadata rides the socket.
+  1628→          if (!FILE_URL_PATTERN.test(trimmed)) {
+  1629→            ack({ ok: false, error: 'INVALID_MESSAGE' })
+  1630→            return
+  1631→          }
+  1632→          const fileName = typeof data?.fileName === 'string' ? data.fileName.trim() : ''
+  1633→          if (fileName.length < 1 || fileName.length > MAX_FILE_NAME_LENGTH) {
+  1634→            ack({ ok: false, error: 'INVALID_MESSAGE' })
+  1635→            return
+  1636→          }
+  1637→          const mimeType = typeof data?.mimeType === 'string' ? data.mimeType : ''
+  1638→          if (mimeType.length > 100 || !MIME_TYPE_PATTERN.test(mimeType)) {
+  1639→            ack({ ok: false, error: 'INVALID_MESSAGE' })
+  1640→            return
+  1641→          }
+  1642→          const fileSize = data?.fileSize
+  1643→          if (
+  1644→            typeof fileSize !== 'number' ||
+  1645→            !Number.isInteger(fileSize) ||
+  1646→            fileSize < 0 ||
+  1647→            fileSize > MAX_FILE_BYTES
+  1648→          ) {
+  1649→            ack({ ok: false, error: 'INVALID_MESSAGE' })
+  1650→            return
+  1651→          }
+  1652→          fileMeta = { fileName, fileSize, mimeType }
+  1653→          // v8 — optional tiny preview image for photos/videos.
+  1654→          const thumbUrl = typeof data?.thumbUrl === 'string' ? data.thumbUrl : ''
+  1655→          if (thumbUrl) {
+  1656→            if (!FILE_URL_PATTERN.test(thumbUrl)) {
+  1657→              ack({ ok: false, error: 'INVALID_MESSAGE' })
+  1658→              return
+  1659→            }
+  1660→            thumbUrlRef = thumbUrl
+  1661→          }
+  1662→        }
+  1663→      } else {
+  1664→        ack({ ok: false, error: 'INVALID_MESSAGE' })
+  1665→        return
+  1666→      }
+  1667→
+  1668→      // Optional reply target must belong to the same conversation.
+  1669→      let replyToId: number | undefined
+  1670→      if (data?.replyToId != null) {
+  1671→        const rid = Number(data.replyToId)
+  1672→        const target =
+  1673→          Number.isInteger(rid) && rid > 0
+  1674→            ? (db
+  1675→                .query('SELECT * FROM messages WHERE id = ? AND conversation_id = ?')
+  1676→                .get(rid, conversation.id) as MessageRow | null)
+  1677→            : null
+  1678→        if (!target) {
+  1679→          ack({ ok: false, error: 'INVALID_MESSAGE' })
+  1680→          return
+  1681→        }
+  1682→        replyToId = rid
+  1683→      }
+  1684→
+  1685→      const durationMs =
+  1686→        type === 'voice' && Number.isFinite(Number(data?.durationMs))
+  1687→          ? Math.min(300000, Math.max(0, Math.round(Number(data.durationMs))))
+  1688→          : undefined
+  1689→
+  1690→      // v8 guards — per-account flood & storage protection.
+  1691→      if (type === 'text') {
+  1692→        if (!rateAllowed(me, 'text', RATE_TEXT_PER_MIN)) {
+  1693→          ack({ ok: false, error: 'RATE_LIMITED' })
+  1694→          return
+  1695→        }
+  1696→      } else if (!rateAllowed(me, 'media', RATE_MEDIA_PER_MIN)) {
+  1697→        ack({ ok: false, error: 'RATE_LIMITED' })
+  1698→        return
+  1699→      } else if (fileMeta && storedMediaBytes(me) + fileMeta.fileSize > QUOTA_BYTES) {
+  1700→        ack({ ok: false, error: 'QUOTA_EXCEEDED' })
+  1701→        return
+  1702→      }
+  1703→
+  1704→      const message = insertAndFanOut(conversation, me, trimmed, type, {
+  1705→        replyToId,
+  1706→        durationMs,
+  1707→        ...(fileMeta ?? {}),
+  1708→        ...(thumbUrlRef ? { thumbUrl: thumbUrlRef } : {}),
+  1709→      })
+  1710→      ack({ ok: true, message })
+  1711→
+  1712→      // Voice notes: transcribe in the background (data URL or db/media file).
+  1713→      if (type === 'voice') void transcribeVoice(message.id, conversation.id, trimmed)
+  1714→
+  1715→      // v5 — a new user message pulls the conversation out of the archive.
+  1716→      if (me !== ADMIN_ID && conversation.archived_at != null) {
+  1717→        db.run('UPDATE conversations SET archived_at = NULL WHERE id = ?', [conversation.id])
+  1718→        conversation.archived_at = null
+  1719→        pushConversationsTo(ADMIN_ID)
+  1720→      }
+  1721→
+  1722→      console.log(
+  1723→        `[${me.slice(0, 8)}] -> ${conversation.id.slice(0, 8)} (${type}): ${
+  1724→          type === 'text' ? trimmed.slice(0, 60) : (fileMeta?.fileName ?? trimmed.slice(0, 60))
+  1725→        }${fileMeta ? ` (${fileMeta.fileSize}b)` : ''}`
+  1726→      )
+  1727→    })
+  1728→  )
+  1729→
+  1730→  socket.on(
+  1731→    'messages:delete',
+  1732→    handler(socket, (data, ack) => {
+  1733→      const me = authedUserId(socket)
+  1734→      if (!me) {
+  1735→        ack({ ok: false, error: 'UNAUTHORIZED' })
+  1736→        return
+  1737→      }
+  1738→      const id = Number(data?.messageId)
+  1739→      const row =
+  1740→        Number.isInteger(id) && id > 0
+  1741→          ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+  1742→          : null
+  1743→      if (!row) {
+  1744→        ack({ ok: false, error: 'NOT_FOUND' })
+  1745→        return
+  1746→      }
+  1747→      const conversation = getConversation(row.conversation_id)
+  1748→      if (!conversation || !isParticipant(conversation, me) || row.sender_id !== me) {
+  1749→        ack({ ok: false, error: 'FORBIDDEN' })
+  1750→        return
+  1751→      }
+  1752→      if (row.deleted_at) {
+  1753→        ack({ ok: true })
+  1754→        return
+  1755→      }
+  1756→      const ts = now()
+  1757→      // Redact content (and v7 file metadata) so deleted messages leave no
+  1758→      // trace in any future payload.
+  1759→      db.run(
+  1760→        `UPDATE messages SET content = '', transcript = NULL, file_name = NULL, file_size = NULL, mime_type = NULL, deleted_at = ? WHERE id = ?`,
+  1761→        [ts, id]
+  1762→      )
+  1763→      const payload = {
+  1764→        id,
+  1765→        conversationId: conversation.id,
+  1766→        deletedAt: new Date(ts).toISOString(),
+  1767→        content: '',
+  1768→        type: row.type ?? 'text',
+  1769→      }
+  1770→      ack({ ok: true })
+  1771→      io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+  1772→      io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+  1773→      io.to('admins').emit('message:updated', payload)
+  1774→      pushConversationsTo(conversation.user_a_id)
+  1775→      pushConversationsTo(conversation.user_b_id)
+  1776→      console.log(`Message ${id} deleted by ${me.slice(0, 8)}`)
+  1777→    })
+  1778→  )
+  1779→
+  1780→  socket.on(
+  1781→    'messages:read',
+  1782→    handler(socket, (data) => {
+  1783→      const me = authedUserId(socket)
+  1784→      if (!me) return
+  1785→      const conversation =
+  1786→        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+  1787→      if (!conversation || !isParticipant(conversation, me)) return
+  1788→      // v10 — ghost mode: no read receipts are sent while active.
+  1789→      if (me === ADMIN_ID && socket.data?.ghost === true) return
+  1790→      const readUpTo = markRead(conversation.id, me)
+  1791→      broadcastRead(conversation, me, readUpTo)
+  1792→      pushConversationsTo(me)
+  1793→    })
+  1794→  )
+  1795→
+  1796→  socket.on(
+  1797→    'typing',
+  1798→    handler(socket, (data) => {
+  1799→      const me = authedUserId(socket)
+  1800→      if (!me) return
+  1801→      const conversation =
+  1802→        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+  1803→      if (!conversation || !isParticipant(conversation, me)) return
+  1804→      const partnerId = getPartnerId(conversation, me)
+  1805→      const payload = {
+  1806→        conversationId: conversation.id,
+  1807→        isTyping: data?.isTyping === true,
+  1808→      }
+  1809→      // The `user:admin` room is empty; when the partner is the admin the
+  1810→      // relay must additionally reach the `admins` room.
+  1811→      io.to(`user:${partnerId}`).emit('partner:typing', payload)
+  1812→      if (partnerId === ADMIN_ID) io.to('admins').emit('partner:typing', payload)
+  1813→    })
+  1814→  )
+  1815→
+  1816→  /* ------------------- v5: reactions / edit / translate ------------------- */
+  1817→
+  1818→  socket.on(
+  1819→    'message:react',
+  1820→    handler(socket, (data, ack) => {
+  1821→      const me = authedUserId(socket)
+  1822→      if (!me) {
+  1823→        ack({ ok: false, error: 'UNAUTHORIZED' })
+  1824→        return
+  1825→      }
+  1826→      const id = Number(data?.messageId)
+  1827→      const emoji = typeof data?.emoji === 'string' ? data.emoji : ''
+  1828→      if (!Number.isInteger(id) || id <= 0 || !(REACTION_EMOJIS as readonly string[]).includes(emoji)) {
+  1829→        ack({ ok: false, error: 'INVALID_MESSAGE' })
+  1830→        return
+  1831→      }
+  1832→      const row = db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null
+  1833→      if (!row || row.deleted_at) {
+  1834→        ack({ ok: false, error: 'NOT_FOUND' })
+  1835→        return
+  1836→      }
+  1837→      const conversation = getConversation(row.conversation_id)
+  1838→      if (!conversation || !isParticipant(conversation, me)) {
+  1839→        ack({ ok: false, error: 'FORBIDDEN' })
+  1840→        return
+  1841→      }
+  1842→      const existing = db
+  1843→        .query('SELECT emoji FROM message_reactions WHERE message_id = ? AND user_id = ?')
+  1844→        .get(id, me) as { emoji: string } | null
+  1845→      if (existing && existing.emoji === emoji) {
+  1846→        db.run('DELETE FROM message_reactions WHERE message_id = ? AND user_id = ?', [id, me])
+  1847→      } else {
+  1848→        db.run(
+  1849→          'INSERT INTO message_reactions (message_id, user_id, emoji) VALUES (?, ?, ?) ON CONFLICT(message_id, user_id) DO UPDATE SET emoji = excluded.emoji',
+  1850→          [id, me, emoji]
+  1851→        )
+  1852→      }
+  1853→      ack({ ok: true })
+  1854→      const payload = { id, conversationId: conversation.id, reactions: reactionsFor(id) }
+  1855→      io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+  1856→      io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+  1857→      io.to('admins').emit('message:updated', payload)
+  1858→    })
+  1859→  )
+  1860→
+  1861→  socket.on(
+  1862→    'message:edit',
+  1863→    handler(socket, (data, ack) => {
+  1864→      const me = authedUserId(socket)
+  1865→      if (!me) {
+  1866→        ack({ ok: false, error: 'UNAUTHORIZED' })
+  1867→        return
+  1868→      }
+  1869→      const id = Number(data?.messageId)
+  1870→      const content = typeof data?.content === 'string' ? data.content.trim() : ''
+  1871→      if (!Number.isInteger(id) || id <= 0 || content.length < 1 || content.length > MAX_MESSAGE_LENGTH) {
+  1872→        ack({ ok: false, error: 'INVALID_MESSAGE' })
+  1873→        return
+  1874→      }
+  1875→      const row = db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null
+  1876→      if (!row || row.deleted_at) {
+  1877→        ack({ ok: false, error: 'NOT_FOUND' })
+  1878→        return
+  1879→      }
+  1880→      const conversation = getConversation(row.conversation_id)
+  1881→      if (
+  1882→        !conversation ||
+  1883→        !isParticipant(conversation, me) ||
+  1884→        row.sender_id !== me ||
+  1885→        (row.type ?? 'text') !== 'text'
+  1886→      ) {
+  1887→        ack({ ok: false, error: 'FORBIDDEN' })
+  1888→        return
+  1889→      }
+  1890→      if (now() - row.created_at > EDIT_WINDOW_MS) {
+  1891→        ack({ ok: false, error: 'FORBIDDEN' })
+  1892→        return
+  1893→      }
+  1894→      const ts = now()
+  1895→      db.run('UPDATE messages SET content = ?, edited_at = ? WHERE id = ?', [content, ts, id])
+  1896→      ack({ ok: true })
+  1897→      const payload = {
+  1898→        id,
+  1899→        conversationId: conversation.id,
+  1900→        content,
+  1901→        editedAt: new Date(ts).toISOString(),
+  1902→      }
+  1903→      io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+  1904→      io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+  1905→      io.to('admins').emit('message:updated', payload)
+  1906→      pushConversationsTo(conversation.user_a_id)
+  1907→      pushConversationsTo(conversation.user_b_id)
+  1908→      console.log(`Message ${id} edited by ${me.slice(0, 8)}`)
+  1909→    })
+  1910→  )
+  1911→
+  1912→  socket.on(
+  1913→    'message:translate',
+  1914→    handler(socket, (data, ack) => {
+  1915→      const me = authedUserId(socket)
+  1916→      if (!me) {
+  1917→        ack({ ok: false, error: 'UNAUTHORIZED' })
+  1918→        return
+  1919→      }
+  1920→      const id = Number(data?.messageId)
+  1921→      const row =
+  1922→        Number.isInteger(id) && id > 0
+  1923→          ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+  1924→          : null
+  1925→      if (!row || row.deleted_at || (row.type ?? 'text') !== 'text') {
+  1926→        ack({ ok: false, error: 'NOT_FOUND' })
+  1927→        return
+  1928→      }
+  1929→      const conversation = getConversation(row.conversation_id)
+  1930→      if (!conversation || !isParticipant(conversation, me)) {
+  1931→        ack({ ok: false, error: 'FORBIDDEN' })
+  1932→        return
+  1933→      }
+  1934→      if (row.translation) {
+  1935→        ack({ ok: true, translation: row.translation })
+  1936→        return
+  1937→      }
+  1938→      llmComplete(
+  1939→        'Terjemahkan teks pesan berikut ke bahasa Indonesia. Jawab HANYA hasil terjemahannya ' +
+  1940→          'tanpa penjelasan, tanpa tanda kutip, tanpa markdown. Pertahankan emoji yang ada.',
+  1941→        row.content,
+  1942→        800
+  1943→      ).then((translation) => {
+  1944→        if (!translation) {
+  1945→          // Soft failure: the contract allows `translation: null` on success
+  1946→          // (there is no AI_UNAVAILABLE error code in the shared contract).
+  1947→          ack({ ok: true, translation: null })
+  1948→          return
+  1949→        }
+  1950→        db.run('UPDATE messages SET translation = ? WHERE id = ?', [translation, id])
+  1951→        ack({ ok: true, translation })
+  1952→        const payload = { id, conversationId: conversation.id, translation }
+  1953→        io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+  1954→        io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+  1955→        io.to('admins').emit('message:updated', payload)
+  1956→      })
+  1957→    })
+  1958→  )
+  1959→
+  1960→  /* ------------------ v5: pin / archive ------------------ */
+  1961→
+  1962→  socket.on(
+  1963→    'conversation:pin',
+  1964→    handler(socket, (data, ack) => {
+  1965→      const me = authedUserId(socket)
+  1966→      if (!me || me !== ADMIN_ID) {
+  1967→        ack({ ok: false, error: 'UNAUTHORIZED' })
+  1968→        return
+  1969→      }
+  1970→      const conversation =
+  1971→        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+  1972→      if (!conversation) {
+  1973→        ack({ ok: false, error: 'NOT_FOUND' })
+  1974→        return
+  1975→      }
+  1976→      let pinned: { id: number; senderId: string; snippet: string; type: string } | null = null
+  1977→      if (data?.messageId != null) {
+  1978→        const id = Number(data.messageId)
+  1979→        const row =
+  1980→          Number.isInteger(id) && id > 0
+  1981→            ? (db
+  1982→                .query('SELECT * FROM messages WHERE id = ? AND conversation_id = ?')
+  1983→                .get(id, conversation.id) as MessageRow | null)
+  1984→            : null
+  1985→        if (!row) {
+  1986→          ack({ ok: false, error: 'NOT_FOUND' })
+  1987→          return
+  1988→        }
+  1989→        db.run('UPDATE conversations SET pinned_message_id = ? WHERE id = ?', [id, conversation.id])
+  1990→        pinned = { id: row.id, senderId: row.sender_id, snippet: snippetOf(row), type: row.type ?? 'text' }
+  1991→      } else {
+  1992→        db.run('UPDATE conversations SET pinned_message_id = NULL WHERE id = ?', [conversation.id])
+  1993→      }
+  1994→      const payload = {
+  1995→        conversationId: conversation.id,
+  1996→        pinnedMessageId: pinned?.id ?? null,
+  1997→        pinned,
+  1998→      }
+  1999→      ack({ ok: true, ...payload })
+  2000→      io.to(`user:${conversation.user_a_id}`).emit('conversation:update', payload)
+
+[showing lines 1-2000 of 2279; use offset=2001 with limit to continue reading]

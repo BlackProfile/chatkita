@@ -1,0 +1,28 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "1) **Yes.** The final message bubble contains a YouTube URL followed by a preview card.\n2) **Card details:**\n   * **Icon chip:** A white play button icon inside a rounded square on the left.\n   * **Title:** \"youtube.com\" in bold white text.\n   * **Domain/Source line:** A grey pill-shaped chip containing the YouTube logo and \"youtube.com\".\n3) **No layout breakage.** The card is properly contained within the green message bubble, with correct padding and alignment for a 390px mobile width.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1788221754,
+  "id": "20260901081552628b525f4a8b4c39",
+  "model": "glm-5v-turbo",
+  "object": "chat.completion",
+  "request_id": "20260901081552628b525f4a8b4c39",
+  "usage": {
+    "completion_tokens": 117,
+    "completion_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "prompt_tokens": 451,
+    "prompt_tokens_details": {
+      "cached_tokens": 3
+    },
+    "total_tokens": 568
+  }
+}
