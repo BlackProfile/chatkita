@@ -762,3 +762,17 @@ Work Log:
 
 Stage Summary:
 - v12 Stage 5-6 SELESAI: seluruh panel admin (login, lock screen, inbox, chat pane, composer, dashboard 6 tab) kini satu bahasa visual premium dengan sisi user — gradient emerald/teal, glass, wallpaper doodle, composer pill. 4 commit terpisah (a9f39be, c43f6cd, 13bd1b6) tahan rollback. Fitur/wiring v10/v11 TIDAK berubah — hanya tampilan.
+
+---
+Task ID: 22 (lanjutan — Stage 7)
+Agent: main (Z.ai Code)
+Task: Redesign login user yang lapor "kurang enak" — kartu lanjut chat (screenshot user: tombol besar "Lanjut chat sebagai rvg" + form Nama baru + tombol Masuk abu2 menggantung)
+
+Work Log:
+- Masalah: tampilan returning-user memunculkan SEMUA elemen sekaligus (tombol continue besar + caption + divider + label Nama baru + input + tombol Masuk disabled) → penuh & rancu.
+- Commit (def79ce): Messenger.tsx login state baru loginMode:"continue"|"other". Mode continue (lastName ada): KARTU PROFIL 1-KETUK — avatar warna (avatarColorClass+initials) ring putih + nama + subteks "Ketuk untuk lanjut — riwayat pesan tetap ada" + lingkaran panah ArrowRight (hover → bg emerald solid); divider "ATAU" uppercase kecil; ghost link "Masuk dengan nama lain". Mode other: label Nama Anda/Nama baru + input + tombol submit "Mulai chat"/"Masuk" + ghost "← Kembali ke akun “x”" (ArrowLeft). Alur PIN aman di KEDUA mode (PIN_REQUIRED saat continue → tampil "Melanjutkan sebagai …" + input PIN + tombol "Konfirmasi & lanjut chat"). Tombol install tetap di bawah.
+- Fix (commit ke-2): handleLogout kini setLoginMode(lastName?"continue":"other") — sebelumnya setelah login+logout kartu salah masuk mode "other" (loginMode hanya diinit saat mount pertama ketika lastName masih kosong).
+- E2E (agent-browser, user rvg): kartu continue tampil (avatar RV pink + nama + panah) ✓; 1 ketuk → langsung masuk chat riwayat utuh ✓; logout → kartu continue kembali ✓; "Masuk dengan nama lain" → form bersih + tombol Mulai chat + link kembali ✓; "Kembali ke akun rvg" → kartu continue ✓; mobile 390px proporsional ✓; dark mode = mirip screenshot user tapi bersih ✓. Console 0 error, dev.log bersih, lint 0/0.
+
+Stage Summary:
+- v12 Stage 7: login returning-user kini 1-ketuk kartu profil (bukan form panjang). Nama baru disembunyikan di balik ghost toggle dengan jalan kembali. PIN flow utuh dua arah. Commit def79ce + fix. Tampilan sesuai keluhan user teratasi.
