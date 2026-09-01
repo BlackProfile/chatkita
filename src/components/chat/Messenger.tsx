@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
+  ArrowLeft,
+  ArrowRight,
   ChevronUp,
   Leaf,
   Loader2,
@@ -317,6 +319,10 @@ export function Messenger() {
   // sitting in the field).
   const [name, setName] = useState("");
   const [lastName, setLastName] = useState(() => readLastName());
+  // v12 — mode kartu login: lanjut sebagai nama terakhir (1 ketuk), atau isi nama lain
+  const [loginMode, setLoginMode] = useState<"continue" | "other">(
+    lastName ? "continue" : "other"
+  );
   const [pinEntry, setPinEntry] = useState("");
   const [needsPin, setNeedsPin] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -1140,93 +1146,191 @@ export function Messenger() {
               className="space-y-4"
               onSubmit={(e) => {
                 e.preventDefault();
-                handleAuth();
+                if (lastName && loginMode === "continue") handleAuth(lastName);
+                else handleAuth();
               }}
             >
-              {lastName ? (
+              {lastName && loginMode === "continue" ? (
                 <>
-                  <Button
-                    type="button"
-                    className="btn-gradient h-12 w-full rounded-xl text-base font-semibold text-white"
-                    disabled={!connected}
-                    onClick={() => handleAuth(lastName)}
-                  >
-                    {connected
-                      ? `Lanjut chat sebagai “${lastName}”`
-                      : "Menghubungkan…"}
-                  </Button>
-                  <p className="text-center text-xs text-emerald-900/55 dark:text-emerald-100/45">
-                    Lanjutkan percakapan Anda sebelumnya — riwayat pesan tetap ada
-                  </p>
+                  {!needsPin ? (
+                    <button
+                      type="button"
+                      disabled={!connected}
+                      onClick={() => handleAuth(lastName)}
+                      className="group flex w-full items-center gap-3 rounded-2xl border border-emerald-900/10 bg-white/60 p-3 text-left transition-all hover:border-emerald-500/50 hover:bg-white/90 hover:shadow-lg hover:shadow-emerald-600/10 disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/10 dark:bg-white/5 dark:hover:border-emerald-400/40 dark:hover:bg-white/10"
+                    >
+                      <span
+                        className={cn(
+                          "flex size-11 shrink-0 items-center justify-center rounded-full text-sm font-bold text-white shadow-md ring-2 ring-white/60 dark:ring-white/10",
+                          avatarColorClass(lastName)
+                        )}
+                        aria-hidden="true"
+                      >
+                        {initials(lastName)}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-base font-semibold text-emerald-950 dark:text-emerald-50">
+                          {lastName}
+                        </span>
+                        <span className="block truncate text-xs text-emerald-900/55 dark:text-emerald-100/45">
+                          {connected
+                            ? "Ketuk untuk lanjut — riwayat pesan tetap ada"
+                            : "Menghubungkan…"}
+                        </span>
+                      </span>
+                      <span
+                        className="flex size-8 shrink-0 items-center justify-center rounded-full bg-emerald-600/10 text-emerald-600 transition-all group-hover:bg-emerald-600 group-hover:text-white dark:bg-emerald-400/10 dark:text-emerald-400 dark:group-hover:bg-emerald-400 dark:group-hover:text-emerald-950"
+                        aria-hidden="true"
+                      >
+                        <ArrowRight className="size-4" />
+                      </span>
+                    </button>
+                  ) : (
+                    <p className="rounded-xl bg-emerald-900/5 px-3 py-2 text-center text-sm font-medium text-emerald-900/70 dark:bg-white/5 dark:text-emerald-100/70">
+                      Melanjutkan sebagai “{lastName}”
+                    </p>
+                  )}
+                  {needsPin ? (
+                    <div className="space-y-2">
+                      <Label
+                        htmlFor="messenger-pin"
+                        className="text-emerald-950/80 dark:text-emerald-100/70"
+                      >
+                        PIN akun
+                      </Label>
+                      <Input
+                        id="messenger-pin"
+                        type="password"
+                        inputMode="numeric"
+                        maxLength={8}
+                        value={pinEntry}
+                        placeholder="••••"
+                        autoFocus
+                        className="h-12 rounded-xl border-emerald-900/10 bg-white/70 tracking-[0.3em] dark:border-white/10 dark:bg-white/5"
+                        onChange={(e) => {
+                          setPinEntry(e.target.value.replace(/\D/g, ""));
+                          setAuthError(null);
+                        }}
+                      />
+                    </div>
+                  ) : null}
+                  {authError ? (
+                    <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                      {authError}
+                    </p>
+                  ) : null}
+                  {needsPin ? (
+                    <Button
+                      type="submit"
+                      className="btn-gradient h-12 w-full rounded-xl text-base font-semibold text-white"
+                      disabled={!connected || !pinEntry}
+                    >
+                      {connected ? "Konfirmasi & lanjut chat" : "Menghubungkan…"}
+                    </Button>
+                  ) : null}
                   <div className="flex items-center gap-3" aria-hidden="true">
                     <span className="h-px flex-1 bg-emerald-900/10 dark:bg-white/10" />
-                    <span className="text-xs text-emerald-900/50 dark:text-emerald-100/40">
-                      atau masuk sebagai nama lain
+                    <span className="text-[11px] uppercase tracking-wider text-emerald-900/45 dark:text-emerald-100/35">
+                      atau
                     </span>
                     <span className="h-px flex-1 bg-emerald-900/10 dark:bg-white/10" />
                   </div>
-                </>
-              ) : null}
-              <div className="space-y-2">
-                <Label
-                  htmlFor="messenger-name"
-                  className="text-emerald-950/80 dark:text-emerald-100/70"
-                >
-                  {lastName ? "Nama baru" : "Nama Anda"}
-                </Label>
-                <Input
-                  id="messenger-name"
-                  value={name}
-                  maxLength={MAX_NAME_LENGTH}
-                  placeholder="cth. Budi Santoso"
-                  autoComplete="name"
-                  className="h-12 rounded-xl border-emerald-900/10 bg-white/70 text-base dark:border-white/10 dark:bg-white/5"
-                  onChange={(e) => {
-                    setName(e.target.value);
-                    setAuthError(null);
-                  }}
-                />
-              </div>
-              {needsPin ? (
-                <div className="space-y-2">
-                  <Label
-                    htmlFor="messenger-pin"
-                    className="text-emerald-950/80 dark:text-emerald-100/70"
-                  >
-                    PIN akun
-                  </Label>
-                  <Input
-                    id="messenger-pin"
-                    type="password"
-                    inputMode="numeric"
-                    maxLength={8}
-                    value={pinEntry}
-                    placeholder="••••"
-                    className="h-12 rounded-xl border-emerald-900/10 bg-white/70 tracking-[0.3em] dark:border-white/10 dark:bg-white/5"
-                    onChange={(e) => {
-                      setPinEntry(e.target.value.replace(/\D/g, ""));
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="h-10 w-full rounded-xl text-sm font-medium text-emerald-800/70 hover:bg-emerald-900/5 hover:text-emerald-950 dark:text-emerald-100/60 dark:hover:bg-white/5 dark:hover:text-emerald-50"
+                    onClick={() => {
+                      setLoginMode("other");
+                      setName("");
                       setAuthError(null);
                     }}
-                  />
-                </div>
-              ) : null}
-              {authError ? (
-                <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                  {authError}
-                </p>
-              ) : null}
-              <Button
-                type="submit"
-                className="btn-gradient h-12 w-full rounded-xl text-base font-semibold text-white"
-                disabled={!connected || !name.trim() || (needsPin && !pinEntry)}
-              >
-                {connected ? "Masuk" : "Menghubungkan…"}
-              </Button>
-              {!lastName ? (
-                <p className="text-center text-xs text-emerald-900/55 dark:text-emerald-100/45">
-                  Nama yang sama = akun yang sama, jadi Anda bisa lanjut chat kapan saja
-                </p>
-              ) : null}
+                  >
+                    Masuk dengan nama lain
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <div className="space-y-2">
+                    <Label
+                      htmlFor="messenger-name"
+                      className="text-emerald-950/80 dark:text-emerald-100/70"
+                    >
+                      {lastName ? "Nama baru" : "Nama Anda"}
+                    </Label>
+                    <Input
+                      id="messenger-name"
+                      value={name}
+                      maxLength={MAX_NAME_LENGTH}
+                      placeholder="cth. Budi Santoso"
+                      autoComplete="name"
+                      className="h-12 rounded-xl border-emerald-900/10 bg-white/70 text-base dark:border-white/10 dark:bg-white/5"
+                      onChange={(e) => {
+                        setName(e.target.value);
+                        setAuthError(null);
+                      }}
+                    />
+                  </div>
+                  {needsPin ? (
+                    <div className="space-y-2">
+                      <Label
+                        htmlFor="messenger-pin"
+                        className="text-emerald-950/80 dark:text-emerald-100/70"
+                      >
+                        PIN akun
+                      </Label>
+                      <Input
+                        id="messenger-pin"
+                        type="password"
+                        inputMode="numeric"
+                        maxLength={8}
+                        value={pinEntry}
+                        placeholder="••••"
+                        className="h-12 rounded-xl border-emerald-900/10 bg-white/70 tracking-[0.3em] dark:border-white/10 dark:bg-white/5"
+                        onChange={(e) => {
+                          setPinEntry(e.target.value.replace(/\D/g, ""));
+                          setAuthError(null);
+                        }}
+                      />
+                    </div>
+                  ) : null}
+                  {authError ? (
+                    <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                      {authError}
+                    </p>
+                  ) : null}
+                  <Button
+                    type="submit"
+                    className="btn-gradient h-12 w-full rounded-xl text-base font-semibold text-white"
+                    disabled={!connected || !name.trim() || (needsPin && !pinEntry)}
+                  >
+                    {connected
+                      ? lastName
+                        ? "Mulai chat"
+                        : "Masuk"
+                      : "Menghubungkan…"}
+                  </Button>
+                  {!lastName ? (
+                    <p className="text-center text-xs text-emerald-900/55 dark:text-emerald-100/45">
+                      Nama yang sama = akun yang sama, jadi Anda bisa lanjut chat kapan saja
+                    </p>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="h-10 w-full rounded-xl text-sm font-medium text-emerald-800/70 hover:bg-emerald-900/5 hover:text-emerald-950 dark:text-emerald-100/60 dark:hover:bg-white/5 dark:hover:text-emerald-50"
+                      onClick={() => {
+                        setLoginMode("continue");
+                        setName("");
+                        setPinEntry("");
+                        setAuthError(null);
+                      }}
+                    >
+                      <ArrowLeft className="size-4" aria-hidden="true" />
+                      Kembali ke akun “{lastName}”
+                    </Button>
+                  )}
+                </>
+              )}
               {installAvailable ? (
                 <Button
                   type="button"
