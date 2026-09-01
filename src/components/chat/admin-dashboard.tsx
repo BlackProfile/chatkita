@@ -136,6 +136,13 @@ const fmtDay = (iso: string): string => {
   return `${d}/${m}`;
 };
 
+/** v13 — dd/mm dari ISO datetime penuh (aman utk joinedAt dll). */
+const fmtIsoDay = (iso: string): string => {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("id-ID", { day: "2-digit", month: "2-digit" });
+};
+
 const fmtDateTime = (iso: string): string => {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
@@ -518,8 +525,8 @@ export function AdminDashboard({
         <p className="truncate text-[11px] text-muted-foreground">
           {u.online
             ? "Online"
-            : `Terakhir dilihat ${formatLastSeen(u.lastSeenAt)}`}
-          {u.joinedAt ? ` · bergabung ${fmtDay(u.joinedAt)}` : ""}
+            : formatLastSeen(u.lastSeenAt)}
+          {u.joinedAt ? ` · bergabung ${fmtIsoDay(u.joinedAt)}` : ""}
         </p>
       </div>
       <div className="shrink-0 text-right">

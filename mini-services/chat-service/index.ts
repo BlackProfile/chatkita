@@ -84,8 +84,8 @@ import webpush from 'web-push'
 /* ------------------------------------------------------------------ */
 
 const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
-/** v11 — service version surfaced by the admin dashboard (Info aplikasi). */
-const SERVICE_VERSION = 'v11'
+/** v13 — service version surfaced by the admin dashboard (Info aplikasi). */
+const SERVICE_VERSION = 'v13'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'

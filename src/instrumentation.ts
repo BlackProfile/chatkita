@@ -10,9 +10,11 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
-  const { spawn } = await import("node:child_process");
-  const fs = await import("node:fs");
-  const net = await import("node:net");
+  // turbopackIgnore: jangan ikutkan modul node ini ke bundle edge runtime —
+  // register() hanya pernah berjalan di runtime Node.
+  const { spawn } = await import(/* turbopackIgnore: true */ "node:child_process");
+  const fs = await import(/* turbopackIgnore: true */ "node:fs");
+  const net = await import(/* turbopackIgnore: true */ "node:net");
 
   const PORT = 3003;
   const alive = await new Promise<boolean>((resolve) => {
