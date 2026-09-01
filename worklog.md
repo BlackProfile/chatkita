@@ -712,3 +712,19 @@ Work Log:
 
 Stage Summary:
 - 24 fitur admin v11 KABEL PENUH dua arah dan terverifikasi E2E 19 titik: Intelijen (X-Ray/forensik/riwayat edit/peek*/pencarian/statistik*/ekspor chat), Kontrol sesi (beku/bisu/lambat/blokir-media/kick* — semua dengan banner live + countdown + composer lock di sisi user), Sinyal palsu (typing/✓✓/selalu online/last seen*/balasan cepat/cermin), Moderasi (hapus jarak jauh/reset/pin/audit/kata terlarang+flag live/ekspor user*). (* = teruji level server 82/82 oleh 20-a; UI tersedia). Lint 0/0, tanpa error console/dev.log. ChatKita v11 fitur admin lengkap.
+
+---
+Task ID: 21
+Agent: main (Z.ai Code)
+Task: Forensik recovery — user lapor "semua berubah" (login custom & tampilan chat user hilang); jawab dulu TANPA mengubah kode
+
+Work Log:
+- Verifikasi disk: semua file Task 18/19/20-a/20-b UTUH (AdminPanel 107.9KB, Messenger 69.5KB, media-viewer/link-preview/user-manager/admin-tools/voice-player ada; /api/link-preview ada; chat-service 129KB hidup di :3003; dev :3000 200).
+- Git: 28 commit utuh (5b61e33 initial → 2348f5a 09-01 01:32); working tree = HEAD (hanya chat.db-wal/shm modified). Reflog membuktikan EVENT ROLLBACK SANDBOX 08-31 23:38–23:42 (checkout b529fa7→04f61ef→8531cb3→0e548b7→ba1c33f→...→main) lalu kerja lanjut normal.
+- Diff login section Messenger 6b5dde0 (era Task 18, era screenshot user) vs sekarang: IDENTIK — desain login TIDAK pernah berubah di sisi server antara era itu dan sekarang.
+- DB forensik via bun:sqlite atas SEMUA snapshot chat.db di git (8 versi, 08-29→09-01): appName SELALU "ChatKita", welcomeMessage SELALU "" — TIDAK ADA kustomisasi yang pernah ter-commit. Settings custom user (jika pernah diset via panel admin) hilang pada jendela rollback sebelum sempat ter-checkpoint → tidak recoverable otomatis dari disk/git.
+- Service worker (public/sw.js) diperiksa: TIDAK cache halaman (hanya push notification) → bukan penyebab tampilan basi.
+- Ground truth visual via agent-browser gateway :81: /tmp/now-login.png (kartu login standar "Masuk ChatKita") + /tmp/now-chat.png (chat user: header Admin + toolbar ikon + composer). Fitur task 18-20 hidup (Cari pesan, Ukuran huruf, hemat data, PIN, tema).
+
+Stage Summary:
+- Fitur: TIDAK ada yang hilang — tak perlu recovery. Tampilan custom user: TIDAK ditemukan di manapun (disk/git/DB-history) → kesimpulan: hilang saat rollback sandbox sebelum tersimpan; hanya bisa dibangun ulang dari screenshot/deskripsi user atau file backup JSON yang dia unduh dulu. BELUM ada perubahan kode (user minta jawaban dulu). Menunggu: screenshot tampilan lama / backup JSON / deskripsi.
