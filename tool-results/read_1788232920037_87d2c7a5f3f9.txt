@@ -130,13 +130,13 @@
    130→  sub?: string;
    131→}) {
    132→  return (
-   133→    <div className="flex items-center gap-3 rounded-xl border bg-card p-3">
-   134→      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-emerald-600/10 text-emerald-600">
+   133→    <div className="flex items-center gap-3 rounded-xl border bg-card p-3 transition-shadow hover:shadow-sm">
+   134→      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm shadow-emerald-600/25">
    135→        <Icon className="size-5" aria-hidden="true" />
    136→      </span>
    137→      <div className="min-w-0">
    138→        <p className="truncate text-xs text-muted-foreground">{label}</p>
-   139→        <p className="truncate text-lg font-semibold leading-tight">{value}</p>
+   139→        <p className="truncate text-lg font-bold leading-tight tabular-nums">{value}</p>
    140→        {sub ? <p className="truncate text-[11px] text-muted-foreground">{sub}</p> : null}
    141→      </div>
    142→    </div>
@@ -163,7 +163,7 @@
    163→        {values.map((v, i) => (
    164→          <div key={i} className="flex h-full min-w-0 flex-1 flex-col justify-end">
    165→            <div
-   166→              className="w-full rounded-t-sm bg-emerald-500/80 transition-[height] hover:bg-emerald-500"
+   166→              className="w-full rounded-t-sm bg-gradient-to-t from-emerald-600 to-emerald-400 transition-[height,filter] hover:brightness-110"
    167→              style={{ height: `${Math.max(3, (v / max) * 100)}%` }}
    168→              title={`${labels[i]}: ${v} pesan`}
    169→            />
@@ -357,10 +357,10 @@
    357→
    358→  return (
    359→    <Dialog open={open} onOpenChange={onOpenChange}>
-   360→      <DialogContent className="flex max-h-[92vh] w-[calc(100vw-1rem)] max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-4xl">
-   361→        <DialogHeader className="shrink-0 border-b px-4 py-3 sm:px-6 sm:py-4">
+   360→      <DialogContent className="flex max-h-[92vh] w-[calc(100vw-1rem)] max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-5xl">
+   361→        <DialogHeader className="shrink-0 border-b bg-muted/30 px-4 py-3 sm:px-6 sm:py-4">
    362→          <DialogTitle className="flex items-center gap-2 text-base sm:text-lg">
-   363→            <span className="flex size-8 items-center justify-center rounded-lg bg-emerald-600/10 text-emerald-600">
+   363→            <span className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm shadow-emerald-600/25">
    364→              <GaugeCircle className="size-4.5" aria-hidden="true" />
    365→            </span>
    366→            Dashboard Aplikasi
@@ -384,9 +384,9 @@
    384→              aria-pressed={tab === t.key}
    385→              onClick={() => onTabChange(t.key)}
    386→              className={cn(
-   387→                "flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-medium transition-colors",
+   387→                "flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-medium transition-all",
    388→                tab === t.key
-   389→                  ? "bg-emerald-600 text-white"
+   389→                  ? "bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-sm shadow-emerald-600/25"
    390→                  : "bg-muted/60 text-muted-foreground hover:bg-accent hover:text-foreground"
    391→              )}
    392→            >
@@ -554,9 +554,9 @@
    554→                      aria-pressed={broadcastKind === k.key}
    555→                      onClick={() => setBroadcastKind(k.key)}
    556→                      className={cn(
-   557→                        "h-8 rounded-full px-3 text-xs font-medium transition-colors",
+   557→                        "h-8 rounded-full px-3 text-xs font-medium transition-all",
    558→                        broadcastKind === k.key
-   559→                          ? "bg-emerald-600 text-white"
+   559→                          ? "bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-sm shadow-emerald-600/25"
    560→                          : "bg-muted/60 text-muted-foreground hover:bg-accent"
    561→                      )}
    562→                    >
@@ -583,7 +583,7 @@
    583→                  </p>
    584→                  <Button
    585→                    size="sm"
-   586→                    className="h-9 bg-emerald-600 text-white hover:bg-emerald-600/90"
+   586→                    className="btn-gradient h-9 text-white"
    587→                    disabled={!broadcastText.trim() || broadcasting}
    588→                    onClick={sendBroadcast}
    589→                  >
@@ -641,7 +641,7 @@
    641→                </div>
    642→                <Button
    643→                  size="sm"
-   644→                  className="h-9 bg-emerald-600 text-white hover:bg-emerald-600/90"
+   644→                  className="btn-gradient h-9 text-white"
    645→                  onClick={() =>
    646→                    saveSettings({
    647→                      appName: settings?.appName,

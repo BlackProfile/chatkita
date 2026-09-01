@@ -1,3 +1,68 @@
+     1→     1→"use client";
+     2→     2→
+     3→     3→import { useCallback, useEffect, useMemo, useState } from "react";
+     4→     4→import type { Socket } from "socket.io-client";
+     5→     5→import {
+     6→     6→  Activity,
+     7→     7→  BarChart3,
+     8→     8→  Check,
+     9→     9→  Clock,
+    10→    10→  Database,
+    11→    11→  Download,
+    12→    12→  GaugeCircle,
+    13→    13→  HardDrive,
+    14→    14→  Loader2,
+    15→    15→  MessageSquare,
+    16→    16→  MessagesSquare,
+    17→    17→  Megaphone,
+    18→    18→  RefreshCw,
+    19→    19→  Save,
+    20→    20→  Send,
+    21→    21→  Settings2,
+    22→    22→  Users,
+    23→    23→} from "lucide-react";
+    24→    24→
+    25→    25→import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+    26→    26→import { Badge } from "@/components/ui/badge";
+    27→    27→import { Button } from "@/components/ui/button";
+    28→    28→import {
+    29→    29→  Dialog,
+    30→    30→  DialogContent,
+    31→    31→  DialogDescription,
+    32→    32→  DialogHeader,
+    33→    33→  DialogTitle,
+    34→    34→} from "@/components/ui/dialog";
+    35→    35→import { Input } from "@/components/ui/input";
+    36→    36→import { Label } from "@/components/ui/label";
+    37→    37→import { Switch } from "@/components/ui/switch";
+    38→    38→import { Textarea } from "@/components/ui/textarea";
+    39→    39→import {
+    40→    40→  avatarColorClass,
+    41→    41→  formatFileSize,
+    42→    42→  formatLastSeen,
+    43→    43→  initials,
+    44→    44→} from "@/lib/chat-utils";
+    45→    45→import type {
+    46→    46→  AckOf,
+    47→    47→  AppSettings,
+    48→    48→  AppSettingsAck,
+    49→    49→  BackupAck,
+    50→    50→  BroadcastAck,
+    51→    51→  ChatErrorAck,
+    52→    52→  DashboardStats,
+    53→    53→  DashboardStatsAck,
+    54→    54→  DashboardUserRow,
+    55→    55→  VacuumAck,
+    56→    56→} from "@/lib/chat-types";
+    57→    57→import { cn } from "@/lib/utils";
+    58→    58→
+    59→    59→/**
+    60→    60→ * v10 — Dashboard aplikasi khusus admin: analitik penggunaan, pengelolaan
+    61→    61→ * pengguna, siaran/pengumuman global, pengaturan aplikasi (nama, sambutan,
+    62→    62→ * mode pemeliharaan), backup JSON, kompresi VACUUM, dan info sistem.
+    63→    63→ * Semua data diambil live dari chat-service via socket (admin-only events).
+    64→    64→ */
+    65→    65→
     66→    66→export type DashboardTab =
     67→    67→  | "ringkasan"
     68→    68→  | "analitik"
@@ -65,13 +130,13 @@
    130→   130→  sub?: string;
    131→   131→}) {
    132→   132→  return (
-   133→   133→    <div className="flex items-center gap-3 rounded-xl border bg-card p-3">
-   134→   134→      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-emerald-600/10 text-emerald-600">
+   133→   133→    <div className="flex items-center gap-3 rounded-xl border bg-card p-3 transition-shadow hover:shadow-sm">
+   134→   134→      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm shadow-emerald-600/25">
    135→   135→        <Icon className="size-5" aria-hidden="true" />
    136→   136→      </span>
    137→   137→      <div className="min-w-0">
    138→   138→        <p className="truncate text-xs text-muted-foreground">{label}</p>
-   139→   139→        <p className="truncate text-lg font-semibold leading-tight">{value}</p>
+   139→   139→        <p className="truncate text-lg font-bold leading-tight tabular-nums">{value}</p>
    140→   140→        {sub ? <p className="truncate text-[11px] text-muted-foreground">{sub}</p> : null}
    141→   141→      </div>
    142→   142→    </div>
@@ -98,7 +163,7 @@
    163→   163→        {values.map((v, i) => (
    164→   164→          <div key={i} className="flex h-full min-w-0 flex-1 flex-col justify-end">
    165→   165→            <div
-   166→   166→              className="w-full rounded-t-sm bg-emerald-500/80 transition-[height] hover:bg-emerald-500"
+   166→   166→              className="w-full rounded-t-sm bg-gradient-to-t from-emerald-600 to-emerald-400 transition-[height,filter] hover:brightness-110"
    167→   167→              style={{ height: `${Math.max(3, (v / max) * 100)}%` }}
    168→   168→              title={`${labels[i]}: ${v} pesan`}
    169→   169→            />
@@ -292,10 +357,10 @@
    357→   357→
    358→   358→  return (
    359→   359→    <Dialog open={open} onOpenChange={onOpenChange}>
-   360→   360→      <DialogContent className="flex max-h-[92vh] w-[calc(100vw-1rem)] max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-4xl">
-   361→   361→        <DialogHeader className="shrink-0 border-b px-4 py-3 sm:px-6 sm:py-4">
+   360→   360→      <DialogContent className="flex max-h-[92vh] w-[calc(100vw-1rem)] max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-5xl">
+   361→   361→        <DialogHeader className="shrink-0 border-b bg-muted/30 px-4 py-3 sm:px-6 sm:py-4">
    362→   362→          <DialogTitle className="flex items-center gap-2 text-base sm:text-lg">
-   363→   363→            <span className="flex size-8 items-center justify-center rounded-lg bg-emerald-600/10 text-emerald-600">
+   363→   363→            <span className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm shadow-emerald-600/25">
    364→   364→              <GaugeCircle className="size-4.5" aria-hidden="true" />
    365→   365→            </span>
    366→   366→            Dashboard Aplikasi
@@ -319,9 +384,9 @@
    384→   384→              aria-pressed={tab === t.key}
    385→   385→              onClick={() => onTabChange(t.key)}
    386→   386→              className={cn(
-   387→   387→                "flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-medium transition-colors",
+   387→   387→                "flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-medium transition-all",
    388→   388→                tab === t.key
-   389→   389→                  ? "bg-emerald-600 text-white"
+   389→   389→                  ? "bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-sm shadow-emerald-600/25"
    390→   390→                  : "bg-muted/60 text-muted-foreground hover:bg-accent hover:text-foreground"
    391→   391→              )}
    392→   392→            >
@@ -489,9 +554,9 @@
    554→   554→                      aria-pressed={broadcastKind === k.key}
    555→   555→                      onClick={() => setBroadcastKind(k.key)}
    556→   556→                      className={cn(
-   557→   557→                        "h-8 rounded-full px-3 text-xs font-medium transition-colors",
+   557→   557→                        "h-8 rounded-full px-3 text-xs font-medium transition-all",
    558→   558→                        broadcastKind === k.key
-   559→   559→                          ? "bg-emerald-600 text-white"
+   559→   559→                          ? "bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-sm shadow-emerald-600/25"
    560→   560→                          : "bg-muted/60 text-muted-foreground hover:bg-accent"
    561→   561→                      )}
    562→   562→                    >
@@ -518,7 +583,7 @@
    583→   583→                  </p>
    584→   584→                  <Button
    585→   585→                    size="sm"
-   586→   586→                    className="h-9 bg-emerald-600 text-white hover:bg-emerald-600/90"
+   586→   586→                    className="btn-gradient h-9 text-white"
    587→   587→                    disabled={!broadcastText.trim() || broadcasting}
    588→   588→                    onClick={sendBroadcast}
    589→   589→                  >
@@ -576,7 +641,7 @@
    641→   641→                </div>
    642→   642→                <Button
    643→   643→                  size="sm"
-   644→   644→                  className="h-9 bg-emerald-600 text-white hover:bg-emerald-600/90"
+   644→   644→                  className="btn-gradient h-9 text-white"
    645→   645→                  onClick={() =>
    646→   646→                    saveSettings({
    647→   647→                      appName: settings?.appName,
@@ -758,5 +823,11 @@
    823→   823→                  {stats.storage.retentionDays} hari.
    824→   824→                </p>
    825→   825→              </div>
-
-[showing lines 66-825 of 833; use offset=826 with limit to continue reading]
+   826→   826→            </div>
+   827→   827→          )}
+   828→   828→        </div>
+   829→   829→      </DialogContent>
+   830→   830→    </Dialog>
+   831→   831→  );
+   832→   832→}
+   833→   833→
