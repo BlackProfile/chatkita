@@ -220,8 +220,8 @@ export function ChatBubble({
           className={cn(
             "rounded-2xl px-3.5 py-2",
             isRight
-              ? "rounded-br-md bg-emerald-600 text-white"
-              : "rounded-bl-md border bg-card text-foreground shadow-sm",
+              ? "rounded-br-md bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-sm shadow-emerald-600/25"
+              : "rounded-bl-md border border-black/5 bg-card text-foreground shadow-sm",
             type !== "text" && !deleted && "p-1.5",
             !deleted && "cursor-pointer",
             pinned && !deleted && "ring-1 ring-amber-400/70"

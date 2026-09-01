@@ -78,7 +78,7 @@ export function DaySeparator({
       role="separator"
       aria-label={dayLabel(createdAt)}
     >
-      <span className="rounded-full bg-muted px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground shadow-sm">
+      <span className="rounded-full bg-white/85 px-3 py-1 text-[11px] font-medium text-muted-foreground shadow-sm ring-1 ring-black/5 backdrop-blur-sm dark:bg-white/10 dark:ring-white/10">
         {dayLabel(createdAt)}
       </span>
     </div>
