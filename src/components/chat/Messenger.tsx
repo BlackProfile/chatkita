@@ -342,6 +342,8 @@ export function Messenger() {
   // Lampiran dokumen/video/audio: file terpilih → dialog konfirmasi → upload.
   const [pendingFile, setPendingFile] = useState<{ file: File } | null>(null);
   const [uploading, setUploading] = useState(false);
+  // v20 — progres unggah (0–100); null = tidak sedang mengunggah.
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   // v8 — pagination riwayat + mode hemat data.
   const [hasMore, setHasMore] = useState(false);
@@ -976,11 +978,12 @@ export function Messenger() {
     const target = pendingImage;
     if (!target || uploading) return;
     setUploading(true);
+    setUploadProgress(0);
     setImageError(null);
     try {
       const stamp = Date.now();
       const [fullMeta, thumbMeta] = await Promise.all([
-        uploadMedia(new File([target.full], `foto-${stamp}.jpg`, { type: "image/jpeg" })),
+        uploadMedia(new File([target.full], `foto-${stamp}.jpg`, { type: "image/jpeg" }), setUploadProgress),
         uploadMedia(new File([target.thumb], `foto-${stamp}-thumb.jpg`, { type: "image/jpeg" })),
       ]);
       if (
@@ -1000,6 +1003,7 @@ export function Messenger() {
       setImageError("Gagal mengunggah foto.");
     } finally {
       setUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -1023,9 +1027,10 @@ export function Messenger() {
     const target = pendingFile;
     if (!target || uploading) return;
     setUploading(true);
+    setUploadProgress(0);
     setFileError(null);
     try {
-      const meta = await uploadMedia(target.file);
+      const meta = await uploadMedia(target.file, setUploadProgress);
       // Poster video (best-effort — kegagalan tidak memblokir pengiriman).
       let thumbUrl: string | undefined;
       if (resolveFileKind(meta.mimeType, meta.fileName) === "video") {
@@ -1053,6 +1058,7 @@ export function Messenger() {
       setFileError("Gagal mengunggah file.");
     } finally {
       setUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -1814,11 +1820,32 @@ export function Messenger() {
               alt="Pratinjau foto"
               className="size-10 rounded-md object-cover"
             />
-            <p className="flex-1 text-xs text-muted-foreground">Foto siap dikirim</p>
+            <div className="min-w-0 flex-1">
+              <p className="text-xs text-muted-foreground">
+                {uploadProgress != null
+                  ? `Mengunggah… ${uploadProgress}%`
+                  : "Foto siap dikirim"}
+              </p>
+              {uploadProgress != null ? (
+                <div
+                  className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted"
+                  role="progressbar"
+                  aria-valuenow={uploadProgress}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <div
+                    className="h-full rounded-full bg-emerald-600 transition-all"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                </div>
+              ) : null}
+            </div>
             <button
               type="button"
               aria-label="Batal kirim foto"
               className="text-muted-foreground hover:text-foreground"
+              disabled={uploading}
               onClick={() => {
                 URL.revokeObjectURL(pendingImage.previewUrl);
                 setPendingImage(null);
@@ -2028,10 +2055,24 @@ export function Messenger() {
               </div>
             </div>
             {uploading ? (
-              <p className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                Mengunggah…
-              </p>
+              <div className="space-y-1.5">
+                <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                  Mengunggah… {uploadProgress != null ? `${uploadProgress}%` : ""}
+                </p>
+                <div
+                  className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
+                  role="progressbar"
+                  aria-valuenow={uploadProgress ?? 0}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <div
+                    className="h-full rounded-full bg-emerald-600 transition-all"
+                    style={{ width: `${uploadProgress ?? 0}%` }}
+                  />
+                </div>
+              </div>
             ) : null}
             {fileError ? <p className="text-sm text-destructive">{fileError}</p> : null}
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">

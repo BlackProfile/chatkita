@@ -231,17 +231,44 @@ export interface UploadResult {
  * POST /api/upload — simpan blob/file ke db/media (SHA-256 dedup di server)
  * dan dapatkan URL publik /api/media/<nama> + metadata. Melempar Error bila
  * gagal; pemanggil menampilkan pesan kesalahan.
+ *
+ * v20 — pakai XHR agar bisa melaporkan progres unggahan (0–100) lewat
+ * callback `onProgress` (fetch tidak punya event progress upload).
  */
-export async function uploadMedia(file: File): Promise<UploadResult> {
-  const body = new FormData();
-  body.append("file", file);
-  const res = await fetch("/api/upload", { method: "POST", body });
-  const data = (await res.json().catch(() => null)) as
-    | (UploadResult & { ok: true })
-    | { ok: false; error: string }
-    | null;
-  if (!res.ok || !data || data.ok !== true) throw new Error("upload-failed");
-  return data;
+export type UploadProgress = (percent: number) => void;
+
+export async function uploadMedia(
+  file: File,
+  onProgress?: UploadProgress
+): Promise<UploadResult> {
+  return new Promise<UploadResult>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/upload", true);
+    xhr.responseType = "json";
+    xhr.timeout = 5 * 60_000; // file 25 MB pada koneksi lambat
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.min(100, Math.round((e.loaded / e.total) * 100)));
+      }
+    };
+    xhr.onload = () => {
+      const data = (typeof xhr.response === "object" && xhr.response !== null
+        ? xhr.response
+        : null) as (UploadResult & { ok: true }) | { ok: false; error: string } | null;
+      if (xhr.status >= 200 && xhr.status < 300 && data && data.ok === true) {
+        onProgress?.(100);
+        resolve(data);
+      } else {
+        reject(new Error("upload-failed"));
+      }
+    };
+    xhr.onerror = () => reject(new Error("upload-failed"));
+    xhr.ontimeout = () => reject(new Error("upload-failed"));
+    xhr.onabort = () => reject(new Error("upload-failed"));
+    const body = new FormData();
+    body.append("file", file);
+    xhr.send(body);
+  });
 }
 
 /**

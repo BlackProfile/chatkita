@@ -313,12 +313,14 @@ function ViewerDialog({
           </div>
         ) : null}
 
-        {/* Isi pratinjau per jenis */}
+        {/* Isi pratinjau per jenis. v20 — panggung TETAP tinggi (72vh):
+            media kecil pun dirender BESAR memenuhi panggung (object-contain),
+            tidak lagi mengikuti dimensi asli file. */}
         {isImage ? (
           <div
             {...swipeProps}
             className={cn(
-              "flex min-h-0 flex-1 items-center justify-center overflow-hidden",
+              "flex h-[72vh] w-full shrink-0 items-center justify-center overflow-hidden rounded-lg bg-black",
               zoomed && "items-start justify-start overflow-auto"
             )}
           >
@@ -328,15 +330,18 @@ function ViewerDialog({
               draggable={false}
               onDoubleClick={() => setZoomed((z) => !z)}
               className={cn(
-                "rounded-lg object-contain",
+                "object-contain",
                 zoomed
-                  ? "w-[200%] max-w-none cursor-zoom-out"
-                  : "max-h-[72vh] max-w-full cursor-zoom-in"
+                  ? "w-[200%] max-w-none shrink-0 cursor-zoom-out"
+                  : "h-full w-full cursor-zoom-in"
               )}
             />
           </div>
         ) : kind === "video" ? (
-          <div {...swipeProps} className="flex min-h-0 flex-1 items-center justify-center">
+          <div
+            {...swipeProps}
+            className="flex h-[72vh] w-full shrink-0 items-center justify-center"
+          >
             {/* key=url: elemen lama benar-benar di-unmount saat navigasi
                 (tidak ada audio/video "hantu" yang terus berjalan). */}
             <video
@@ -345,7 +350,7 @@ function ViewerDialog({
               controls
               autoPlay
               playsInline
-              className="max-h-[72vh] w-full rounded-lg bg-black"
+              className="h-full w-full rounded-lg bg-black object-contain"
             />
           </div>
         ) : kind === "audio" ? (
