@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "exportedAt": "2026-09-02T00:28:10.574Z",
+  "version": "v20",
+  "users": [
+    {
+      "id": "admin",
+      "name": "Admin",
+      "role": "admin",
+      "created_at": 1788308366897,
+      "last_seen_at": 1788308392888
+    }
+  ],
+  "conversations": [],
+  "messages": [],
+  "settings": []
+}

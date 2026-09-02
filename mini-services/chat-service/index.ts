@@ -84,8 +84,8 @@ import webpush from 'web-push'
 /* ------------------------------------------------------------------ */
 
 const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
-/** v13 — service version surfaced by the admin dashboard (Info aplikasi). */
-const SERVICE_VERSION = 'v13'
+/** v20 — service version surfaced by the admin dashboard (Info aplikasi). */
+const SERVICE_VERSION = 'v20'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -1345,6 +1345,129 @@ const storedMediaBytes = (userId: string): number =>
          AND deleted_at IS NULL AND media_expired_at IS NULL`
     )
     .get(userId) as { total: number | null })?.total ?? 0)
+
+/* ------------------------------------------------------------------ */
+/* Pusat (v20) — reset aplikasi & pemulihan backup                     */
+/* ------------------------------------------------------------------ */
+
+/** Kolom messages yang dipulihkan dari backup (urutan = urutan INSERT). */
+const RESTORE_MESSAGE_COLUMNS = [
+  'id',
+  'conversation_id',
+  'sender_id',
+  'content',
+  'created_at',
+  'type',
+  'reply_to_id',
+  'duration_ms',
+  'transcript',
+  'deleted_at',
+  'edited_at',
+  'translation',
+  'file_name',
+  'file_size',
+  'mime_type',
+  'thumb_url',
+  'media_expired_at',
+  'deleted_content',
+  'edit_history',
+  'flagged',
+] as const
+
+const scalarCount = (sql: string): number =>
+  Number((db.query(sql).get() as { v: number | null } | undefined)?.v ?? 0)
+
+/**
+ * v20 — hapus seluruh data chat: pesan, reaksi, baca, percakapan, langganan
+ * push, pengguna non-admin, dan pengaturan (kunci vapid dipertahankan).
+ * TANPA transaksi — pemanggil yang membungkus BEGIN/COMMIT sesuai konteks.
+ */
+const wipeChatData = (): {
+  messages: number
+  conversations: number
+  users: number
+  settings: number
+} => {
+  const before = {
+    messages: scalarCount('SELECT COUNT(*) AS v FROM messages'),
+    conversations: scalarCount('SELECT COUNT(*) AS v FROM conversations'),
+    users: scalarCount(`SELECT COUNT(*) AS v FROM users WHERE id != '${ADMIN_ID}'`),
+    settings: scalarCount('SELECT COUNT(*) AS v FROM settings'),
+  }
+  db.run('DELETE FROM messages')
+  db.run('DELETE FROM message_reactions')
+  db.run('DELETE FROM reads')
+  db.run('DELETE FROM conversations')
+  db.run('DELETE FROM push_subscriptions')
+  db.run(`DELETE FROM users WHERE id != '${ADMIN_ID}'`)
+  db.run(`DELETE FROM settings WHERE key NOT LIKE 'vapid%'`)
+  // AUTOINCREMENT messages mulai lagi dari 1 setelah reset/restore.
+  db.run(`DELETE FROM sqlite_sequence WHERE name = 'messages'`)
+  return before
+}
+
+/** v20 — hapus semua file media di db/media; kembalikan (jumlah, byte). */
+const purgeMediaFiles = (): { count: number; bytes: number } => {
+  let count = 0
+  let bytes = 0
+  try {
+    for (const entry of readdirSync(MEDIA_DIR)) {
+      try {
+        const path = join(MEDIA_DIR, entry)
+        const st = statSync(path)
+        if (!st.isFile()) continue
+        bytes += st.size
+        unlinkSync(path)
+        count += 1
+      } catch {
+        /* satu file gagal — lanjutkan sisanya */
+      }
+    }
+  } catch {
+    /* direktori tidak ada — tidak ada yang dihapus */
+  }
+  return { count, bytes }
+}
+
+/* Validasi longgar baris backup: baris rusak dilewati, sisanya dipulihkan. */
+const isStr = (v: unknown): v is string => typeof v === 'string' && v.length > 0
+const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+
+const isValidBackupUser = (u: unknown): u is Record<string, unknown> =>
+  !!u && typeof u === 'object' && isStr((u as Record<string, unknown>).id) &&
+  isStr((u as Record<string, unknown>).name)
+
+const isValidBackupConversation = (c: unknown): c is Record<string, unknown> => {
+  if (!c || typeof c !== 'object') return false
+  const r = c as Record<string, unknown>
+  return (
+    isStr(r.id) &&
+    isStr(r.user_a_id) &&
+    isStr(r.user_b_id) &&
+    isNum(r.created_at) &&
+    isNum(r.last_message_at)
+  )
+}
+
+const isValidBackupMessage = (m: unknown): m is Record<string, unknown> => {
+  if (!m || typeof m !== 'object') return false
+  const r = m as Record<string, unknown>
+  return (
+    isNum(r.id) &&
+    (r.id as number) > 0 &&
+    isStr(r.conversation_id) &&
+    isStr(r.sender_id) &&
+    typeof r.content === 'string' &&
+    isNum(r.created_at)
+  )
+}
+
+const isValidBackupSetting = (s: unknown): s is { key: string; value: string } => {
+  if (!s || typeof s !== 'object') return false
+  const r = s as Record<string, unknown>
+  return isStr(r.key) && typeof r.value === 'string' && !r.key.startsWith('vapid')
+}
+
 
 const insertAndFanOut = (
   conversation: ConversationRow,
@@ -3069,6 +3192,144 @@ io.on('connection', (socket) => {
       conversations: db.query('SELECT * FROM conversations').all(),
       messages: db.query('SELECT * FROM messages ORDER BY id ASC').all(),
       settings: settingsRows,
+    })
+  }))
+
+  /**
+   * v20 — Pusat: reset aplikasi. Menghapus SEMUA pesan, percakapan, pengguna
+   * (kecuali Admin), pengaturan, langganan push, dan file media di db/media.
+   * Jejak audit dipertahankan demi akuntabilitas.
+   */
+  socket.on('admin:reset_all', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    let wiped: ReturnType<typeof wipeChatData>
+    try {
+      db.run('BEGIN')
+      wiped = wipeChatData()
+      db.run('COMMIT')
+    } catch (err) {
+      db.run('ROLLBACK')
+      console.error('admin:reset_all failed:', (err as Error)?.message ?? err)
+      ack({ ok: false, error: 'RESET_FAILED' })
+      return
+    }
+    const media = purgeMediaFiles()
+    audit(
+      'reset',
+      `Pusat: reset aplikasi — ${wiped.messages} pesan, ${wiped.conversations} percakapan, ${wiped.users} pengguna dihapus, ${media.count} file media (${(media.bytes / 1_048_576).toFixed(1)} MiB) dibebaskan`
+    )
+    io.emit('app:reset')
+    pushConversationsTo(ADMIN_ID)
+    ack({ ok: true, deleted: wiped, mediaFiles: media.count, freedBytes: media.bytes })
+  }))
+
+  /**
+   * v20 — Pusat: pulihkan backup JSON penuh (hasil admin:backup). Metadata
+   * saja — file media tidak ikut dalam backup. Baris rusak dilewati.
+   */
+  socket.on('admin:restore', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const backup = (data?.backup ?? null) as Record<string, unknown> | null
+    if (!backup || typeof backup !== 'object') {
+      ack({ ok: false, error: 'INVALID_BACKUP' })
+      return
+    }
+    const rawUsers = Array.isArray(backup.users) ? backup.users : []
+    const rawConversations = Array.isArray(backup.conversations) ? backup.conversations : []
+    const rawMessages = Array.isArray(backup.messages) ? backup.messages : []
+    const rawSettings = Array.isArray(backup.settings) ? backup.settings : []
+    const users = rawUsers.filter(isValidBackupUser)
+    const conversations = rawConversations.filter(isValidBackupConversation)
+    const messages = rawMessages.filter(isValidBackupMessage)
+    const settings = rawSettings.filter(isValidBackupSetting)
+    // Akun Admin wajib ada setelah pemulihan.
+    if (!users.some((u) => u.id === ADMIN_ID)) {
+      users.unshift({
+        id: ADMIN_ID,
+        name: ADMIN_NAME,
+        role: 'admin',
+        created_at: now(),
+        last_seen_at: now(),
+      })
+    }
+
+    try {
+      db.run('BEGIN')
+      wipeChatData()
+      for (const u of users) {
+        // OR REPLACE: baris Admin sengaja dipertahankan wipeChatData —
+        // data admin dari backup menimpanya.
+        db.run(
+          'INSERT OR REPLACE INTO users (id, name, role, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)',
+          [
+            u.id,
+            u.name,
+            u.role === 'admin' ? 'admin' : 'user',
+            isNum(u.created_at) ? u.created_at : now(),
+            isNum(u.last_seen_at) ? u.last_seen_at : now(),
+          ]
+        )
+      }
+      for (const c of conversations) {
+        db.run(
+          'INSERT INTO conversations (id, user_a_id, user_b_id, created_at, last_message_at, archived_at, pinned_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [
+            c.id,
+            c.user_a_id,
+            c.user_b_id,
+            c.created_at,
+            c.last_message_at,
+            isNum(c.archived_at) ? c.archived_at : null,
+            isNum(c.pinned_message_id) ? c.pinned_message_id : null,
+          ]
+        )
+      }
+      const cols = RESTORE_MESSAGE_COLUMNS.join(', ')
+      const marks = RESTORE_MESSAGE_COLUMNS.map(() => '?').join(', ')
+      for (const m of messages) {
+        const values = RESTORE_MESSAGE_COLUMNS.map((col) => {
+          const v = m[col]
+          return v === undefined ? null : v
+        })
+        db.run(`INSERT INTO messages (${cols}) VALUES (${marks})`, values)
+      }
+      for (const s of settings) {
+        db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [s.key, s.value])
+      }
+      const maxId = scalarCount('SELECT COALESCE(MAX(id), 0) AS v FROM messages')
+      if (maxId > 0) {
+        db.run('INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES (?, ?)', [
+          'messages',
+          maxId,
+        ])
+      }
+      db.run('COMMIT')
+    } catch (err) {
+      db.run('ROLLBACK')
+      console.error('admin:restore failed:', (err as Error)?.message ?? err)
+      ack({ ok: false, error: 'RESTORE_FAILED' })
+      return
+    }
+
+    audit(
+      'restore',
+      `Pusat: pulihkan backup ${typeof backup.exportedAt === 'string' ? backup.exportedAt : '?'} — ${users.length} pengguna, ${conversations.length} percakapan, ${messages.length} pesan, ${settings.length} pengaturan`
+    )
+    io.emit('app:reset')
+    pushConversationsTo(ADMIN_ID)
+    ack({
+      ok: true,
+      restored: {
+        users: users.length,
+        conversations: conversations.length,
+        messages: messages.length,
+        settings: settings.length,
+      },
+      skipped:
+        rawUsers.length -
+        users.length +
+        (rawConversations.length - conversations.length) +
+        (rawMessages.length - messages.length),
     })
   }))
 

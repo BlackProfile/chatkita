@@ -460,6 +460,27 @@ export interface BackupAck {
   settings: { key: string; value: string }[];
 }
 
+/** v20 — Pusat: ack reset aplikasi (hapus seluruh data chat + file media). */
+export interface AdminResetAllAck {
+  ok: true;
+  deleted: { messages: number; conversations: number; users: number; settings: number };
+  mediaFiles: number;
+  freedBytes: number;
+}
+
+/** v20 — Pusat: ack pemulihan backup JSON. */
+export interface AdminRestoreAck {
+  ok: true;
+  restored: {
+    users: number;
+    conversations: number;
+    messages: number;
+    settings: number;
+  };
+  /** Jumlah baris backup yang gagal validasi dan dilewati. */
+  skipped: number;
+}
+
 export interface VacuumAck {
   ok: true;
   before: { dbBytes: number; walBytes: number };

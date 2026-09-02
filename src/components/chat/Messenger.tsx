@@ -507,6 +507,11 @@ export function Messenger() {
       setConnected(false);
     });
 
+    // v20 — Pusat: server me-siarkan reset/pemulihan backup → muat ulang app.
+    socket.on("app:reset", () => {
+      window.location.reload();
+    });
+
     // v10 — pengaturan aplikasi live (nama + mode pemeliharaan).
     socket.on("app:settings:update", (s: AppSettingsUpdatePayload) => {
       setAppSettings(s);

@@ -17,6 +17,7 @@ import {
   HardDrive,
   Hourglass,
   Image as ImageIcon,
+  Landmark,
   Link2,
   Loader2,
   MessageSquare,
@@ -41,6 +42,7 @@ import {
   Users,
 } from "lucide-react";
 
+import { AdminPusat } from "@/components/chat/admin-pusat";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -89,6 +91,7 @@ import { cn } from "@/lib/utils";
  */
 
 export type DashboardTab =
+  | "pusat"
   | "ringkasan"
   | "analitik"
   | "pengguna"
@@ -97,6 +100,7 @@ export type DashboardTab =
   | "sistem";
 
 const TABS: { key: DashboardTab; label: string; icon: typeof GaugeCircle }[] = [
+  { key: "pusat", label: "Pusat", icon: Landmark },
   { key: "ringkasan", label: "Ringkasan", icon: GaugeCircle },
   { key: "analitik", label: "Analitik", icon: BarChart3 },
   { key: "pengguna", label: "Pengguna", icon: Users },
@@ -163,6 +167,7 @@ const AUDIT_LABELS: Record<string, string> = {
   settings: "Pengaturan",
   broadcast: "Siaran",
   backup: "Backup",
+  restore: "Pemulihan",
   vacuum: "VACUUM",
   cleanup: "Pembersihan",
   ghost: "Mode hantu",
@@ -172,7 +177,8 @@ const AUDIT_LABELS: Record<string, string> = {
   kick: "Keluarkan",
   mediablock: "Blokir media",
   delete: "Hapus pesan",
-  reset: "Reset chat",
+  reset: "Reset aplikasi",
+  reset_conversation: "Reset chat",
   pin: "Pin",
   unpin: "Lepas pin",
   keywords: "Kata terlarang",
@@ -1253,6 +1259,8 @@ export function AdminDashboard({
                 </p>
               ) : null}
             </div>
+          ) : tab === "pusat" ? (
+            <AdminPusat socket={socket} version={stats.version} />
           ) : (
             /* Sistem */
             <div className="space-y-3">

@@ -17,6 +17,7 @@ export async function register() {
   const net = await import(/* turbopackIgnore: true */ "node:net");
 
   const PORT = 3003;
+  void 0; // v20 — bump agar register() dijalankan ulang oleh dev server.
   const alive = await new Promise<boolean>((resolve) => {
     const sock = new net.Socket();
     const done = (ok: boolean) => {
