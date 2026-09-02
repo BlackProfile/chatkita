@@ -84,8 +84,9 @@ import webpush from 'web-push'
 /* ------------------------------------------------------------------ */
 
 const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
-/** v22 — paket pulihan: bintangi/teruskan/jadwalkan pesan + badge unread. */
-const SERVICE_VERSION = 'v22'
+/** v22 — paket pulihan: bintangi/teruskan/jadwalkan pesan + badge unread.
+ *  v23 — custom login admin: password ter-hash di DB + ganti dari dashboard + rate limit. */
+const SERVICE_VERSION = 'v23'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -407,6 +408,26 @@ const setSetting = (key: string, value: string) => {
     [key, value]
   )
 }
+
+/** v23 — hash password admin (bcrypt via Bun.password). Null = fallback bawaan admin123. */
+const getAdminPasswordHash = (): string | null => {
+  const h = getSetting('adminPasswordHash')
+  return typeof h === 'string' && h.length > 0 ? h : null
+}
+
+/** v23 — verifikasi password admin terhadap hash tersimpan / fallback bawaan. */
+const verifyAdminPassword = (password: string): Promise<boolean> => {
+  const storedHash = getAdminPasswordHash()
+  if (storedHash) return Bun.password.verify(password, storedHash)
+  return Promise.resolve(password === (process.env.ADMIN_PASSWORD || 'admin123'))
+}
+
+/** v23 — anti brute-force login admin: jendela global 60 dtk + batas per-socket. */
+const ADMIN_FAIL_WINDOW_MS = 60_000
+const ADMIN_FAIL_MAX_PER_WINDOW = 10
+const ADMIN_FAIL_MAX_PER_SOCKET = 5
+const adminAuthFails = { windowStart: 0, count: 0 }
+const adminAuthSocketFails = new Map<string, number>()
 
 /* ------------- v10 — application settings (admin dashboard) ------------- */
 
@@ -2452,25 +2473,55 @@ io.on('connection', (socket) => {
     'admin:auth',
     handler(socket, (data, ack) => {
       const password = typeof data?.password === 'string' ? data.password : ''
-      const expected = process.env.ADMIN_PASSWORD || 'admin123'
-      if (password !== expected) {
-        console.log(`Rejected admin login (wrong password, socket ${socket.id})`)
-        ack({ ok: false, error: 'UNAUTHORIZED' })
+      // v23 — password custom ter-hash di settings; kosong = fallback bawaan admin123.
+      const storedHash = getAdminPasswordHash()
+      // v23 — anti brute-force: jendela global 60 dtk + batas per-socket.
+      const nowMs = Date.now()
+      if (nowMs - adminAuthFails.windowStart > ADMIN_FAIL_WINDOW_MS) {
+        adminAuthFails.windowStart = nowMs
+        adminAuthFails.count = 0
+      }
+      const socketFails = adminAuthSocketFails.get(socket.id) ?? 0
+      if (
+        adminAuthFails.count >= ADMIN_FAIL_MAX_PER_WINDOW ||
+        socketFails >= ADMIN_FAIL_MAX_PER_SOCKET
+      ) {
+        console.warn(`Admin login rate-limited (socket ${socket.id})`)
+        ack({ ok: false, error: 'RATE_LIMITED' })
         return
       }
+      const check = storedHash
+        ? Bun.password.verify(password, storedHash)
+        : Promise.resolve(password === (process.env.ADMIN_PASSWORD || 'admin123'))
+      void check.then((match) => {
+        if (!match) {
+          adminAuthFails.count += 1
+          adminAuthSocketFails.set(socket.id, socketFails + 1)
+          if (adminAuthSocketFails.size > 1000) adminAuthSocketFails.clear()
+          console.log(`Rejected admin login (wrong password, socket ${socket.id})`)
+          ack({ ok: false, error: 'UNAUTHORIZED' })
+          return
+        }
+        adminAuthFails.count = 0
+        adminAuthSocketFails.delete(socket.id)
 
-      socket.data.userId = ADMIN_ID
-      socket.join('admins')
-      // v11 — remember connection metadata (ip/user-agent) for admin:xray.
-      trackConnMeta(socket, ADMIN_ID)
-      const becameOnline = addOnlineSocket(ADMIN_ID, socket.id)
-      if (becameOnline) {
-        // Admin presence is public by design.
-        io.emit('presence:update', { userId: ADMIN_ID, online: true, lastSeenAt: null })
-      }
+        socket.data.userId = ADMIN_ID
+        socket.join('admins')
+        // v11 — remember connection metadata (ip/user-agent) for admin:xray.
+        trackConnMeta(socket, ADMIN_ID)
+        const becameOnline = addOnlineSocket(ADMIN_ID, socket.id)
+        if (becameOnline) {
+          // Admin presence is public by design.
+          io.emit('presence:update', { userId: ADMIN_ID, online: true, lastSeenAt: null })
+        }
 
-      console.log(`Admin authenticated (socket ${socket.id})`)
-      ack({ ok: true, conversations: getConversationsFor(ADMIN_ID) })
+        console.log(`Admin authenticated (socket ${socket.id})`)
+        ack({
+          ok: true,
+          conversations: getConversationsFor(ADMIN_ID),
+          usingDefault: storedHash === null,
+        })
+      })
     })
   )
 
@@ -3457,6 +3508,34 @@ io.on('connection', (socket) => {
     audit('settings', `appName=${next.appName}; maintenance=${next.maintenanceMode};${touched}`)
     console.log(`App settings updated${touched ? ` (${touched.trim()})` : ''}`)
     ack({ ok: true, settings: next })
+  }))
+
+  /**
+   * v23 — Custom login admin: ganti password admin (hash bcrypt di settings).
+   * Wajib verifikasi password sekarang; sesi socket yang sudah auth tetap berlaku.
+   */
+  socket.on('admin:password_change', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const current = typeof data?.currentPassword === 'string' ? data.currentPassword : ''
+    const next = typeof data?.newPassword === 'string' ? data.newPassword : ''
+    if (next.length < 6 || next.length > 64) {
+      ack({ ok: false, error: 'WEAK_PASSWORD' })
+      return
+    }
+    void verifyAdminPassword(current).then((ok) => {
+      if (!ok) {
+        console.log(`Rejected admin password change (wrong current password, socket ${socket.id})`)
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const hash = Bun.password.hashSync(next, { algorithm: 'bcrypt', cost: 10 })
+      setSetting('adminPasswordHash', hash)
+      adminAuthFails.count = 0
+      adminAuthSocketFails.clear()
+      audit('password', 'password admin diganti dari dashboard')
+      console.log('Admin password changed (dashboard)')
+      ack({ ok: true })
+    })
   }))
 
   /**

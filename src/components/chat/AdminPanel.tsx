@@ -259,6 +259,8 @@ export function AdminPanel() {
   const { resolvedTheme, setTheme } = useTheme();
 
   const [authed, setAuthed] = useState(false);
+  // v23 — true bila admin masih memakai password bawaan admin123 (belum custom).
+  const [usingDefault, setUsingDefault] = useState(false);
   const [conversations, setConversations] = useState<ConversationOverview[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messagesMap, setMessagesMap] = useState<Record<string, ChatMessage[]>>({});
@@ -610,6 +612,8 @@ export function AdminPanel() {
         setLocked(false);
         setLockPin("");
         setLockError(null);
+      } else if (res.error === "RATE_LIMITED") {
+        setLockError("Terlalu banyak percobaan — tunggu 1 menit.");
       } else {
         setLockError("Password salah.");
       }
@@ -674,6 +678,7 @@ export function AdminPanel() {
         (res: AckOf<AdminAuthAck>) => {
           if (res.ok) {
             setAuthed(true);
+            setUsingDefault(!!res.usingDefault);
             setConversations(res.conversations);
             // Opt in to Web Push so messages reach us even when every
             // admin tab is closed (ack shape: { ok, pushPublicKey }).
@@ -981,12 +986,15 @@ export function AdminPanel() {
         if (res.ok) {
           passwordRef.current = trimmed;
           setAuthed(true);
+          setUsingDefault(!!res.usingDefault);
           setConversations(res.conversations);
         } else {
           setAuthError(
             res.error === "UNAUTHORIZED"
               ? "Password salah."
-              : "Terjadi kesalahan, coba lagi."
+              : res.error === "RATE_LIMITED"
+                ? "Terlalu banyak percobaan — tunggu 1 menit."
+                : "Terjadi kesalahan, coba lagi."
           );
         }
       }
@@ -2978,6 +2986,7 @@ export function AdminPanel() {
         socket={socketRef.current}
         tab={dashTab}
         onTabChange={setDashTab}
+        usingDefaultPassword={usingDefault}
       />
 
       {/* v11 — Manajemen pengguna (daftar + X-Ray + aksi sesi) */}

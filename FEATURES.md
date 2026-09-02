@@ -4,7 +4,7 @@
 > untuk tahu fitur apa saja yang harus ada, di file mana, dan cara memulihkannya —
 > TANPA user perlu ngeprompt ulang dari nol.
 >
-> Terakhir diperbarui: versi server **v22** (Task 39) + tampilan digabung Task 40.
+> Terakhir diperbarui: versi server **v23** (Task 41 — custom login admin).
 
 ---
 
@@ -64,6 +64,14 @@
 - **Header admin**: 4 tombol → **2** (Cari + "Menu lainnya" ⋯). Bintang & Teruskan kini jadi item pertama menu.
 - **Composer (kedua sisi)**: Paperclip + Jam → **satu tombol +** ("Menu lampiran"): Lampirkan foto/file + Kirim terjadwal. Form terjadwal kini **Dialog** (bukan popover anchor).
 - Fungsi/emit/socket TIDAK berubah — hanya pemindahan UI. Verifikasi: verify-integrity seksi "v22+".
+
+### v23 — Custom login admin (Task 41)
+- **Password admin bisa diganti** dari Dashboard → Pengaturan → kartu "Login admin" (isi password sekarang + baru ≥6 kar. + konfirmasi). Event `admin:password_change`, tersimpan **bcrypt** di settings (`adminPasswordHash`) — persist & ikut ter-backup (DB ter-track).
+- **Backward compat**: tanpa hash → fallback `ADMIN_PASSWORD` env / `admin123` (perilaku lama utuh).
+- **Anti brute-force**: jendela global 10 gagal/menit + 5 gagal per-socket → `RATE_LIMITED`; sukses/ubah password mereset counter.
+- **`admin:auth` kini async** (Bun.password.verify) + ack berisi `usingDefault:true` bila masih bawaan → AdminPanel menampilkan peringatan amber di kartu Login admin.
+- UI: login admin memakai mapping error RATE_LIMITED (login + layar kunci), Dashboard props `usingDefaultPassword`.
+- Uji protokol 8/8 (ganti → login lama gagal → login baru sukses → lemah ditolak → restore). Verifikasi: verify-integrity seksi "v23".
 
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).

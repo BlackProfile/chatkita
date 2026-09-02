@@ -253,6 +253,13 @@ export interface UserAuthAck {
 export interface AdminAuthAck {
   ok: true;
   conversations: ConversationOverview[];
+  /** v23 — true bila masih memakai password bawaan admin123 (belum di-custom). */
+  usingDefault?: boolean;
+}
+
+/** Ack payload returned by `admin:password_change` (v23 — custom login admin). */
+export interface AdminPasswordChangeAck {
+  ok: true;
 }
 
 /** Ack payload returned by `messages:history` (both roles, participant-only). */
@@ -336,7 +343,9 @@ export type ChatErrorCode =
   | "FROZEN"
   | "MUTED"
   | "SLOW_MODE"
-  | "MEDIA_BLOCKED";
+  | "MEDIA_BLOCKED"
+  // v23 — custom login admin (admin:password_change):
+  | "WEAK_PASSWORD";
 
 export interface ChatErrorAck {
   ok: false;
@@ -803,8 +812,14 @@ export interface ConversationResetPayload {
 //
 // admin:auth        { password: string }
 //                     → AdminAuthAck | ChatErrorAck
-//                     Password login (ADMIN_PASSWORD env or "admin123").
+//                     Password login (hash settings v23, fallback
+//                     ADMIN_PASSWORD env atau "admin123"). Rate-limited.
 //                     Joins the `admins` room; returns ALL conversations.
+//
+// admin:password_change { currentPassword, newPassword }   [v23, admin-only]
+//                     → AdminPasswordChangeAck | ChatErrorAck
+//                     Ganti password admin (bcrypt ≥6 karakter, tersimpan
+//                     di settings). Sesi yang sudah ter-auth tetap berlaku.
 //
 // messages:history  { conversationId: string; beforeId?: number }
 //                     → HistoryAck | ChatErrorAck

@@ -17,6 +17,7 @@ import {
   HardDrive,
   Hourglass,
   Image as ImageIcon,
+  KeyRound,
   Landmark,
   Link2,
   Loader2,
@@ -65,6 +66,7 @@ import {
 } from "@/lib/chat-utils";
 import type {
   AckOf,
+  AdminPasswordChangeAck,
   AppSettings,
   AppSettingsAck,
   BackupAck,
@@ -310,6 +312,7 @@ export function AdminDashboard({
   socket,
   tab,
   onTabChange,
+  usingDefaultPassword,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -317,6 +320,8 @@ export function AdminDashboard({
   socket: Socket | null;
   tab: DashboardTab;
   onTabChange: (tab: DashboardTab) => void;
+  /** v23 — true bila password admin masih bawaan admin123. */
+  usingDefaultPassword?: boolean;
 }) {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
@@ -328,6 +333,12 @@ export function AdminDashboard({
   const [broadcasting, setBroadcasting] = useState(false);
   const [vacuumResult, setVacuumResult] = useState<string | null>(null);
   const [busy, setBusy] = useState<"backup" | "vacuum" | null>(null);
+  // v23 — form ganti password admin (tab Pengaturan).
+  const [pwCurrent, setPwCurrent] = useState("");
+  const [pwNext, setPwNext] = useState("");
+  const [pwConfirm, setPwConfirm] = useState("");
+  const [pwMsg, setPwMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const [pwBusy, setPwBusy] = useState(false);
   // v13 — analitik & sistem.
   const [range, setRange] = useState<14 | 30>(14);
   const [system, setSystem] = useState<SystemInfo | null>(null);
@@ -437,6 +448,42 @@ export function AdminDashboard({
           setTimeout(() => setSettingsMsg(null), 2000);
         } else {
           setSettingsMsg("Gagal menyimpan");
+        }
+      }
+    );
+  };
+
+  /** v23 — ganti password admin (verifikasi password lama di server, bcrypt). */
+  const changeAdminPassword = () => {
+    if (!socket || pwBusy) return;
+    setPwMsg(null);
+    if (pwNext.length < 6 || pwNext.length > 64) {
+      setPwMsg({ kind: "err", text: "Password baru harus 6–64 karakter." });
+      return;
+    }
+    if (pwNext !== pwConfirm) {
+      setPwMsg({ kind: "err", text: "Konfirmasi password tidak sama." });
+      return;
+    }
+    setPwBusy(true);
+    socket.emit(
+      "admin:password_change",
+      { currentPassword: pwCurrent, newPassword: pwNext },
+      (res: AckOf<AdminPasswordChangeAck> | ChatErrorAck) => {
+        setPwBusy(false);
+        if (res.ok) {
+          setPwMsg({ kind: "ok", text: "Password admin diganti ✓ (berlaku untuk login berikutnya)." });
+          setPwCurrent("");
+          setPwNext("");
+          setPwConfirm("");
+        } else if (res.error === "UNAUTHORIZED") {
+          setPwMsg({ kind: "err", text: "Password sekarang salah." });
+        } else if (res.error === "WEAK_PASSWORD") {
+          setPwMsg({ kind: "err", text: "Password baru harus 6–64 karakter." });
+        } else if (res.error === "RATE_LIMITED") {
+          setPwMsg({ kind: "err", text: "Terlalu banyak percobaan — tunggu 1 menit." });
+        } else {
+          setPwMsg({ kind: "err", text: "Gagal mengganti password." });
         }
       }
     );
@@ -1022,6 +1069,92 @@ export function AdminDashboard({
                   <Save className="size-4" aria-hidden="true" />
                   Simpan identitas
                 </Button>
+              </div>
+
+              {/* v23 — Custom login admin: ganti password (hash bcrypt di server). */}
+              <div className="space-y-3 rounded-xl border bg-card p-3">
+                <div className="flex items-center gap-2">
+                  <KeyRound className="size-4 text-amber-600" aria-hidden="true" />
+                  <p className="text-sm font-semibold">Login admin</p>
+                </div>
+                {usingDefaultPassword ? (
+                  <p className="rounded-lg bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-snug text-amber-700 dark:text-amber-400">
+                    ⚠ Masih memakai password bawaan admin123 — segera ganti di bawah.
+                  </p>
+                ) : null}
+                <div className="space-y-1.5">
+                  <Label htmlFor="dash-pw-current">Password sekarang</Label>
+                  <Input
+                    id="dash-pw-current"
+                    type="password"
+                    value={pwCurrent}
+                    autoComplete="current-password"
+                    placeholder="••••••••"
+                    className="h-9"
+                    onChange={(e) => {
+                      setPwCurrent(e.target.value);
+                      setPwMsg(null);
+                    }}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="dash-pw-next">Password baru</Label>
+                  <Input
+                    id="dash-pw-next"
+                    type="password"
+                    value={pwNext}
+                    autoComplete="new-password"
+                    placeholder="Min. 6 karakter"
+                    className="h-9"
+                    onChange={(e) => {
+                      setPwNext(e.target.value);
+                      setPwMsg(null);
+                    }}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="dash-pw-confirm">Ulangi password baru</Label>
+                  <Input
+                    id="dash-pw-confirm"
+                    type="password"
+                    value={pwConfirm}
+                    autoComplete="new-password"
+                    placeholder="Ulangi password baru"
+                    className="h-9"
+                    onChange={(e) => {
+                      setPwConfirm(e.target.value);
+                      setPwMsg(null);
+                    }}
+                  />
+                </div>
+                {pwMsg ? (
+                  <p
+                    className={cn(
+                      "rounded-lg px-2.5 py-1.5 text-xs",
+                      pwMsg.kind === "ok"
+                        ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                        : "bg-destructive/10 text-destructive"
+                    )}
+                  >
+                    {pwMsg.text}
+                  </p>
+                ) : null}
+                <Button
+                  size="sm"
+                  className="btn-gradient h-9 text-white"
+                  disabled={pwBusy || !pwCurrent || !pwNext || !pwConfirm}
+                  onClick={changeAdminPassword}
+                >
+                  {pwBusy ? (
+                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <KeyRound className="size-4" aria-hidden="true" />
+                  )}
+                  Ganti password
+                </Button>
+                <p className="text-[11px] leading-snug text-muted-foreground">
+                  Tersimpan ter-hash di server. Login salah dibatasi (anti coba-coba).
+                </p>
               </div>
 
               {/* v13 — Akses & Pendaftaran */}
