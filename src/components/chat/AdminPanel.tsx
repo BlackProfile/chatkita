@@ -32,6 +32,7 @@ import {
   Moon,
   Paperclip,
   Pin,
+  Plus,
   QrCode,
   Radio,
   Repeat,
@@ -113,7 +114,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useVoiceRecorder } from "@/hooks/use-voice-recorder";
 import { Toaster } from "@/components/ui/sonner";
@@ -1335,7 +1335,7 @@ export function AdminPanel() {
     );
   };
 
-  /* Kirim terjadwal: default +1 jam tiap popover dibuka. */
+  /* Kirim terjadwal: default +1 jam tiap dialog dibuka. */
   const handleSchedOpenChange = (open: boolean) => {
     setSchedOpen(open);
     if (open) setSchedValue(toLocalInputValue(Date.now() + 3_600_000));
@@ -2196,28 +2196,6 @@ export function AdminPanel() {
                     >
                       <Search className="size-4" aria-hidden="true" />
                     </Button>
-                    {/* v22 — pesan berbintang (bintang milik admin) */}
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="size-9 text-muted-foreground hover:text-foreground"
-                      aria-label="Pesan berbintang"
-                      title="Pesan berbintang"
-                      onClick={() => setStarredOpen(true)}
-                    >
-                      <Star className="size-4" aria-hidden="true" />
-                    </Button>
-                    {/* v22 — teruskan pesan ke percakapan lain */}
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="size-9 text-muted-foreground hover:text-foreground"
-                      aria-label="Teruskan pesan"
-                      title="Teruskan pesan"
-                      onClick={openForwardDialog}
-                    >
-                      <Forward className="size-4" aria-hidden="true" />
-                    </Button>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button
@@ -2225,11 +2203,22 @@ export function AdminPanel() {
                           size="icon"
                           className="size-9 text-muted-foreground hover:text-foreground"
                           aria-label="Menu lainnya"
+                          title="Menu lainnya"
                         >
                           <MoreVertical className="size-4" aria-hidden="true" />
                         </Button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
+                      <DropdownMenuContent align="end" className="w-60">
+                        {/* v22+ — fitur bintang/teruskan digabung ke menu lainnya. */}
+                        <DropdownMenuItem onClick={() => setStarredOpen(true)}>
+                          <Star className="mr-2 size-4" aria-hidden="true" />
+                          Pesan berbintang
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={openForwardDialog}>
+                          <Forward className="mr-2 size-4" aria-hidden="true" />
+                          Teruskan pesan
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
                         <DropdownMenuItem
                           onClick={() =>
                             toggleArchive(activeConversation.id, !!activeConversation.archived)
@@ -2738,59 +2727,35 @@ export function AdminPanel() {
                         >
                           <Smile className="size-5" aria-hidden="true" />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="size-10 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
-                          aria-label="Lampirkan foto atau file"
-                          title="Lampirkan foto atau file"
-                          onClick={() => fileInputRef.current?.click()}
-                        >
-                          <Paperclip className="size-5" aria-hidden="true" />
-                        </Button>
-                        {/* v22 — kirim terjadwal */}
-                        <Popover open={schedOpen} onOpenChange={handleSchedOpenChange}>
-                          <PopoverTrigger asChild>
+                        {/* v22+ — lampiran & kirim terjadwal digabung dalam satu tombol +. */}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
                             <Button
                               variant="ghost"
                               size="icon"
                               className="size-10 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
-                              aria-label="Kirim terjadwal"
-                              title="Kirim terjadwal"
-                              disabled={!connected}
+                              aria-label="Menu lampiran"
+                              title="Lampiran & kirim terjadwal"
                             >
-                              <Clock className="size-5" aria-hidden="true" />
+                              <Plus className="size-5" aria-hidden="true" />
                             </Button>
-                          </PopoverTrigger>
-                          <PopoverContent side="top" align="start" className="w-72 rounded-xl p-3.5">
-                            <div className="space-y-2.5">
-                              <div className="space-y-1.5">
-                                <Label htmlFor="schedule-at" className="text-xs font-medium">
-                                  Kirim pada
-                                </Label>
-                                <Input
-                                  id="schedule-at"
-                                  type="datetime-local"
-                                  value={schedValue}
-                                  min={toLocalInputValue(Date.now() + 60_000)}
-                                  className="h-9"
-                                  onChange={(e) => setSchedValue(e.target.value)}
-                                />
-                                <p className="text-[11px] leading-snug text-muted-foreground">
-                                  Minimal 1 menit, maksimal 30 hari dari sekarang. Pesan tampil
-                                  dengan chip jam sampai waktunya tiba.
-                                </p>
-                              </div>
-                              <Button
-                                className="btn-gradient h-9 w-full rounded-lg text-sm font-semibold text-white"
-                                disabled={!connected || !!editing || !input.trim() || !schedValue}
-                                onClick={scheduleSend}
-                              >
-                                Jadwalkan
-                              </Button>
-                            </div>
-                          </PopoverContent>
-                        </Popover>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="start" className="w-60">
+                            <DropdownMenuItem
+                              onClick={() => fileInputRef.current?.click()}
+                            >
+                              <Paperclip className="mr-2 size-4" aria-hidden="true" />
+                              Lampirkan foto atau file
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled={!connected || !!editing}
+                              onClick={() => handleSchedOpenChange(true)}
+                            >
+                              <Clock className="mr-2 size-4" aria-hidden="true" />
+                              Kirim terjadwal
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                         <Input
                           value={input}
                           maxLength={MAX_MESSAGE_LENGTH}
@@ -3141,6 +3106,49 @@ export function AdminPanel() {
         >
           {menuNotice}
         </div>
+      ) : null}
+
+      {/* v22+ — dialog kirim terjadwal (dibuka dari menu lampiran composer) */}
+      {schedOpen ? (
+        <Dialog open onOpenChange={handleSchedOpenChange}>
+          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Clock className="size-4" aria-hidden="true" />
+                Kirim terjadwal
+              </DialogTitle>
+              <DialogDescription>
+                Pesan terkirim otomatis pada waktu yang dipilih.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2.5">
+              <div className="space-y-1.5">
+                <Label htmlFor="schedule-at" className="text-xs font-medium">
+                  Kirim pada
+                </Label>
+                <Input
+                  id="schedule-at"
+                  type="datetime-local"
+                  value={schedValue}
+                  min={toLocalInputValue(Date.now() + 60_000)}
+                  className="h-9"
+                  onChange={(e) => setSchedValue(e.target.value)}
+                />
+                <p className="text-[11px] leading-snug text-muted-foreground">
+                  Minimal 1 menit, maksimal 30 hari dari sekarang. Pesan tampil dengan chip jam
+                  sampai waktunya tiba.
+                </p>
+              </div>
+              <Button
+                className="btn-gradient h-9 w-full rounded-lg text-sm font-semibold text-white"
+                disabled={!connected || !!editing || !input.trim() || !schedValue}
+                onClick={scheduleSend}
+              >
+                Jadwalkan
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
       ) : null}
 
       {/* v22 — dialog pesan berbintang (bintang milik admin di chat aktif) */}

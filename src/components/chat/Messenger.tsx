@@ -13,13 +13,17 @@ import {
   LogOut,
   MessageCircleMore,
   Mic,
+  Moon,
+  MoreVertical,
   Paperclip,
   Pin,
+  Plus,
   Search,
   SendHorizonal,
   ShieldCheck,
   Smile,
   Star,
+  Sun,
   Type,
   X,
   type LucideIcon,
@@ -62,11 +66,12 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import { useVoiceRecorder } from "@/hooks/use-voice-recorder";
 import { createChatSocket } from "@/lib/chat-socket";
@@ -450,10 +455,11 @@ export function Messenger() {
   const [starredOpen, setStarredOpen] = useState(false);
   const [starredList, setStarredList] = useState<ChatMessage[]>([]);
   const [starredLoading, setStarredLoading] = useState(false);
-  // v22 — kirim terjadwal (popover composer) + target konfirmasi pembatalan.
+  // v22 — kirim terjadwal (dialog dari menu lampiran) + target pembatalan.
   const [schedOpen, setSchedOpen] = useState(false);
   const [schedValue, setSchedValue] = useState("");
   const [cancelSchedId, setCancelSchedId] = useState<number | null>(null);
+  const { resolvedTheme, setTheme } = useTheme();
 
   /** Bumped on logout to tear down + recreate the socket (fresh rooms). */
   const [epoch, setEpoch] = useState(0);
@@ -1083,7 +1089,7 @@ export function Messenger() {
     );
   };
 
-  /* v22 — kirim terjadwal dari popover composer (epoch ms; server memvalidasi
+  /* v22 — kirim terjadwal dari dialog menu lampiran (epoch ms; server memvalidasi
    * 10 dtk–30 hari). Sukses → toast + kosongkan input; gagal → toast error. */
   const sendScheduled = () => {
     const content = input.trim();
@@ -1672,35 +1678,50 @@ export function Messenger() {
             >
               <Search className="size-4" aria-hidden="true" />
             </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-9 text-muted-foreground hover:text-amber-500"
-              aria-label="Pesan berbintang"
-              title="Pesan berbintang"
-              onClick={() => {
-                setStarredOpen(true);
-                fetchStarred();
-              }}
-            >
-              <Star className="size-4" aria-hidden="true" />
-            </Button>
+            {/* v22+ — fitur sekunder digabung dalam satu menu agar header ringkas. */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
                   size="icon"
                   className="size-9 text-muted-foreground hover:text-foreground"
-                  aria-label="Ukuran huruf"
+                  aria-label="Menu lainnya"
+                  title="Menu lainnya"
                 >
-                  <Type className="size-4" aria-hidden="true" />
+                  <MoreVertical className="size-4" aria-hidden="true" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
+              <DropdownMenuContent align="end" className="w-60">
+                <DropdownMenuItem
+                  onClick={() => {
+                    setStarredOpen(true);
+                    fetchStarred();
+                  }}
+                >
+                  <Star className="mr-2 size-4" aria-hidden="true" />
+                  Pesan berbintang
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setPinOpen(true)}>
+                  <ShieldCheck className="mr-2 size-4" aria-hidden="true" />
+                  Kunci akun dengan PIN
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={toggleDataSaver}
+                  className={cn(dataSaver && "bg-accent")}
+                >
+                  <Leaf className="mr-2 size-3.5" aria-hidden="true" />
+                  Hemat data: {dataSaver ? "aktif" : "nonaktif"}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+                >
+                  <Sun className="mr-2 size-3.5 dark:hidden" aria-hidden="true" />
+                  <Moon className="mr-2 size-3.5 hidden dark:block" aria-hidden="true" />
+                  Ganti tema
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuLabel>Ukuran huruf</DropdownMenuLabel>
-                {(
-                  FONT_SCALE_LABELS
-                ).map((o) => (
+                {FONT_SCALE_LABELS.map((o) => (
                   <DropdownMenuItem
                     key={o.key}
                     onClick={() => {
@@ -1709,47 +1730,20 @@ export function Messenger() {
                     }}
                     className={cn(fontScale === o.key && "bg-accent")}
                   >
+                    <Type className="mr-2 size-3.5" aria-hidden="true" />
                     {o.label}
                   </DropdownMenuItem>
                 ))}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={handleLogout}
+                  className="text-destructive focus:text-destructive"
+                >
+                  <LogOut className="mr-2 size-4" aria-hidden="true" />
+                  Keluar
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-            <Button
-              variant="ghost"
-              size="icon"
-              className={cn(
-                "size-9",
-                dataSaver ? "text-emerald-600" : "text-muted-foreground hover:text-foreground"
-              )}
-              aria-pressed={dataSaver}
-              aria-label={dataSaver ? "Matikan hemat data" : "Aktifkan hemat data"}
-              title="Hemat data: media berat dimuat manual"
-              onClick={toggleDataSaver}
-            >
-              <Leaf className="size-4" aria-hidden="true" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className={cn(
-                "size-9",
-                hasPin ? "text-emerald-600" : "text-muted-foreground hover:text-foreground"
-              )}
-              aria-label="Kunci akun dengan PIN"
-              onClick={() => setPinOpen(true)}
-            >
-              <ShieldCheck className="size-4" aria-hidden="true" />
-            </Button>
-            <ThemeToggle />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-9 shrink-0 text-muted-foreground hover:text-destructive"
-              aria-label="Keluar"
-              onClick={handleLogout}
-            >
-              <LogOut className="size-4" aria-hidden="true" />
-            </Button>
           </div>
         </div>
 
@@ -2159,64 +2153,39 @@ export function Messenger() {
                 >
                   <Smile className="size-5" aria-hidden="true" />
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="size-10 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
-                  aria-label="Lampirkan foto atau file"
-                  title={
-                    mediaBlocked
-                      ? "Media diblokir admin"
-                      : sendBlocked
-                        ? "Pengiriman dibatasi admin"
-                        : "Lampirkan foto atau file"
-                  }
-                  disabled={!connected || mediaBlocked || sendBlocked}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <Paperclip className="size-5" aria-hidden="true" />
-                </Button>
-                {/* v22 — kirim terjadwal: popover datetime (min sekarang+1 mnt). */}
-                <Popover
-                  open={schedOpen}
-                  onOpenChange={(o) => {
-                    setSchedOpen(o);
-                    if (o) setSchedValue(toLocalInputValue(Date.now() + 3_600_000));
-                  }}
-                >
-                  <PopoverTrigger asChild>
+                {/* v22+ — lampiran & kirim terjadwal digabung dalam satu tombol +. */}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
                     <Button
                       variant="ghost"
                       size="icon"
                       className="size-10 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
-                      aria-label="Kirim terjadwal"
-                      title="Kirim terjadwal"
+                      aria-label="Menu lampiran"
+                      title="Lampiran & kirim terjadwal"
+                    >
+                      <Plus className="size-5" aria-hidden="true" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-60">
+                    <DropdownMenuItem
+                      disabled={!connected || mediaBlocked || sendBlocked}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <Paperclip className="mr-2 size-4" aria-hidden="true" />
+                      Lampirkan foto atau file
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
                       disabled={!connected || sendBlocked || !!editing}
+                      onClick={() => {
+                        setSchedValue(toLocalInputValue(Date.now() + 3_600_000));
+                        setSchedOpen(true);
+                      }}
                     >
-                      <Clock className="size-5" aria-hidden="true" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent align="start" className="w-60 rounded-xl p-3">
-                    <p className="mb-2 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                      <Clock className="size-3.5" aria-hidden="true" />
+                      <Clock className="mr-2 size-4" aria-hidden="true" />
                       Kirim terjadwal
-                    </p>
-                    <Input
-                      type="datetime-local"
-                      min={toLocalInputValue(Date.now() + 60_000)}
-                      value={schedValue}
-                      aria-label="Waktu kirim"
-                      className="h-9 text-xs"
-                      onChange={(e) => setSchedValue(e.target.value)}
-                    />
-                    <Button
-                      className="mt-2 h-9 w-full rounded-lg bg-emerald-600 text-xs text-white hover:bg-emerald-600/90"
-                      onClick={sendScheduled}
-                    >
-                      Jadwalkan
-                    </Button>
-                  </PopoverContent>
-                </Popover>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
                 <Input
                   value={input}
                   maxLength={MAX_MESSAGE_LENGTH}
@@ -2380,6 +2349,38 @@ export function Messenger() {
           </DialogContent>
         </Dialog>
       ) : null}
+
+      {/* v22+ — dialog kirim terjadwal (dibuka dari menu lampiran composer) */}
+      <Dialog open={schedOpen} onOpenChange={setSchedOpen}>
+        <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Clock className="size-4" aria-hidden="true" />
+              Kirim terjadwal
+            </DialogTitle>
+            <DialogDescription>
+              Pesan terkirim otomatis pada waktu yang dipilih (10 detik–30 hari).
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2.5">
+            <Input
+              type="datetime-local"
+              min={toLocalInputValue(Date.now() + 60_000)}
+              value={schedValue}
+              aria-label="Waktu kirim"
+              className="h-9 text-xs"
+              onChange={(e) => setSchedValue(e.target.value)}
+            />
+            <Button
+              className="h-10 w-full rounded-lg bg-emerald-600 text-sm font-semibold text-white hover:bg-emerald-600/90"
+              disabled={!connected || sendBlocked || !!editing}
+              onClick={sendScheduled}
+            >
+              Jadwalkan
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* v22 — panel pesan berbintang (fetch ulang tiap kali dibuka) */}
       <Dialog

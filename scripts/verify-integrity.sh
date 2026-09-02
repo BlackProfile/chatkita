@@ -52,6 +52,12 @@ chk_grep "UI bintang + terjadwal user"       "src/components/chat/Messenger.tsx"
 chk_grep "UI teruskan + bintang admin"       "src/components/chat/AdminPanel.tsx" "messages:forward"
 chk_grep "ChatBubble prop star/scheduled"    "src/components/chat/ChatBubble.tsx" "onToggleStar"
 
+echo "[v22+ — Tampilan digabung (menu ringkas, Task 40)]"
+chk_grep "Menu lainnya header user"          "src/components/chat/Messenger.tsx" "Menu lainnya"
+chk_grep "Menu lampiran composer user"       "src/components/chat/Messenger.tsx" "Menu lampiran"
+chk_grep "Bintang+Teruskan di menu admin"    "src/components/chat/AdminPanel.tsx" "Teruskan pesan"
+chk_grep "Menu lampiran composer admin"      "src/components/chat/AdminPanel.tsx" "Menu lampiran"
+
 echo ""
 echo "== Versi server terdaftar =="
 grep -m1 "SERVICE_VERSION = " mini-services/chat-service/index.ts || echo "  ❌ SERVICE_VERSION tidak ditemukan"

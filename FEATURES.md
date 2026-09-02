@@ -4,7 +4,7 @@
 > untuk tahu fitur apa saja yang harus ada, di file mana, dan cara memulihkannya —
 > TANPA user perlu ngeprompt ulang dari nol.
 >
-> Terakhir diperbarui: versi server **v22** (Task 39).
+> Terakhir diperbarui: versi server **v22** (Task 39) + tampilan digabung Task 40.
 
 ---
 
@@ -58,6 +58,12 @@
 - **Pesan terjadwal**: `messages:send` + `scheduledAt` (min +10 dtk, maks +30 hari); HANYA pengirim melihat sebelum waktunya (disembunyikan dari history/overview/unread penerima); sweep `deliverDueScheduled` tiap 10 dtk mengirim otomatis + push + transkripsi voice; batal via `messages:schedule_cancel` + tombol "Batalkan jadwal"; UI popover datetime di composer kedua sisi; bubble pending ber-chip jam.
 - **Badge unread**: `document.title = "(n) ChatKita"` di user & admin.
 - Lokasi: handler di `index.ts` (blok v22), UI di `Messenger.tsx`/`AdminPanel.tsx`/`ChatBubble.tsx` (props star/forward/scheduled).
+
+### v22+ — Tampilan digabung (Task 40, permintaan "gabungkan supaya ga kebanyakan")
+- **Header user**: 7 tombol → **2** (Cari + "Menu lainnya" ⋯). Isi menu: Pesan berbintang, Kunci akun PIN, Hemat data (dgn status), Ganti tema, Ukuran huruf, Keluar.
+- **Header admin**: 4 tombol → **2** (Cari + "Menu lainnya" ⋯). Bintang & Teruskan kini jadi item pertama menu.
+- **Composer (kedua sisi)**: Paperclip + Jam → **satu tombol +** ("Menu lampiran"): Lampirkan foto/file + Kirim terjadwal. Form terjadwal kini **Dialog** (bukan popover anchor).
+- Fungsi/emit/socket TIDAK berubah — hanya pemindahan UI. Verifikasi: verify-integrity seksi "v22+".
 
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
