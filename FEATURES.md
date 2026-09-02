@@ -104,12 +104,9 @@
 - **Manual**: `bash scripts/make-backup.sh`.
 - **Cek kesehatan kapan pun**: `bash scripts/verify-integrity.sh` (18 pemeriksaan, exit 1 = ada yang hilang).
 - **Pulihkan file tunggal**: `git checkout rescue-v21 -- <path>` atau dari bundle (bagian 6).
-- **Offsite (disarankan, butuh user)**: GitHub terjangkau dari sandbox. Jika user menyediakan repo + Personal Access Token:
-  ```bash
-  git remote add origin https://<TOKEN>@github.com/<user>/chatkita.git
-  bash scripts/push-remote.sh   # push + backup lokal sekali jalan
-  ```
-  Dengan remote, checkpoint sandbox sekalipun tidak bisa menghapus riwayat — pull ulang dan selesai.
+- **Offsite GitHub (AKTIF sejak Task 38)**: remote `origin` sudah terpasang → `github.com/BlackProfile/chatkita` (repo PRIVATE, token tersimpan di `.git/config` — JANGAN ditulis di file mana pun yang ter-commit). Push offsite berjalan **otomatis setiap commit** (hook post-commit, best-effort) + manual `bash scripts/push-remote.sh` (push + backup lokal sekali jalan).
+  - Dengan remote aktif, checkpoint sandbox sekalipun tidak bisa menghapus riwayat — pulihkan dengan: `git clone https://github.com/BlackProfile/chatkita.git` (butuh token bila repo private).
+  - Bila push gagal (token expired/revoke): `git remote set-url origin https://<TOKEN_BARU>@github.com/BlackProfile/chatkita.git`.
 
 ## 8. Konvensi Kerja Agent (jangan dilanggar)
 - `bun run lint` **0 error** sebelum commit. Jangan `bun run build`.

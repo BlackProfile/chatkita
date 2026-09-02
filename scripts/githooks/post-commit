@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
-# Hook post-commit — backup bundle otomatis setiap commit (diam-diam).
+# Hook post-commit — perlindungan ganda setiap commit (diam-diam, non-blocking):
+#   1. git bundle lokal → /home/z/backups/
+#   2. push offsite ke GitHub origin (best-effort, detached)
 # Aktif via: git config core.hooksPath scripts/githooks
-bash "$(git rev-parse --show-toplevel)/scripts/make-backup.sh" >/dev/null 2>&1 || true
+ROOT="$(git rev-parse --show-toplevel)"
+bash "$ROOT/scripts/make-backup.sh" >/dev/null 2>&1 || true
+
+if git -C "$ROOT" remote get-url origin >/dev/null 2>&1; then
+  ( timeout 90 git -C "$ROOT" push origin HEAD >/dev/null 2>&1 & ) || true
+fi

@@ -833,3 +833,21 @@ Work Log:
 Stage Summary:
 - Task 37 SELESAI: sistem anti-rollback berlapis terpasang & teruji — (1) verify-integrity deteksi dini 18 titik, (2) bundle otomatis per commit ke /home/z/backups (di luar folder proyek), (3) self-heal boot dari tag rescue-v21, (4) FEATURES.md = buku panduan rebuild cepat, (5) push-remote siap untuk GitHub. Akar masalah terkonfirmasi: commit UUID dari checkpoint sandbox yang menghapus file baru; ke depan file yang dihapus akan pulih sendiri saat server boot, dan riwayat penuh selalu ada di bundle. Batas jujur: checkpoint sandbox full-VM tetap bisa menghapus /home/z/backups — satu-satunya perlindungan mutlak adalah remote GitHub (butuh repo + PAT dari user).
 - Commit ba646ec (+ tag rescue-v21) + commit worklog ini.
+
+---
+Task ID: 38
+Agent: main (Z.ai Code)
+Task: Pasang backup offsite GitHub (user kirim username+PAT) — remote origin + auto-push tiap commit
+
+Work Log:
+- User beri username BlackProfile + PAT (classic, scope repo). Token TIDAK dicatat di file ter-commit — hanya di .git/config (remote URL).
+- Repo github.com/BlackProfile/chatkita ternyata sudah dibuat user (API check 200) → tidak perlu create.
+- git remote add origin (URL ber-token) → git push -u origin main --tags → BERHASIL: branch main + tag rescue-v21 terunggah (bucket pertama berisi seluruh riwayat sampai Task 37).
+- Kejadian saat verifikasi: ls-remote menampilkan commit UUID BARU (a0ef6b6, 09:31 + e9f03c5) di ujung main — checkpoint platform lagi beroperasi. Inspeksi: hanya mengubah chat.db-shm/wal (runtime), TIDAK ada file fitur yang hilang; verify-integrity tetap 18/18 PASS. Commit UUID itu ikut ter-backup ke GitHub lewat push.
+- Hook post-commit ditingkatkan: (1) bundle lokal → /home/z/backups, (2) push origin HEAD best-effort detached (timeout 90, tidak memblokir commit).
+- FEATURES.md §7 diperbarui: offsite GitHub status AKTIF, cara pulihkan = git clone github.com/BlackProfile/chatkita, cara ganti token = git remote set-url origin. Catatan: token tidak boleh ditulis di file ter-commit.
+- Lint tidak tersentuh perubahan TS (hook bash + md). E2E UI tidak berubah — tidak diperlukan; kesehatan app sudah diverifikasi Task 37.
+
+Stage Summary:
+- Backup offsite GitHub AKTIF: seluruh riwayat (kode + DB ter-track + tag rescue-v21) ada di github.com/BlackProfile/chatkita (private). Setiap commit baru otomatis: bundle lokal + push ke GitHub. Perlindungan kini tahan checkpoint sandbox full-VM — pulihkan cukup git clone.
+- Commit ini sendiri = uji live auto-push (hook baru).
