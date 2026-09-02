@@ -84,8 +84,8 @@ import webpush from 'web-push'
 /* ------------------------------------------------------------------ */
 
 const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
-/** v21 — caption media (foto/file membawa teks composer). */
-const SERVICE_VERSION = 'v21'
+/** v22 — paket pulihan: bintangi/teruskan/jadwalkan pesan + badge unread. */
+const SERVICE_VERSION = 'v22'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -227,6 +227,11 @@ addColumn('users', 'slow_mode', 'INTEGER DEFAULT 0')
 addColumn('users', 'media_blocked', 'INTEGER DEFAULT 0')
 /* v20 — caption teks opsional yang menyertai pesan media (foto/file). */
 addColumn('messages', 'caption', 'TEXT')
+/* v22 — paket pulihan: bintang (per-user), teruskan, pesan terjadwal. */
+addColumn('messages', 'starred_by', 'TEXT')
+addColumn('messages', 'forwarded_from', 'TEXT')
+addColumn('messages', 'scheduled_at', 'INTEGER')
+addColumn('messages', 'delivered_at', 'INTEGER')
 
 /** v11 — audit trail of admin actions (admin:audit). */
 db.run(`
@@ -309,6 +314,11 @@ interface MessageRow {
   flagged?: number | null
   /* v20 — caption teks opsional yang menyertai pesan media (foto/file). */
   caption?: string | null
+  /* v22 — bintang per-user (JSON array userId), asal-forward, terjadwal. */
+  starred_by?: string | null
+  forwarded_from?: string | null
+  scheduled_at?: number | null
+  delivered_at?: number | null
 }
 
 /* ------------------------------ API types ------------------------------ */
@@ -341,6 +351,12 @@ interface ChatMessageApi {
   mediaExpiredAt?: string
   /** Emoji reactions grouped by emoji with the reacting user ids. */
   reactions?: { emoji: string; userIds: string[] }[]
+  /** v22 — userId yang membintangi pesan ini (viewer membandingkan id-nya). */
+  starredBy?: string[]
+  /** v22 — pesan terjadwal: ISO waktu kirim otomatis (hilang setelah terkirim). */
+  scheduledAt?: string
+  /** v22 — label "Diteruskan dari …" pada pesan hasil forward. */
+  forwardedFrom?: string
 }
 
 interface PartnerInfoApi {
@@ -902,6 +918,17 @@ const pushNewMessageIfOffline = (recipientId: string, senderName: string, body: 
 
 const now = () => Date.now()
 
+/** v22 — parse kolom starred_by (JSON array userId) dengan aman. */
+const starredByOf = (raw: string | null | undefined): string[] => {
+  if (!raw) return []
+  try {
+    const arr = JSON.parse(raw) as unknown
+    return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
 const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   id: row.id,
   conversationId: row.conversation_id,
@@ -921,6 +948,13 @@ const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   ...(row.mime_type && !row.deleted_at ? { mimeType: row.mime_type } : {}),
   // v20 — caption ikut media (tidak pernah dikirim setelah dihapus).
   ...(row.caption && !row.deleted_at ? { caption: row.caption } : {}),
+  // v22 — bintang per-user, label forward, dan pesan terjadwal (yang belum
+  // terkirim membawa scheduledAt; setelah delivered_at terisi field hilang).
+  ...(row.starred_by ? { starredBy: starredByOf(row.starred_by) } : {}),
+  ...(row.forwarded_from && !row.deleted_at ? { forwardedFrom: row.forwarded_from } : {}),
+  ...(row.scheduled_at && !row.delivered_at && !row.deleted_at
+    ? { scheduledAt: new Date(row.scheduled_at).toISOString() }
+    : {}),
   // v8 — thumbnail + retention tombstone (never emitted after delete).
   ...(row.thumb_url && !row.deleted_at && !row.media_expired_at
     ? { thumbUrl: row.thumb_url }
@@ -1099,26 +1133,31 @@ const getPartnerUser = (conversation: ConversationRow, userId: string): UserRow 
 const getMessagesPage = (
   conversationId: string,
   beforeId?: number,
-  limit = HISTORY_PAGE_SIZE
+  limit = HISTORY_PAGE_SIZE,
+  /* v22 — pesan terjadwal orang lain yang belum terkirim disembunyikan. */
+  viewerId?: string
 ): { messages: ChatMessageApi[]; hasMore: boolean } => {
+  const viewerFilter = viewerId
+    ? ' AND (scheduled_at IS NULL OR delivered_at IS NOT NULL OR sender_id = ?)'
+    : ''
   const fetched = (
     beforeId
       ? (db
           .query(
             `SELECT * FROM (
-               SELECT * FROM messages WHERE conversation_id = ? AND id < ?
+               SELECT * FROM messages WHERE conversation_id = ? AND id < ?${viewerFilter}
                ORDER BY id DESC LIMIT ?
              ) ORDER BY id ASC`
           )
-          .all(conversationId, beforeId, limit + 1) as MessageRow[])
+          .all(...(viewerId ? [conversationId, beforeId, viewerId] : [conversationId, beforeId]), limit + 1) as MessageRow[])
       : (db
           .query(
             `SELECT * FROM (
-               SELECT * FROM messages WHERE conversation_id = ?
+               SELECT * FROM messages WHERE conversation_id = ?${viewerFilter}
                ORDER BY id DESC LIMIT ?
              ) ORDER BY id ASC`
           )
-          .all(conversationId, limit + 1) as MessageRow[])
+          .all(...(viewerId ? [conversationId, viewerId] : [conversationId]), limit + 1) as MessageRow[])
   )
   const hasMore = fetched.length > limit
   // The extra row is the OLDEST of the DESC fetch → drop it (ASC order).
@@ -1205,6 +1244,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
           WHERE m.conversation_id = c.id
             AND m.sender_id != $me
             AND m.deleted_at IS NULL
+            AND (m.scheduled_at IS NULL OR m.delivered_at IS NOT NULL)
             AND m.id > COALESCE(
               (SELECT r.last_read_message_id FROM reads r
                WHERE r.conversation_id = c.id AND r.user_id = $me), 0)
@@ -1214,7 +1254,9 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         ON p.id = (CASE WHEN c.user_a_id = $me THEN c.user_b_id ELSE c.user_a_id END)
       LEFT JOIN messages lm
         ON lm.id = (SELECT m2.id FROM messages m2
-                    WHERE m2.conversation_id = c.id ORDER BY m2.id DESC LIMIT 1)
+                    WHERE m2.conversation_id = c.id
+                      AND (m2.scheduled_at IS NULL OR m2.delivered_at IS NOT NULL)
+                    ORDER BY m2.id DESC LIMIT 1)
       LEFT JOIN messages pm
         ON pm.id = c.pinned_message_id
       LEFT JOIN users pu
@@ -1529,13 +1571,15 @@ const insertAndFanOut = (
     flagged?: number
     /* v20 — caption teks opsional untuk pesan foto/file. */
     caption?: string
+    /* v22 — label "Diteruskan dari …" untuk pesan hasil forward admin. */
+    forwardedFrom?: string
   } = {}
 ): ChatMessageApi => {
   const ts = now()
   const hasMediaMeta = type === 'file' || type === 'image' || type === 'voice'
   const hasCaption = type === 'file' || type === 'image'
   const result = db.run(
-    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged, caption) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged, caption, forwarded_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     [
       conversation.id,
       senderId,
@@ -1550,6 +1594,7 @@ const insertAndFanOut = (
       opts.thumbUrl ?? null,
       opts.flagged ?? 0,
       hasCaption ? (opts.caption ?? null) : null,
+      opts.forwardedFrom ?? null,
     ]
   )
   db.run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [ts, conversation.id])
@@ -2460,7 +2505,7 @@ io.on('connection', (socket) => {
         broadcastRead(conversation, me, readUpTo)
       }
       const partner = getPartnerUser(conversation, me)
-      const page = getMessagesPage(conversation.id)
+      const page = getMessagesPage(conversation.id, undefined, HISTORY_PAGE_SIZE, me)
       ack({
         ok: true,
         messages: page.messages,
@@ -2502,7 +2547,7 @@ io.on('connection', (socket) => {
         return
       }
       // Read state is intentionally NOT touched by paging through history.
-      ack({ ok: true, ...getMessagesPage(conversation.id, beforeId) })
+      ack({ ok: true, ...getMessagesPage(conversation.id, beforeId, HISTORY_PAGE_SIZE, me) })
     })
   )
 
@@ -2658,6 +2703,17 @@ io.on('connection', (socket) => {
         }
       }
 
+      // v22 — kirim terjadwal opsional (epoch ms): minimal +10 detik, maks +30 hari.
+      let scheduledAtMs: number | undefined
+      if (data?.scheduledAt != null) {
+        const t = Number(data.scheduledAt)
+        if (!Number.isFinite(t) || t < now() + 10_000 || t > now() + 30 * 86_400_000) {
+          ack({ ok: false, error: 'INVALID_SCHEDULE' })
+          return
+        }
+        scheduledAtMs = Math.round(t)
+      }
+
       // Optional reply target must belong to the same conversation.
       let replyToId: number | undefined
       if (data?.replyToId != null) {
@@ -2724,6 +2780,42 @@ io.on('connection', (socket) => {
       // v11 — keyword scanner: silent flag only; the send is NEVER blocked
       // or altered. The first matching keyword wins.
       const flagKeyword = type === 'text' ? matchedKeyword(trimmed) : null
+
+      // v22 — pesan terjadwal: disimpan sekarang, HANYA pengirim melihatnya
+      // (chip ⏰), lalu dipancarkan ke semua pihak saat waktunya tiba.
+      if (scheduledAtMs) {
+        const result = db.run(
+          'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged, caption, scheduled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [
+            conversation.id,
+            me,
+            trimmed,
+            now(),
+            type,
+            replyToId ?? null,
+            durationMs ?? null,
+            type === 'file' || type === 'image' || type === 'voice' ? (fileMeta?.fileName ?? null) : null,
+            (type === 'file' || type === 'image' || type === 'voice') && fileMeta ? fileMeta.fileSize : null,
+            type === 'file' || type === 'image' || type === 'voice' ? (fileMeta?.mimeType ?? null) : null,
+            thumbUrlRef ?? null,
+            flagKeyword ? 1 : 0,
+            captionRef ?? null,
+            scheduledAtMs,
+          ]
+        )
+        const row = db
+          .query('SELECT * FROM messages WHERE id = ?')
+          .get(Number(result.lastInsertRowid)) as MessageRow
+        const message = toChatMessage(row)
+        attachReplyPreviews([row], [message])
+        if (me === ADMIN_ID) io.to('admins').emit('message:new', message)
+        else io.to(`user:${me}`).emit('message:new', message)
+        ack({ ok: true, message })
+        console.log(
+          `[${me.slice(0, 8)}] terjadwal ${new Date(scheduledAtMs).toISOString()} (${type})`
+        )
+        return
+      }
 
       const message = insertAndFanOut(conversation, me, trimmed, type, {
         replyToId,
@@ -2898,6 +2990,160 @@ io.on('connection', (socket) => {
       io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
       io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
       io.to('admins').emit('message:updated', payload)
+    })
+  )
+
+  socket.on(
+    'messages:star',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const id = Number(data?.messageId)
+      if (!Number.isInteger(id) || id <= 0) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const row = db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null
+      if (!row || row.deleted_at) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const conversation = getConversation(row.conversation_id)
+      if (!conversation || !isParticipant(conversation, me)) {
+        ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      // v22 — toggle bintang per-user (kolom starred_by = JSON array userId).
+      const list = starredByOf(row.starred_by)
+      const starred = !list.includes(me)
+      const next = starred ? [...list, me] : list.filter((x) => x !== me)
+      db.run('UPDATE messages SET starred_by = ? WHERE id = ?', [
+        next.length ? JSON.stringify(next) : null,
+        id,
+      ])
+      ack({ ok: true, starred })
+      const payload = { id, conversationId: conversation.id, starredBy: next }
+      io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+      io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+      io.to('admins').emit('message:updated', payload)
+    })
+  )
+
+  socket.on(
+    'messages:starred',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const conversation =
+        typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+      if (!conversation || !isParticipant(conversation, me)) {
+        ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      // v22 — daftar pesan berbintang milik pemanggil dalam percakapan ini.
+      const rows = db
+        .query(
+          'SELECT * FROM messages WHERE conversation_id = ? AND starred_by IS NOT NULL AND deleted_at IS NULL ORDER BY id DESC LIMIT 200'
+        )
+        .all(conversation.id) as MessageRow[]
+      const mine = rows.filter((r) => starredByOf(r.starred_by).includes(me))
+      const messages = mine.map((r) => toChatMessage(r))
+      attachReplyPreviews(mine, messages)
+      ack({ ok: true, messages })
+    })
+  )
+
+  socket.on(
+    'messages:forward',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      // v22 — forward pesan ke percakapan lain (khusus admin, multi-kontak).
+      if (me !== ADMIN_ID) {
+        ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      const id = Number(data?.messageId)
+      const src =
+        Number.isInteger(id) && id > 0
+          ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+          : null
+      if (!src || src.deleted_at || src.scheduled_at) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const srcConv = getConversation(src.conversation_id)
+      if (!srcConv || !isParticipant(srcConv, me)) {
+        ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      const targetType = (src.type ?? 'text') as MessageType
+      if (targetType === 'system' || !src.content) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const target =
+        typeof data?.targetConversationId === 'string'
+          ? getConversation(data.targetConversationId)
+          : null
+      if (!target || !isParticipant(target, me)) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const originName =
+        src.sender_id === ADMIN_ID ? ADMIN_NAME : (findUserById(src.sender_id)?.name ?? 'Pengguna')
+      const message = insertAndFanOut(target, me, src.content, targetType, {
+        durationMs: src.duration_ms ?? undefined,
+        fileName: src.file_name ?? undefined,
+        fileSize: typeof src.file_size === 'number' ? src.file_size : undefined,
+        mimeType: src.mime_type ?? undefined,
+        thumbUrl: src.thumb_url ?? undefined,
+        caption: src.caption ?? undefined,
+        forwardedFrom: originName,
+      })
+      ack({ ok: true, message })
+      if (targetType === 'voice') void transcribeVoice(message.id, target.id, src.content)
+      console.log(`Forward pesan ${id} → ${target.id.slice(0, 8)} (dari ${originName})`)
+    })
+  )
+
+  socket.on(
+    'messages:schedule_cancel',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const id = Number(data?.messageId)
+      const row =
+        Number.isInteger(id) && id > 0
+          ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+          : null
+      // v22 — batalkan pesan terjadwal milik sendiri SEBELUM waktunya tiba.
+      if (!row || row.sender_id !== me || !row.scheduled_at || row.delivered_at) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const conversation = getConversation(row.conversation_id)
+      db.run('DELETE FROM messages WHERE id = ?', [id])
+      ack({ ok: true })
+      if (conversation) {
+        const payload = { id, conversationId: conversation.id }
+        io.to(`user:${conversation.user_a_id}`).emit('message:scheduled_cancelled', payload)
+        io.to(`user:${conversation.user_b_id}`).emit('message:scheduled_cancelled', payload)
+        io.to('admins').emit('message:scheduled_cancelled', payload)
+      }
+      console.log(`Pesan terjadwal ${id} dibatalkan oleh ${me.slice(0, 8)}`)
     })
   )
 
@@ -4100,6 +4346,44 @@ const maintenanceCycle = () => {
 }
 setTimeout(maintenanceCycle, 5_000)
 setInterval(maintenanceCycle, 6 * 60 * 60_000)
+
+/* v22 — pengirim pesan terjadwal: sweep tiap 10 detik, pesan jatuh tempo
+ * dipancarkan ke semua pihak persis seperti pesan biasa (push + transkripsi). */
+const deliverDueScheduled = () => {
+  try {
+    const due = db
+      .query(
+        'SELECT * FROM messages WHERE scheduled_at IS NOT NULL AND delivered_at IS NULL AND scheduled_at <= ?'
+      )
+      .all(now()) as MessageRow[]
+    for (const row of due) {
+      const conversation = getConversation(row.conversation_id)
+      db.run('UPDATE messages SET delivered_at = ? WHERE id = ?', [now(), row.id])
+      if (!conversation) continue
+      db.run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [now(), conversation.id])
+      const fresh = db.query('SELECT * FROM messages WHERE id = ?').get(row.id) as MessageRow
+      const message = toChatMessage(fresh)
+      attachReplyPreviews([fresh], [message])
+      io.to(`user:${conversation.user_a_id}`).emit('message:new', message)
+      io.to(`user:${conversation.user_b_id}`).emit('message:new', message)
+      io.to('admins').emit('message:new', message)
+      pushConversationsTo(conversation.user_a_id)
+      pushConversationsTo(conversation.user_b_id)
+      const senderName = findUserById(row.sender_id)?.name ?? 'ChatKita'
+      for (const rid of [conversation.user_a_id, conversation.user_b_id]) {
+        if (rid === row.sender_id) continue
+        pushNewMessageIfOffline(rid, senderName, snippetOf(fresh))
+      }
+      if ((row.type ?? 'text') === 'voice')
+        void transcribeVoice(row.id, conversation.id, row.content)
+    }
+    if (due.length > 0) console.log(`[terjadwal] ${due.length} pesan terkirim otomatis`)
+  } catch (err) {
+    console.error('[terjadwal] error:', (err as Error)?.message ?? err)
+  }
+}
+setTimeout(deliverDueScheduled, 3_000)
+setInterval(deliverDueScheduled, 10_000)
 
 httpServer.listen(PORT, () => {
   console.log(

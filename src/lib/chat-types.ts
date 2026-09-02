@@ -165,6 +165,12 @@ export interface ChatMessage {
    * (content/file metadata are redacted; a tombstone placeholder renders).
    */
   mediaExpiredAt?: string;
+  /** v22 — userId yang membintangi pesan ini (bintang per-pengguna). */
+  starredBy?: string[];
+  /** v22 — pesan terjadwal: ISO waktu kirim otomatis (belum terkirim). */
+  scheduledAt?: string;
+  /** v22 — label "Diteruskan dari <nama>" untuk pesan hasil forward. */
+  forwardedFrom?: string;
 }
 
 /** A chat partner including live presence info. */
@@ -309,6 +315,8 @@ export interface MessageUpdatePayload {
   editedAt?: string;
   translation?: string;
   reactions?: MessageReaction[];
+  /** v22 — state bintang per-user (array userId pemberi bintang). */
+  starredBy?: string[];
 }
 
 /** Generic error ack: `{ ok: false, error: ErrorCode }` */
