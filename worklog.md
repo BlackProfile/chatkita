@@ -813,3 +813,23 @@ Stage Summary:
 - Rollback sandbox = penyebab "balik ke v13"; kode v14-v20 tidak bisa dipulihkan dari git → dibangun ulang berbasis bukti: Pusat (reset+restore+backup) v20, upload progress %, viewer media besar (gaya Task 34), caption media = v21 (permintaan "buat media jika diupload ada teksnya, maka teksnya ikut").
 - Dua lubang infrastruktur ditambal: /api/upload dibangun ulang; boolean settings kini default terbuka saat baris hilang (kritis pasca reset/restore Pusat).
 - 4 commit (596fb64, 1d3ad7b, 132284c, 301493c). DB final = isi backup user (bersih, hanya Admin). Fitur lama yang tak terdokumentasi dari Task 26-32 bisa diminta user bila ada yang terasa hilang.
+
+---
+Task ID: 37
+Agent: main (Z.ai Code)
+Task: "bisa ga buat sandboxnya kembalikan fitur yang kehapus... dah capek ngeprompt, masa ngulang lagi" — sistem anti-rollback berlapis (Task 37)
+
+Work Log:
+- Forensik lanjutan: verify-integrity langsung menangkap kejanggalan — src/app/api/upload/route.ts HILANG dari worktree padahal commit 301493c (Task 36) membuatnya. Penyebab: commit UUID df40cd2 (pesan "88def761-…", author z@container, 02:28 UTC) menghapus file itu — modus operandi checkpoint sandbox: restore snapshot lama lalu auto-commit. Total ada 35+ commit UUID dalam sejarah = inilah akar "fitur balik ke lama" berulang.
+- Pemulihan: git checkout 301493c -- src/app/api/upload/route.ts → verify 18/18 PASS.
+- FEATURES.md (baru): manifest lengkap anti-rollback — identitas app, arsitektur/port, peta fitur per versi (v11/v13/v20/v21 + fondasi), peta file inti, skema DB, prosedur pemulihan 6 langkah (dari bundle atau rebuild), konvensi agent. Buku panduan rebuild tanpa prompt ulang dari user.
+- scripts/verify-integrity.sh: 18 pemeriksaan (file kritis + penanda kode per fitur v13/v20/v21 + SERVICE_VERSION), exit 1 = ada yang hilang + petunjuk pemulihan. TERBUKTI BEKERJA: menangkap hilangnya /api/upload.
+- scripts/make-backup.sh: git bundle --all + tar db/media → /home/z/backups/ (simpan 4 terakhir). Hook post-commit (scripts/githooks/, aktif via git config core.hooksPath) menjalankannya otomatis tiap commit — terverifikasi: bundle chatkita-*.bundle 49 MB dibuat & bundle verify OK.
+- scripts/push-remote.sh: push offsite ke GitHub (reachable dari sandbox, HTTP 200) — siap dipakai begitu user memberi repo+PAT.
+- Self-heal (src/instrumentation.ts): saat server Next boot, file kritis yang hilang dipulihkan OTOMATIS dari git tag rescue-v21 (dibuat di commit ba646ec). Uji nyata: file dihapus paksa → restart server → dev.log mencetak "[instrumentation] SELF-HEAL ✅ … dipulihkan otomatis dari tag rescue-v21" dan file kembali utuh.
+- Insiden infra: pkill next dev + start dari Bash tool = server mati saat panggilan berakhir + watchdog dev-watchdog.sh ikut mati → nyalakan ulang watchdog (setsid, pid 2336) → ia menaikkan Next :3000 (200) + chat-service :3003; bersihkan zombie chat-service lama (pid 1327), kini 1 pemilik port.
+- E2E agent-browser gateway :81: login page render desktop + mobile 390×844, heading ChatKita + form Masuk ✓, console 0 error, page errors 0. Lint 0/0.
+
+Stage Summary:
+- Task 37 SELESAI: sistem anti-rollback berlapis terpasang & teruji — (1) verify-integrity deteksi dini 18 titik, (2) bundle otomatis per commit ke /home/z/backups (di luar folder proyek), (3) self-heal boot dari tag rescue-v21, (4) FEATURES.md = buku panduan rebuild cepat, (5) push-remote siap untuk GitHub. Akar masalah terkonfirmasi: commit UUID dari checkpoint sandbox yang menghapus file baru; ke depan file yang dihapus akan pulih sendiri saat server boot, dan riwayat penuh selalu ada di bundle. Batas jujur: checkpoint sandbox full-VM tetap bisa menghapus /home/z/backups — satu-satunya perlindungan mutlak adalah remote GitHub (butuh repo + PAT dari user).
+- Commit ba646ec (+ tag rescue-v21) + commit worklog ini.
