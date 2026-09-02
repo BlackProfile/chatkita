@@ -55,3 +55,7 @@ server.log
 
 # media ephemeral (retensi 30 hari) — tidak di-track git; backup via tar db/media di make-backup.sh
 /db/media/
+
+# runtime sqlite sidecar (jangan di-track; chat.db tetap di-track utk backup)
+mini-services/chat-service/chat.db-wal
+mini-services/chat-service/chat.db-shm
