@@ -43,6 +43,15 @@ chk_grep "Persist/emit caption"              "mini-services/chat-service/index.t
 chk_grep "Render caption di bubble"          "src/components/chat/ChatBubble.tsx" "caption"
 chk_grep "Kirim caption dari composer"       "src/components/chat/Messenger.tsx" "caption"
 
+echo "[v22 — Paket pulihan: bintang/teruskan/terjadwal]"
+chk_grep "Kolom starred_by (migrasi)"        "mini-services/chat-service/index.ts" "addColumn('messages', 'starred_by'"
+chk_grep "Handler bintang + daftar"          "mini-services/chat-service/index.ts" "messages:star"
+chk_grep "Handler teruskan (admin)"          "mini-services/chat-service/index.ts" "messages:forward"
+chk_grep "Sweep pesan terjadwal"             "mini-services/chat-service/index.ts" "deliverDueScheduled"
+chk_grep "UI bintang + terjadwal user"       "src/components/chat/Messenger.tsx" "messages:star"
+chk_grep "UI teruskan + bintang admin"       "src/components/chat/AdminPanel.tsx" "messages:forward"
+chk_grep "ChatBubble prop star/scheduled"    "src/components/chat/ChatBubble.tsx" "onToggleStar"
+
 echo ""
 echo "== Versi server terdaftar =="
 grep -m1 "SERVICE_VERSION = " mini-services/chat-service/index.ts || echo "  ❌ SERVICE_VERSION tidak ditemukan"

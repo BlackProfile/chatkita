@@ -4,7 +4,7 @@
 > untuk tahu fitur apa saja yang harus ada, di file mana, dan cara memulihkannya —
 > TANPA user perlu ngeprompt ulang dari nol.
 >
-> Terakhir diperbarui: versi server **v21** (Task 37).
+> Terakhir diperbarui: versi server **v22** (Task 39).
 
 ---
 
@@ -52,6 +52,13 @@
 - Rantai: kolom `messages.caption`; `messages:send` validasi caption (image/file, cap maxMessageLength); persist + emit `toChatMessage`; `snippetOf` caption menang untuk foto/file; overview lastMessage membawa caption; `ChatBubble` prop `caption` render di bawah media; `sendImage`/`sendFile` (Messenger.tsx + AdminPanel.tsx) kirim `caption: input.trim()` dan **mengosongkan input saat sukses**; preview sidebar pakai caption.
 - **`POST /api/upload`** (`src/app/api/upload/route.ts`): SHA-256 dedup ke `db/media`, cap 25 MiB, nama `<32hex><ext>`, respons `{ok,url,fileName,mimeType,size}`. **File ini KRITIS — pernah hilang total saat rollback.**
 
+### v22 — Paket pulihan (bintang / teruskan / terjadwal)
+- **Bintangi pesan**: toggle per-user (`messages:star`, kolom `starred_by` JSON), daftar `messages:starred`, panel "Pesan berbintang" + lompat ke pesan — kedua sisi.
+- **Teruskan pesan (admin)**: `messages:forward` → salin ke percakapan lain, label "Diteruskan dari X" di bubble, dialog 2 langkah (pilih pesan → pilih kontak) di header admin.
+- **Pesan terjadwal**: `messages:send` + `scheduledAt` (min +10 dtk, maks +30 hari); HANYA pengirim melihat sebelum waktunya (disembunyikan dari history/overview/unread penerima); sweep `deliverDueScheduled` tiap 10 dtk mengirim otomatis + push + transkripsi voice; batal via `messages:schedule_cancel` + tombol "Batalkan jadwal"; UI popover datetime di composer kedua sisi; bubble pending ber-chip jam.
+- **Badge unread**: `document.title = "(n) ChatKita"` di user & admin.
+- Lokasi: handler di `index.ts` (blok v22), UI di `Messenger.tsx`/`AdminPanel.tsx`/`ChatBubble.tsx` (props star/forward/scheduled).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 
@@ -94,16 +101,16 @@
    ```
 4. **Jika bundle juga hilang** (checkpoint sandbox penuh): rebuild fitur satu per satu
    memakai **Peta Fitur (bagian 3)** + **Peta File (bagian 4)** — urutan prioritas:
-   1) `POST /api/upload` → 2) chat-service inti/socket → 3) Pusat v20 → 4) progres unggah + viewer → 5) caption v21 → 6) dashboard v13.
+   1) `POST /api/upload` → 2) chat-service inti/socket → 3) Pusat v20 → 4) progres unggah + viewer → 5) caption v21 → 6) dashboard v13 → 7) paket v22 (bintang/teruskan/terjadwal).
 5. **Restart**: `pkill -9 -f 'bun --hot index.ts'` lalu restart `bun run dev` — instrumentation auto-spawn chat-service.
 6. **Selalu akhiri**: `bun run lint` 0/0 → commit → E2E gateway :81 → append `worklog.md` → commit worklog.
 
 ## 7. Backup Berlapis (sudah terpasang — Task 37)
-- **Self-heal otomatis (boot)**: `src/instrumentation.ts` memeriksa file kritis saat server Next boot; yang hilang dipulihkan otomatis dari git tag **`rescue-v21`** (tercatat di dev.log). Penyebab kehilangan yang sudah terbukti: **checkpoint sandbox membuat "commit UUID"** yang menghapus file baru (contoh: `df40cd2` menghapus `/api/upload/route.ts`; ada 35+ commit UUID dalam sejarah).
+- **Self-heal otomatis (boot)**: `src/instrumentation.ts` memeriksa file kritis saat server Next boot; yang hilang dipulihkan otomatis dari git tag **`rescue-v22`** (tercatat di dev.log; perbarui tag tiap versi: `git tag -f rescue-v22`). Penyebab kehilangan yang sudah terbukti: **checkpoint sandbox membuat "commit UUID"** yang menghapus file baru (contoh: `df40cd2` menghapus `/api/upload/route.ts`; ada 35+ commit UUID dalam sejarah).
 - **Otomatis per commit**: hook `post-commit` (`scripts/githooks/`, aktif via `git config core.hooksPath scripts/githooks`) menjalankan `scripts/make-backup.sh` → git bundle + tar media ke `/home/z/backups/` (simpan 4 terakhir).
 - **Manual**: `bash scripts/make-backup.sh`.
-- **Cek kesehatan kapan pun**: `bash scripts/verify-integrity.sh` (18 pemeriksaan, exit 1 = ada yang hilang).
-- **Pulihkan file tunggal**: `git checkout rescue-v21 -- <path>` atau dari bundle (bagian 6).
+- **Cek kesehatan kapan pun**: `bash scripts/verify-integrity.sh` (24 pemeriksaan, exit 1 = ada yang hilang).
+- **Pulihkan file tunggal**: `git checkout rescue-v22 -- <path>` atau dari bundle (bagian 6).
 - **Offsite GitHub (AKTIF sejak Task 38)**: remote `origin` sudah terpasang → `github.com/BlackProfile/chatkita` (repo PRIVATE, token tersimpan di `.git/config` — JANGAN ditulis di file mana pun yang ter-commit). Push offsite berjalan **otomatis setiap commit** (hook post-commit, best-effort) + manual `bash scripts/push-remote.sh` (push + backup lokal sekali jalan).
   - Dengan remote aktif, checkpoint sandbox sekalipun tidak bisa menghapus riwayat — pulihkan dengan: `git clone https://github.com/BlackProfile/chatkita.git` (butuh token bila repo private).
   - Bila push gagal (token expired/revoke): `git remote set-url origin https://<TOKEN_BARU>@github.com/BlackProfile/chatkita.git`.
