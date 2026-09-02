@@ -477,6 +477,30 @@ const broadcastAppSettings = () => {
 /** settings row as boolean ('1' = true). */
 const getBoolSetting = (key: string): boolean => getSetting(key) === '1'
 
+/**
+ * v21 — fitur yang default-nya TERBUKA ketika baris settings belum ada
+ * (konsisten dengan getAppSettings yang memakai `!== '0'`). Tanpa ini,
+ * setelah reset/Pusat-restore (settings kosong) pendaftaran, reaksi,
+ * kirim media, read receipts, dll. jadi TERKUNCI.
+ */
+const DEFAULT_OPEN_BOOL_KEYS = new Set([
+  'allowRegistration',
+  'allowImages',
+  'allowVoice',
+  'allowFiles',
+  'allowLinks',
+  'linkPreview',
+  'allowReactions',
+  'readReceipts',
+])
+
+/** settings row as boolean; key hilang → ikut default per fitur. */
+const getBoolSettingDefaulted = (key: string): boolean => {
+  const raw = getSetting(key)
+  if (raw === undefined || raw === '') return DEFAULT_OPEN_BOOL_KEYS.has(key)
+  return raw === '1'
+}
+
 /** Parsed quick_replies / keywords JSON arrays (validated on write). */
 const getSettingList = (key: string): string[] => {
   try {
@@ -2288,7 +2312,7 @@ io.on('connection', (socket) => {
 
       if (!user) {
         // v13 — registration may be closed from the dashboard (Pengaturan → Akses).
-        if (!getBoolSetting('allowRegistration')) {
+        if (!getBoolSettingDefaulted('allowRegistration')) {
           console.log(`Rejected new registration "${name}" (registration closed)`)
           ack({ ok: false, error: 'REGISTRATION_CLOSED' })
           return
@@ -2332,7 +2356,7 @@ io.on('connection', (socket) => {
       // The user is looking at the chat right now → mark everything read.
       const readUpTo = markRead(conversation.id, user.id)
       // v13 — receipt broadcast honours the dashboard switch.
-      if (getBoolSetting('readReceipts')) {
+      if (getBoolSettingDefaulted('readReceipts')) {
         broadcastRead(conversation, user.id, readUpTo)
       }
 
@@ -2432,7 +2456,7 @@ io.on('connection', (socket) => {
       // v13 — local unread state always updates; the receipt broadcast is
       // what draws ✓✓ on the partner's side and respects `readReceipts`.
       const readUpTo = markRead(conversation.id, me)
-      if (!ghost && getBoolSetting('readReceipts')) {
+      if (!ghost && getBoolSettingDefaulted('readReceipts')) {
         broadcastRead(conversation, me, readUpTo)
       }
       const partner = getPartnerUser(conversation, me)
@@ -2788,7 +2812,7 @@ io.on('connection', (socket) => {
       if (me === ADMIN_ID && socket.data?.ghost === true) return
       const readUpTo = markRead(conversation.id, me)
       // v13 — receipts broadcast honours the dashboard switch.
-      if (getBoolSetting('readReceipts')) {
+      if (getBoolSettingDefaulted('readReceipts')) {
         broadcastRead(conversation, me, readUpTo)
       }
       pushConversationsTo(me)
@@ -2854,7 +2878,7 @@ io.on('connection', (socket) => {
         return
       }
       // v13 — reactions can be switched off for users (admin keeps the power).
-      if (me !== ADMIN_ID && !getBoolSetting('allowReactions')) {
+      if (me !== ADMIN_ID && !getBoolSettingDefaulted('allowReactions')) {
         ack({ ok: false, error: 'FORBIDDEN' })
         return
       }
