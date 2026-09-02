@@ -52,3 +52,6 @@ prompt
 server.log
 # Skills directory
 /skills/tool-results/
+
+# media ephemeral (retensi 30 hari) — tidak di-track git; backup via tar db/media di make-backup.sh
+/db/media/
