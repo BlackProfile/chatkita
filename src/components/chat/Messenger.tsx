@@ -6,6 +6,8 @@ import {
   ArrowLeft,
   ArrowRight,
   ChevronUp,
+  Clock,
+  Image as ImageIcon,
   Leaf,
   Loader2,
   LogOut,
@@ -17,8 +19,10 @@ import {
   SendHorizonal,
   ShieldCheck,
   Smile,
+  Star,
   Type,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import type { Socket } from "socket.io-client";
 
@@ -34,6 +38,16 @@ import {
 } from "@/components/chat/media-viewer";
 import { TypingDots } from "@/components/chat/TypingDots";
 import { ThemeToggle } from "@/components/theme-toggle";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -52,9 +66,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { toast } from "sonner";
 import { useVoiceRecorder } from "@/hooks/use-voice-recorder";
 import { createChatSocket } from "@/lib/chat-socket";
-import { playBlip, setTitleUnread } from "@/lib/chat-notify";
+import { playBlip } from "@/lib/chat-notify";
 import { onInstallAvailability, promptInstall, subscribeToPush } from "@/lib/chat-push";
 import {
   ADMIN_ID,
@@ -67,6 +83,7 @@ import {
   type AppSettings,
   type AppSettingsUpdatePayload,
   type ChatErrorAck,
+  type ChatErrorCode,
   type ChatMessage,
   type ConversationOverview,
   type ConversationPinnedPayload,
@@ -88,6 +105,7 @@ import {
   canEditMessage,
   compressImageToBlobs,
   FONT_SCALES,
+  formatChatTime,
   formatFileSize,
   formatLastSeen,
   initials,
@@ -179,6 +197,52 @@ const fmtTimer = (ms: number) => {
   const total = Math.floor(ms / 1000);
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 };
+
+/** Jam 24 jam HH.MM (gaya Indonesia) — banner bisukan + toast terjadwal. */
+const fmtHM = (d: Date) =>
+  `${String(d.getHours()).padStart(2, "0")}.${String(d.getMinutes()).padStart(2, "0")}`;
+
+/** epoch ms → nilai untuk <input type="datetime-local"> (zona lokal). */
+function toLocalInputValue(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(
+    d.getMinutes()
+  )}`;
+}
+
+/** v22 — ack `messages:star`: starred = keadaan SETELAH toggle. */
+interface MessageStarAck {
+  ok: true;
+  starred: boolean;
+}
+
+/** v22 — ack `messages:starred`: daftar pesan berbintang milik pemanggil. */
+interface MessagesStarredAck {
+  ok: true;
+  messages: ChatMessage[];
+}
+
+/** v22 — ack `messages:send` dengan scheduledAt (tambah INVALID_SCHEDULE). */
+type ScheduledSendAck =
+  | { ok: true; message: ChatMessage }
+  | { ok: false; error: ChatErrorCode | "INVALID_SCHEDULE"; remainingSeconds?: number };
+
+/** v22 — ikon per jenis pesan pada baris panel berbintang. */
+const STARRED_TYPE_ICONS: Record<string, LucideIcon> = {
+  text: MessageCircleMore,
+  image: ImageIcon,
+  voice: Mic,
+  file: Paperclip,
+};
+
+/** v22 — snippet satu baris utk panel berbintang: caption bila ada, else isi. */
+function starredSnippet(m: ChatMessage): string {
+  if (m.type === "image") return m.caption || "Foto";
+  if (m.type === "file") return m.caption || m.fileName || "File";
+  if (m.type === "voice") return m.transcript || "Pesan suara";
+  return m.content;
+}
 
 /* ------------------------------------------------------------------ */
 /* PIN dialog (protect this account with a 4–8 digit code)             */
@@ -380,6 +444,16 @@ export function Messenger() {
   const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
   const [installAvailable, setInstallAvailable] = useState(false);
   const [translatingId, setTranslatingId] = useState<number | null>(null);
+  // v22 — unread (pesan masuk saat tab tersembunyi) untuk badge judul tab.
+  const [unread, setUnread] = useState(0);
+  // v22 — panel pesan berbintang (fetch ulang tiap kali dibuka).
+  const [starredOpen, setStarredOpen] = useState(false);
+  const [starredList, setStarredList] = useState<ChatMessage[]>([]);
+  const [starredLoading, setStarredLoading] = useState(false);
+  // v22 — kirim terjadwal (popover composer) + target konfirmasi pembatalan.
+  const [schedOpen, setSchedOpen] = useState(false);
+  const [schedValue, setSchedValue] = useState("");
+  const [cancelSchedId, setCancelSchedId] = useState<number | null>(null);
 
   /** Bumped on logout to tear down + recreate the socket (fresh rooms). */
   const [epoch, setEpoch] = useState(0);
@@ -391,7 +465,6 @@ export function Messenger() {
   const partnerTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const atBottomRef = useRef(true);
-  const hiddenUnreadRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const translatingIdRef = useRef<number | null>(null);
 
@@ -570,12 +643,15 @@ export function Messenger() {
       setRestricted(r);
     });
 
-    // Append messages ONLY here; skip if the last stored message already
-    // has the same id (history-replacement vs live-event race).
+    // v22 — Upsert: umumnya append; pesan terjadwal yang jatuh tempo di-emit
+    // ulang server dengan ID yang SAMA (chip ⏰ → pesan final) → ganti, bukan skip.
     socket.on("message:new", (msg: ChatMessage) => {
       setMessages((prev) => {
-        if (prev.some((m) => m.id === msg.id)) return prev;
-        return [...prev, msg];
+        const idx = prev.findIndex((m) => m.id === msg.id);
+        if (idx === -1) return [...prev, msg];
+        const next = prev.slice();
+        next[idx] = msg;
+        return next;
       });
       // The user's single conversation is always the visible one.
       socketRef.current?.emit("messages:read", {
@@ -586,10 +662,10 @@ export function Messenger() {
       } else if (msg.senderId !== meRef.current?.userId) {
         setNewCount((c) => c + 1);
       }
-      if (document.hidden) {
-        hiddenUnreadRef.current += 1;
+      // Pesan sendiri (termasuk echo terjadwal yang dikirim) tidak dihitung unread.
+      if (document.hidden && msg.senderId !== meRef.current?.userId) {
+        setUnread((c) => c + 1);
         playBlip();
-        setTitleUnread(hiddenUnreadRef.current);
       }
     });
 
@@ -606,6 +682,7 @@ export function Messenger() {
                 editedAt: u.editedAt ?? m.editedAt,
                 translation: u.translation ?? m.translation,
                 reactions: u.reactions ?? m.reactions,
+                starredBy: u.starredBy ?? m.starredBy,
               }
             : m
         )
@@ -614,6 +691,11 @@ export function Messenger() {
         translatingIdRef.current = null;
         setTranslatingId(null);
       }
+    });
+
+    // v22 — pesan terjadwal dibatalkan (pengirim atau admin) → hapus dr daftar.
+    socket.on("message:scheduled_cancelled", (p: { id: number; conversationId: string }) => {
+      setMessages((prev) => prev.filter((m) => m.id !== p.id));
     });
 
     // Live ✓✓: the admin read up to `lastReadMessageId`.
@@ -663,12 +745,9 @@ export function Messenger() {
       }
     );
 
-    // Leaving the tab clears the unread title badge.
+    // Returning to the tab clears the unread title badge.
     const onVisible = () => {
-      if (!document.hidden) {
-        hiddenUnreadRef.current = 0;
-        setTitleUnread(0);
-      }
+      if (!document.hidden) setUnread(0);
     };
     document.addEventListener("visibilitychange", onVisible);
 
@@ -706,8 +785,13 @@ export function Messenger() {
 
   /* Clear the tab badge when the user reads while visible. */
   useEffect(() => {
-    if (!document.hidden) setTitleUnread(0);
+    if (!document.hidden) setUnread(0);
   }, [messages]);
+
+  /* v22 — badge unread di judul tab: "(n) ChatKita" selama ada backlog. */
+  useEffect(() => {
+    document.title = unread > 0 ? `(${unread}) ChatKita` : "ChatKita — Chat Sederhana";
+  }, [unread]);
 
   /* ---------------------------------------------------------------- */
   /* Actions                                                           */
@@ -805,8 +889,7 @@ export function Messenger() {
     setViewer(null);
     setSearchOpen(false);
     setSearchQuery("");
-    setTitleUnread(0);
-    hiddenUnreadRef.current = 0;
+    setUnread(0);
     // Login card comes back EMPTY — a returning user simply taps the
     // "Lanjut chat sebagai …" button (server matches the account by
     // case-insensitive name and returns the full history).
@@ -927,6 +1010,123 @@ export function Messenger() {
   const scrollToMessage = (id: number) => {
     const el = scrollRef.current?.querySelector(`[data-mid="${id}"]`);
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
+  /* v22 — toggle bintang: optimistic starredBy (tambah/hapus userId sendiri),
+   * lalu dikoreksi dari ack; broadcast message:updated ikut menegaskan. */
+  const toggleStar = (messageId: number) => {
+    const socket = socketRef.current;
+    const myId = meRef.current?.userId;
+    if (!socket || !myId) return;
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== messageId) return m;
+        const list = m.starredBy ?? [];
+        const next = list.includes(myId)
+          ? list.filter((u) => u !== myId)
+          : [...list, myId];
+        return { ...m, starredBy: next };
+      })
+    );
+    socket.emit("messages:star", { messageId }, (res: AckOf<MessageStarAck>) => {
+      if (!res.ok) {
+        toast.error("Gagal mengubah bintang pesan.");
+        return;
+      }
+      // Koreksi dari ack (starred = keadaan setelah toggle di server).
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.id !== messageId) return m;
+          const others = (m.starredBy ?? []).filter((u) => u !== myId);
+          return { ...m, starredBy: res.starred ? [...others, myId] : others };
+        })
+      );
+    });
+  };
+
+  /* v22 — batalkan pesan terjadwal milik sendiri (usai konfirmasi ringan). */
+  const cancelScheduled = (messageId: number) => {
+    socketRef.current?.emit(
+      "messages:schedule_cancel",
+      { messageId },
+      (res: AckOf<{ ok: true }>) => {
+        setCancelSchedId(null);
+        if (res.ok) {
+          // Broadcast message:scheduled_cancelled ikut menghapus — hapus lokal
+          // hanya fast-path agar bubble hilang seketika.
+          setMessages((prev) => prev.filter((m) => m.id !== messageId));
+          toast.success("Pesan terjadwal dibatalkan.");
+        } else {
+          toast.error("Gagal membatalkan pesan terjadwal.");
+        }
+      }
+    );
+  };
+
+  /* v22 — fetch daftar pesan berbintang percakapan ini (tiap panel dibuka). */
+  const fetchStarred = () => {
+    const id = conversationIdRef.current;
+    if (!id) return;
+    setStarredLoading(true);
+    socketRef.current?.emit(
+      "messages:starred",
+      { conversationId: id },
+      (res: AckOf<MessagesStarredAck>) => {
+        setStarredLoading(false);
+        if (res.ok) {
+          setStarredList(res.messages);
+        } else {
+          setStarredList([]);
+          toast.error("Gagal memuat pesan berbintang.");
+        }
+      }
+    );
+  };
+
+  /* v22 — kirim terjadwal dari popover composer (epoch ms; server memvalidasi
+   * 10 dtk–30 hari). Sukses → toast + kosongkan input; gagal → toast error. */
+  const sendScheduled = () => {
+    const content = input.trim();
+    if (!content) {
+      toast.error("Tulis dulu pesan yang ingin dijadwalkan.");
+      return;
+    }
+    const when = new Date(schedValue).getTime();
+    const nowMs = Date.now();
+    if (!Number.isFinite(when) || when < nowMs + 10_000 || when > nowMs + 30 * 86_400_000) {
+      toast.error("Waktu terjadwal harus 10 detik–30 hari dari sekarang.");
+      return;
+    }
+    const socket = socketRef.current;
+    const convId = conversationIdRef.current;
+    if (!socket || !convId || !connected) {
+      toast.error("Koneksi terputus — coba lagi.");
+      return;
+    }
+    socket.emit(
+      "messages:send",
+      { conversationId: convId, content, type: "text", scheduledAt: Math.round(when) },
+      (res: ScheduledSendAck) => {
+        if (res.ok) {
+          toast.success(`Pesan dijadwalkan pukul ${fmtHM(new Date(when))}`);
+          setSchedOpen(false);
+          setInput("");
+          setSendError(false);
+          setSendErrorDetail(null);
+          if (meRef.current) saveDraft("user", meRef.current.userId, "");
+        } else if (res.error === "INVALID_SCHEDULE") {
+          toast.error("Waktu terjadwal tidak valid (10 dtk–30 hari dari sekarang).");
+        } else if (res.error === "RATE_LIMITED" || res.error === "SLOW_MODE") {
+          toast.error("Terlalu sering mengirim — tunggu sebentar.");
+        } else if (res.error === "MUTED") {
+          toast.error(`Dibisukan admin (tersisa ${res.remainingSeconds ?? 0}s).`);
+        } else if (res.error === "FROZEN") {
+          toast.error("Akun dibekukan admin.");
+        } else {
+          toast.error("Gagal menjadwalkan pesan.");
+        }
+      }
+    );
   };
 
   /* v8 — pagination: muat satu halaman riwayat yang lebih lama, lalu
@@ -1384,8 +1584,6 @@ export function Messenger() {
   /* ---------------------------------------------------------------- */
   /* Render: full-screen 1-on-1 chat with Admin                        */
   /* ---------------------------------------------------------------- */
-  const fmtHM = (d: Date) =>
-    `${String(d.getHours()).padStart(2, "0")}.${String(d.getMinutes()).padStart(2, "0")}`;
 
   const sendBlocked = !!restricted?.frozen || mutedActive;
   const mediaBlocked = !!restricted?.mediaBlocked;
@@ -1412,6 +1610,8 @@ export function Messenger() {
         (m.type === "text" ? m.content : (m.transcript ?? "")).toLowerCase().includes(query)
       )
     : messages;
+  // v22 — pesan berbintang yang layak tampil (server sudah menyingkirkan yang dihapus).
+  const starredVisible = starredList.filter((m) => !m.deletedAt);
 
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col">
@@ -1471,6 +1671,19 @@ export function Messenger() {
               }}
             >
               <Search className="size-4" aria-hidden="true" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-9 text-muted-foreground hover:text-amber-500"
+              aria-label="Pesan berbintang"
+              title="Pesan berbintang"
+              onClick={() => {
+                setStarredOpen(true);
+                fetchStarred();
+              }}
+            >
+              <Star className="size-4" aria-hidden="true" />
             </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -1725,6 +1938,16 @@ export function Messenger() {
                   translation={m.translation}
                   translating={translatingId === m.id}
                   pinned={pinnedMsg?.id === m.id}
+                  starred={!!m.starredBy?.includes(me.userId)}
+                  scheduledAt={m.scheduledAt}
+                  onToggleStar={
+                    !m.deletedAt && m.type !== "system" ? () => toggleStar(m.id) : undefined
+                  }
+                  onCancelScheduled={
+                    m.senderId === me.userId && m.scheduledAt
+                      ? () => setCancelSchedId(m.id)
+                      : undefined
+                  }
                   canEdit={canEditMessage(m, me.userId)}
                   linkPreviewEnabled={appSettings?.linkPreview !== false}
                   onReply={() => setReplyTo(m)}
@@ -1953,6 +2176,47 @@ export function Messenger() {
                 >
                   <Paperclip className="size-5" aria-hidden="true" />
                 </Button>
+                {/* v22 — kirim terjadwal: popover datetime (min sekarang+1 mnt). */}
+                <Popover
+                  open={schedOpen}
+                  onOpenChange={(o) => {
+                    setSchedOpen(o);
+                    if (o) setSchedValue(toLocalInputValue(Date.now() + 3_600_000));
+                  }}
+                >
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-10 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                      aria-label="Kirim terjadwal"
+                      title="Kirim terjadwal"
+                      disabled={!connected || sendBlocked || !!editing}
+                    >
+                      <Clock className="size-5" aria-hidden="true" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="start" className="w-60 rounded-xl p-3">
+                    <p className="mb-2 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                      <Clock className="size-3.5" aria-hidden="true" />
+                      Kirim terjadwal
+                    </p>
+                    <Input
+                      type="datetime-local"
+                      min={toLocalInputValue(Date.now() + 60_000)}
+                      value={schedValue}
+                      aria-label="Waktu kirim"
+                      className="h-9 text-xs"
+                      onChange={(e) => setSchedValue(e.target.value)}
+                    />
+                    <Button
+                      className="mt-2 h-9 w-full rounded-lg bg-emerald-600 text-xs text-white hover:bg-emerald-600/90"
+                      onClick={sendScheduled}
+                    >
+                      Jadwalkan
+                    </Button>
+                  </PopoverContent>
+                </Popover>
                 <Input
                   value={input}
                   maxLength={MAX_MESSAGE_LENGTH}
@@ -2116,6 +2380,98 @@ export function Messenger() {
           </DialogContent>
         </Dialog>
       ) : null}
+
+      {/* v22 — panel pesan berbintang (fetch ulang tiap kali dibuka) */}
+      <Dialog
+        open={starredOpen}
+        onOpenChange={(o) => {
+          setStarredOpen(o);
+          if (o) fetchStarred();
+        }}
+      >
+        <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Star className="size-5 fill-amber-400 text-amber-400" aria-hidden="true" />
+              Pesan berbintang
+            </DialogTitle>
+            <DialogDescription>
+              Pesan yang Anda bintangi di percakapan ini.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="chat-scroll max-h-96 space-y-1.5 overflow-y-auto">
+            {starredLoading ? (
+              <p className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                Memuat…
+              </p>
+            ) : starredVisible.length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                Belum ada pesan berbintang
+              </p>
+            ) : (
+              starredVisible.map((m) => {
+                const Icon = STARRED_TYPE_ICONS[m.type] ?? MessageCircleMore;
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    className="flex w-full items-center gap-2.5 rounded-xl border bg-card px-3 py-2 text-left transition-colors hover:bg-accent/60"
+                    onClick={() => {
+                      setStarredOpen(false);
+                      scrollToMessage(m.id);
+                    }}
+                  >
+                    <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                      <Icon className="size-4" aria-hidden="true" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm">{starredSnippet(m)}</span>
+                      <span className="block text-xs text-muted-foreground">
+                        {m.senderId === me.userId ? "Anda" : (partner?.name ?? "Admin")} ·{" "}
+                        {formatChatTime(m.createdAt)}
+                      </span>
+                    </span>
+                    <Star
+                      className="size-3.5 shrink-0 fill-amber-400 text-amber-400"
+                      aria-hidden="true"
+                    />
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* v22 — konfirmasi ringan pembatalan pesan terjadwal */}
+      <AlertDialog
+        open={cancelSchedId != null}
+        onOpenChange={(o) => {
+          if (!o) setCancelSchedId(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Batalkan pesan terjadwal?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Pesan tidak akan dikirim pada waktu yang ditentukan. Tindakan ini tidak dapat
+              dibatalkan.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Jangan batalkan</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-rose-600 text-white hover:bg-rose-600/90"
+              onClick={() => {
+                if (cancelSchedId != null) cancelScheduled(cancelSchedId);
+              }}
+            >
+              Ya, batalkan
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Viewer media full-screen + galeri geser (Task 19) */}
       <MediaViewer state={viewer} onClose={() => setViewer(null)} />

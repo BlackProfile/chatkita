@@ -14,13 +14,17 @@ import {
   DatabaseBackup,
   EyeOff,
   FileJson,
+  FileText,
   Flag,
+  Forward,
+  Image as ImageIcon,
   GaugeCircle,
   Leaf,
   Loader2,
   Lock,
   LockKeyhole,
   LogOut,
+  MessageSquare,
   MessagesSquare,
   Megaphone,
   Mic,
@@ -37,6 +41,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Smile,
+  Star,
   Sun,
   Type,
   Users,
@@ -45,6 +50,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { Socket } from "socket.io-client";
+import { toast } from "sonner";
 
 import { ChatBubble } from "@/components/chat/ChatBubble";
 import { AdminDashboard, type DashboardTab } from "@/components/chat/admin-dashboard";
@@ -70,6 +76,16 @@ import {
 } from "@/components/chat/media-viewer";
 import { TypingDots } from "@/components/chat/TypingDots";
 import { UserManager } from "@/components/chat/user-manager";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -97,8 +113,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useVoiceRecorder } from "@/hooks/use-voice-recorder";
+import { Toaster } from "@/components/ui/sonner";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { createChatSocket } from "@/lib/chat-socket";
 import { playBlip, setTitleUnread } from "@/lib/chat-notify";
@@ -168,6 +186,17 @@ type FilterTab = "all" | "unread" | "online" | "archive";
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MiB
 
 /**
+ * v22 — ack events bintang/teruskan/terjadwal (kontrak chat-service v22;
+ * tipe belum ada di chat-types, didefinisikan lokal untuk panel admin).
+ */
+type StarAck = { ok: true; starred: boolean };
+type StarredListAck = { ok: true; messages: ChatMessage[] };
+type ForwardAck = { ok: true; message: ChatMessage };
+type ScheduleCancelAck = { ok: true };
+/** messages:send + scheduledAt bisa membalas INVALID_SCHEDULE (belum ada di ChatErrorCode). */
+type SendAckV22 = { ok: true; message: ChatMessage } | { ok: false; error: string };
+
+/**
  * fileName pesan terakhir untuk pratinjau daftar percakapan. Dibaca secara
  * opportunistic — server v7+ mengirim fileName/mediaExpired di lastMessage.
  */
@@ -186,6 +215,13 @@ const fmtTimer = (ms: number) => {
   const total = Math.floor(ms / 1000);
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 };
+
+/** v22 — epoch ms → "YYYY-MM-DDTHH:mm" untuk input datetime-local (zona lokal). */
+function toLocalInputValue(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 const FONT_SCALE_LABELS: { key: FontScale; label: string }[] = [
   { key: "sm", label: "Kecil" },
@@ -310,6 +346,17 @@ export function AdminPanel() {
   const [resetConfirm, setResetConfirm] = useState(false);
   const [modTarget, setModTarget] = useState<ChatMessage | null>(null);
   const [editHistId, setEditHistId] = useState<number | null>(null);
+
+  // v22 — bintang, teruskan, kirim terjadwal
+  const [starredOpen, setStarredOpen] = useState(false);
+  const [starredLoading, setStarredLoading] = useState(false);
+  const [starredList, setStarredList] = useState<ChatMessage[]>([]);
+  const [forwardOpen, setForwardOpen] = useState(false);
+  const [forwardStep, setForwardStep] = useState<"message" | "target">("message");
+  const [forwardMessage, setForwardMessage] = useState<ChatMessage | null>(null);
+  const [schedOpen, setSchedOpen] = useState(false);
+  const [schedValue, setSchedValue] = useState("");
+  const [cancelSchedId, setCancelSchedId] = useState<number | null>(null);
 
   const socketRef = useRef<Socket | null>(null);
   const passwordRef = useRef<string | null>(null);
@@ -678,9 +725,7 @@ export function AdminPanel() {
         activeIdRef.current = null;
         setActiveId(null);
       }
-      // Tab title mirrors the total unread count.
-      const total = list.reduce((sum, c) => sum + c.unread, 0);
-      setTitleUnread(total);
+      // v22 — badge tab kini dielola useEffect unreadCount (label "ChatKita Admin").
     });
 
     // v5 — pinned banner + archive state live updates.
@@ -727,16 +772,20 @@ export function AdminPanel() {
       );
     });
 
-    // Append messages ONLY here; skip if the last stored message already
-    // has the same id (history-replacement vs live-event race).
+    // Append + UPSERT by id: pesan terjadwal (v22) datang DUA KALI dengan ID
+    // SAMA — chip ⏰ pertama hanya ke pengirim, lalu versi final saat jatuh
+    // tempo. Bila id sudah ada GANTI isinya; selain itu append biasa.
     socket.on("message:new", (msg: ChatMessage) => {
       setMessagesMap((prev) => {
         const list = prev[msg.conversationId];
         if (!list || list.length === 0) {
           return { ...prev, [msg.conversationId]: [msg] };
         }
-        if (list.some((m) => m.id === msg.id)) return prev;
-        return { ...prev, [msg.conversationId]: [...list, msg] };
+        const idx = list.findIndex((m) => m.id === msg.id);
+        if (idx === -1) return { ...prev, [msg.conversationId]: [...list, msg] };
+        const next = list.slice();
+        next[idx] = msg;
+        return { ...prev, [msg.conversationId]: next };
       });
       const isActive = msg.conversationId === activeIdRef.current;
       if (isActive) {
@@ -770,6 +819,7 @@ export function AdminPanel() {
                   editedAt: u.editedAt ?? m.editedAt,
                   translation: u.translation ?? m.translation,
                   reactions: u.reactions ?? m.reactions,
+                  starredBy: u.starredBy ?? m.starredBy,
                 }
               : m
           ),
@@ -779,6 +829,15 @@ export function AdminPanel() {
         translatingIdRef.current = null;
         setTranslatingId(null);
       }
+    });
+
+    // v22 — pesan terjadwal dibatalkan pengirim: buang dari daftar percakapan.
+    socket.on("message:scheduled_cancelled", (p: { id: number; conversationId: string }) => {
+      setMessagesMap((prev) => {
+        const list = prev[p.conversationId];
+        if (!list) return prev;
+        return { ...prev, [p.conversationId]: list.filter((m) => m.id !== p.id) };
+      });
     });
 
     // Live ✓✓: a user read up to `lastReadMessageId` of the admin's bubbles.
@@ -891,6 +950,12 @@ export function AdminPanel() {
     [conversations]
   );
 
+  // v22 — badge unread di tab browser: total belum dibaca SEMUA percakapan.
+  useEffect(() => {
+    document.title =
+      unreadCount > 0 ? `(${unreadCount}) ChatKita Admin` : "ChatKita — Chat Sederhana";
+  }, [unreadCount]);
+
   /* Jump to latest when switching conversation. */
   useEffect(() => {
     atBottomRef.current = true;
@@ -969,6 +1034,16 @@ export function AdminPanel() {
     setResetConfirm(false);
     setModTarget(null);
     setEditHistId(null);
+    // v22 — reset state bintang / teruskan / terjadwal
+    setStarredOpen(false);
+    setStarredList([]);
+    setStarredLoading(false);
+    setForwardOpen(false);
+    setForwardStep("message");
+    setForwardMessage(null);
+    setSchedOpen(false);
+    setSchedValue("");
+    setCancelSchedId(null);
     setTitleUnread(0);
     // Fresh socket ⇒ server cleanly forgets this client's rooms.
     setEpoch((e) => e + 1);
@@ -1152,6 +1227,186 @@ export function AdminPanel() {
     const el = scrollRef.current?.querySelector(`[data-mid="${id}"]`);
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
+
+  /* ---------------------------------------------------------------- */
+  /* v22 — bintang, teruskan, kirim terjadwal                           */
+  /* ---------------------------------------------------------------- */
+
+  /* Ikon jenis pesan untuk daftar ringkas (bintang & teruskan). */
+  const messageKindIcon = (type: string) => {
+    if (type === "image") return <ImageIcon className="size-4" aria-hidden="true" />;
+    if (type === "voice") return <Mic className="size-4" aria-hidden="true" />;
+    if (type === "file") return <FileText className="size-4" aria-hidden="true" />;
+    return <MessageSquare className="size-4" aria-hidden="true" />;
+  };
+
+  /* Ringkasan satu baris pesan (caption menang utk foto/file). */
+  const snippetOfMessage = (m: ChatMessage) =>
+    messagePreview(m.type, m.content, !!m.deletedAt, m.fileName, !!m.mediaExpiredAt, m.caption);
+
+  /* Toggle bintang: optimistis dulu (tambah/hapus "admin"), lalu koreksi
+   * dari ack server — gagal → rollback + toast. */
+  const toggleStar = useCallback((messageId: number) => {
+    const socket = socketRef.current;
+    const convId = activeIdRef.current;
+    if (!socket || !convId) return;
+    const flipStar = (m: ChatMessage): ChatMessage => {
+      const cur = m.starredBy ?? [];
+      const next = cur.includes(ADMIN_ID)
+        ? cur.filter((x) => x !== ADMIN_ID)
+        : [...cur, ADMIN_ID];
+      return { ...m, starredBy: next.length > 0 ? next : undefined };
+    };
+    setMessagesMap((prev) => {
+      const list = prev[convId];
+      if (!list) return prev;
+      return { ...prev, [convId]: list.map((m) => (m.id === messageId ? flipStar(m) : m)) };
+    });
+    socket.emit("messages:star", { messageId }, (res: AckOf<StarAck>) => {
+      if (!res.ok) {
+        // Server menolak & tidak ada broadcast koreksi → rollback optimistic.
+        setMessagesMap((prev) => {
+          const list = prev[convId];
+          if (!list) return prev;
+          return { ...prev, [convId]: list.map((m) => (m.id === messageId ? flipStar(m) : m)) };
+        });
+        toast.error("Gagal mengubah bintang pesan.");
+      }
+    });
+  }, []);
+
+  /* Panel pesan berbintang: ambil daftar (bintang milik admin) saat dibuka. */
+  useEffect(() => {
+    if (!starredOpen || !activeId) return;
+    setStarredLoading(true);
+    socketRef.current?.emit(
+      "messages:starred",
+      { conversationId: activeId },
+      (res: AckOf<StarredListAck>) => {
+        setStarredLoading(false);
+        if (res.ok) setStarredList(res.messages);
+        else {
+          setStarredList([]);
+          toast.error("Gagal memuat pesan berbintang.");
+        }
+      }
+    );
+  }, [starredOpen, activeId]);
+
+  const jumpToStarred = (id: number) => {
+    setStarredOpen(false);
+    requestAnimationFrame(() => scrollToMessage(id));
+  };
+
+  /* Teruskan: pilih pesan → pilih percakapan tujuan → emit. */
+  const openForwardDialog = () => {
+    setForwardStep("message");
+    setForwardMessage(null);
+    setForwardOpen(true);
+  };
+
+  const resetForward = () => {
+    setForwardOpen(false);
+    setForwardStep("message");
+    setForwardMessage(null);
+  };
+
+  const confirmForward = (target: ConversationOverview) => {
+    const msg = forwardMessage;
+    const socket = socketRef.current;
+    if (!msg || !socket) return;
+    socket.emit(
+      "messages:forward",
+      { messageId: msg.id, targetConversationId: target.id },
+      (res: AckOf<ForwardAck>) => {
+        if (res.ok) {
+          toast.success(`Diteruskan ke ${target.partner.name}`);
+          resetForward();
+        } else if (res.error === "FORBIDDEN") {
+          toast.error("Tidak diizinkan meneruskan pesan ini.");
+        } else if (res.error === "NOT_FOUND") {
+          toast.error("Pesan atau percakapan tujuan tidak ditemukan.");
+        } else if (res.error === "INVALID_MESSAGE") {
+          toast.error("Jenis pesan ini tidak bisa diteruskan.");
+        } else {
+          toast.error("Gagal meneruskan pesan.");
+        }
+      }
+    );
+  };
+
+  /* Kirim terjadwal: default +1 jam tiap popover dibuka. */
+  const handleSchedOpenChange = (open: boolean) => {
+    setSchedOpen(open);
+    if (open) setSchedValue(toLocalInputValue(Date.now() + 3_600_000));
+  };
+
+  const scheduleSend = () => {
+    const socket = socketRef.current;
+    const convId = activeIdRef.current;
+    const content = input.trim();
+    const ms = schedValue ? new Date(schedValue).getTime() : NaN;
+    if (!socket || !convId || !content || !Number.isFinite(ms)) return;
+    socket.emit(
+      "messages:send",
+      {
+        conversationId: convId,
+        content,
+        type: "text",
+        replyToId: replyTo?.id,
+        scheduledAt: ms,
+      },
+      (res: SendAckV22) => {
+        if (res.ok) {
+          const jam = new Date(ms).toLocaleTimeString("id-ID", {
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          toast.success(`Pesan dijadwalkan pukul ${jam}`);
+          setReplyTo(null);
+          setInput("");
+          saveDraft("admin", convId, "");
+          setSchedOpen(false);
+        } else if (res.error === "INVALID_SCHEDULE") {
+          toast.error("Jadwal tidak valid — pilih waktu antara 10 detik dan 30 hari dari sekarang.");
+        } else if (res.error === "RATE_LIMITED") {
+          toast.error("Terlalu sering mengirim — tunggu sebentar.");
+        } else {
+          toast.error("Gagal menjadwalkan pesan.");
+        }
+      }
+    );
+  };
+
+  /* Batalkan pesan terjadwal (setelah konfirmasi AlertDialog). */
+  const confirmCancelScheduled = () => {
+    const id = cancelSchedId;
+    setCancelSchedId(null);
+    if (!id) return;
+    socketRef.current?.emit(
+      "messages:schedule_cancel",
+      { messageId: id },
+      (res: AckOf<ScheduleCancelAck>) => {
+        if (res.ok) toast.success("Pesan terjadwal dibatalkan.");
+        else toast.error("Gagal membatalkan pesan terjadwal.");
+      }
+    );
+  };
+
+  /* Kandidat forward: 50 pesan terbaru yang layak diteruskan. */
+  const forwardCandidates = useMemo(() => {
+    if (!activeId) return [];
+    return (messagesMap[activeId] ?? [])
+      .filter((m) => m.type !== "system" && !m.deletedAt && !!m.content && !m.scheduledAt)
+      .slice(-50)
+      .reverse();
+  }, [messagesMap, activeId]);
+
+  /* Target forward: percakapan LAIN dari inbox (admin peserta semua). */
+  const forwardTargets = useMemo(
+    () => conversations.filter((c) => c.id !== activeId),
+    [conversations, activeId]
+  );
 
   /* v5 — archive / restore the active conversation. */
   const toggleArchive = (conversationId: string, currentlyArchived: boolean) => {
@@ -1941,6 +2196,28 @@ export function AdminPanel() {
                     >
                       <Search className="size-4" aria-hidden="true" />
                     </Button>
+                    {/* v22 — pesan berbintang (bintang milik admin) */}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-9 text-muted-foreground hover:text-foreground"
+                      aria-label="Pesan berbintang"
+                      title="Pesan berbintang"
+                      onClick={() => setStarredOpen(true)}
+                    >
+                      <Star className="size-4" aria-hidden="true" />
+                    </Button>
+                    {/* v22 — teruskan pesan ke percakapan lain */}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-9 text-muted-foreground hover:text-foreground"
+                      aria-label="Teruskan pesan"
+                      title="Teruskan pesan"
+                      onClick={openForwardDialog}
+                    >
+                      <Forward className="size-4" aria-hidden="true" />
+                    </Button>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button
@@ -2227,6 +2504,15 @@ export function AdminPanel() {
                               : undefined
                           }
                           onPin={() => togglePin(m)}
+                          starred={!!m.starredBy?.includes(ADMIN_ID)}
+                          onToggleStar={() => toggleStar(m.id)}
+                          scheduledAt={m.scheduledAt}
+                          forwardedFrom={m.forwardedFrom}
+                          onCancelScheduled={
+                            m.senderId === ADMIN_ID && m.scheduledAt
+                              ? () => setCancelSchedId(m.id)
+                              : undefined
+                          }
                           onModerate={
                             m.senderId !== ADMIN_ID && !m.deletedAt ? () => setModTarget(m) : undefined
                           }
@@ -2462,6 +2748,49 @@ export function AdminPanel() {
                         >
                           <Paperclip className="size-5" aria-hidden="true" />
                         </Button>
+                        {/* v22 — kirim terjadwal */}
+                        <Popover open={schedOpen} onOpenChange={handleSchedOpenChange}>
+                          <PopoverTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="size-10 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                              aria-label="Kirim terjadwal"
+                              title="Kirim terjadwal"
+                              disabled={!connected}
+                            >
+                              <Clock className="size-5" aria-hidden="true" />
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent side="top" align="start" className="w-72 rounded-xl p-3.5">
+                            <div className="space-y-2.5">
+                              <div className="space-y-1.5">
+                                <Label htmlFor="schedule-at" className="text-xs font-medium">
+                                  Kirim pada
+                                </Label>
+                                <Input
+                                  id="schedule-at"
+                                  type="datetime-local"
+                                  value={schedValue}
+                                  min={toLocalInputValue(Date.now() + 60_000)}
+                                  className="h-9"
+                                  onChange={(e) => setSchedValue(e.target.value)}
+                                />
+                                <p className="text-[11px] leading-snug text-muted-foreground">
+                                  Minimal 1 menit, maksimal 30 hari dari sekarang. Pesan tampil
+                                  dengan chip jam sampai waktunya tiba.
+                                </p>
+                              </div>
+                              <Button
+                                className="btn-gradient h-9 w-full rounded-lg text-sm font-semibold text-white"
+                                disabled={!connected || !!editing || !input.trim() || !schedValue}
+                                onClick={scheduleSend}
+                              >
+                                Jadwalkan
+                              </Button>
+                            </div>
+                          </PopoverContent>
+                        </Popover>
                         <Input
                           value={input}
                           maxLength={MAX_MESSAGE_LENGTH}
@@ -2813,6 +3142,223 @@ export function AdminPanel() {
           {menuNotice}
         </div>
       ) : null}
+
+      {/* v22 — dialog pesan berbintang (bintang milik admin di chat aktif) */}
+      {starredOpen ? (
+        <Dialog open onOpenChange={setStarredOpen}>
+          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Star className="size-4 fill-amber-400 text-amber-400" aria-hidden="true" />
+                Pesan berbintang
+              </DialogTitle>
+              <DialogDescription>
+                Bintang Anda di chat {activeConversation?.partner.name ?? "ini"} — klik untuk
+                melompat ke pesannya.
+              </DialogDescription>
+            </DialogHeader>
+            {starredLoading ? (
+              <p className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                Memuat…
+              </p>
+            ) : starredList.length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                Belum ada pesan berbintang
+              </p>
+            ) : (
+              <div className="chat-scroll max-h-96 min-h-0 overflow-y-auto overscroll-contain">
+                <div className="flex flex-col gap-1">
+                  {starredList.map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      className="flex items-center gap-2.5 rounded-xl p-2 text-left transition-colors hover:bg-accent"
+                      onClick={() => jumpToStarred(m.id)}
+                    >
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                        {messageKindIcon(m.type)}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm">{snippetOfMessage(m)}</span>
+                        <span className="block text-[11px] text-muted-foreground">
+                          {formatChatTime(m.createdAt)}
+                        </span>
+                      </span>
+                      <Star
+                        className="size-3.5 shrink-0 fill-amber-400 text-amber-400"
+                        aria-hidden="true"
+                      />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </DialogContent>
+        </Dialog>
+      ) : null}
+
+      {/* v22 — dialog teruskan pesan: pilih pesan → pilih percakapan tujuan */}
+      {forwardOpen ? (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) resetForward();
+          }}
+        >
+          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-md">
+            {forwardStep === "message" ? (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2">
+                    <Forward className="size-4 text-emerald-600" aria-hidden="true" />
+                    Teruskan pesan
+                  </DialogTitle>
+                  <DialogDescription>
+                    Pilih pesan dari chat {activeConversation?.partner.name ?? "ini"} yang akan
+                    diteruskan (50 terbaru).
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="chat-scroll max-h-96 min-h-0 overflow-y-auto overscroll-contain">
+                  <div className="flex flex-col gap-1">
+                    {forwardCandidates.length === 0 ? (
+                      <p className="py-8 text-center text-sm text-muted-foreground">
+                        Tidak ada pesan yang bisa diteruskan.
+                      </p>
+                    ) : (
+                      forwardCandidates.map((m) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          className="flex items-center gap-2.5 rounded-xl p-2 text-left transition-colors hover:bg-accent"
+                          onClick={() => {
+                            setForwardMessage(m);
+                            setForwardStep("target");
+                          }}
+                        >
+                          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                            {messageKindIcon(m.type)}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm">{snippetOfMessage(m)}</span>
+                            <span className="block text-[11px] text-muted-foreground">
+                              {formatChatTime(m.createdAt)}
+                            </span>
+                          </span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2">
+                    <Forward className="size-4 text-emerald-600" aria-hidden="true" />
+                    Pilih tujuan
+                  </DialogTitle>
+                  <DialogDescription className="min-w-0">
+                    <span className="block truncate">
+                      “{forwardMessage ? snippetOfMessage(forwardMessage) : ""}” akan diteruskan ke
+                      percakapan lain.
+                    </span>
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="chat-scroll max-h-96 min-h-0 overflow-y-auto overscroll-contain">
+                  <div className="flex flex-col gap-1">
+                    {forwardTargets.length === 0 ? (
+                      <p className="py-8 text-center text-sm text-muted-foreground">
+                        Belum ada percakapan lain sebagai tujuan.
+                      </p>
+                    ) : (
+                      forwardTargets.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          className="flex items-center gap-2.5 rounded-xl p-2 text-left transition-colors hover:bg-accent"
+                          onClick={() => confirmForward(c)}
+                        >
+                          <Avatar className="size-8 shrink-0">
+                            <AvatarFallback
+                              className={cn(
+                                "text-xs font-semibold text-white",
+                                avatarColorClass(c.partner.name)
+                              )}
+                            >
+                              {initials(c.partner.name)}
+                            </AvatarFallback>
+                          </Avatar>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm font-medium">
+                              {c.partner.name}
+                            </span>
+                            <span className="block truncate text-[11px] text-muted-foreground">
+                              {c.lastMessage
+                                ? messagePreview(
+                                    c.lastMessage.type,
+                                    c.lastMessage.content,
+                                    c.lastMessage.deleted,
+                                    lastFileName(c.lastMessage),
+                                    lastMediaExpired(c.lastMessage),
+                                    c.lastMessage.caption
+                                  )
+                                : "Belum ada pesan"}
+                            </span>
+                          </span>
+                          <span className="shrink-0 text-[10px] text-muted-foreground">
+                            {formatChatTime(c.lastMessageAt)}
+                          </span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+                <Button
+                  variant="ghost"
+                  className="h-9 w-full text-muted-foreground"
+                  onClick={() => {
+                    setForwardStep("message");
+                    setForwardMessage(null);
+                  }}
+                >
+                  <ArrowLeft className="size-4" aria-hidden="true" />
+                  Kembali pilih pesan
+                </Button>
+              </>
+            )}
+          </DialogContent>
+        </Dialog>
+      ) : null}
+
+      {/* v22 — konfirmasi batalkan pesan terjadwal */}
+      <AlertDialog
+        open={cancelSchedId !== null}
+        onOpenChange={(open) => {
+          if (!open) setCancelSchedId(null);
+        }}
+      >
+        <AlertDialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Batalkan pesan terjadwal?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Pesan tidak akan terkirim dan langsung dihapus dari percakapan ini.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Biarkan</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-white hover:bg-destructive/90"
+              onClick={confirmCancelScheduled}
+            >
+              Ya, batalkan
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* v22 — toast sonner (forward / terjadwal / bintang) */}
+      <Toaster position="top-center" richColors closeButton />
     </div>
   );
 }

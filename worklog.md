@@ -851,3 +851,26 @@ Work Log:
 Stage Summary:
 - Backup offsite GitHub AKTIF: seluruh riwayat (kode + DB ter-track + tag rescue-v21) ada di github.com/BlackProfile/chatkita (private). Setiap commit baru otomatis: bundle lokal + push ke GitHub. Perlindungan kini tahan checkpoint sandbox full-VM — pulihkan cukup git clone.
 - Commit ini sendiri = uji live auto-push (hook baru).
+
+---
+Task ID: 39-c
+Agent: Z.ai Code (agent 39-c)
+Task: UI sisi admin untuk fitur v22 (bintang, teruskan, terjadwal, badge unread) di AdminPanel.tsx
+
+Work Log:
+- Baca kontrak server v22 langsung dari mini-services/chat-service/index.ts (messages:star/starred/forward/schedule_cancel, broadcast message:updated {starredBy}, message:scheduled_cancelled, re-emit message:new ID sama saat terjadwal jatuh tempo, INVALID_SCHEDULE) + ChatBubble props baru + chat-types (starredBy/scheduledAt/forwardedFrom sudah ada; ack event v22 BELUM ada di chat-types → didefinisikan lokal di AdminPanel: StarAck/StarredListAck/ForwardAck/ScheduleCancelAck/SendAckV22).
+- message:new (~line 776): dedupe "skip if id exists" diganti UPSERT by id — findIndex + replace (pesan terjadwal kini datang 2x dgn ID sama: chip ⏰ utk pengirim, lalu versi final saat jatuh tempo).
+- message:updated: merge per-field ditambah starredBy: u.starredBy ?? m.starredBy (empty array tetap diterapkan → unstar ter-propagasi).
+- Handler BARU message:scheduled_cancelled: filter id keluar dari messagesMap percakapan tsb.
+- toggleStar: optimistic flip starredBy (tambah/hapus ADMIN_ID) → emit messages:star → ack gagal = rollback flip + toast error; ack sukses dikoreksi broadcast starredBy.
+- Panel "Pesan berbintang": tombol Star di header pane chat (aria-label "Pesan berbintang") → Dialog shadcn; fetch messages:starred {conversationId: activeId} saat dibuka; baris = ikon jenis (Image/Mic/FileText/MessageSquare) + snippet messagePreview (caption menang utk media) + formatChatTime; klik = tutup + requestAnimationFrame(scrollToMessage) memakai anchor data-mid eksisting; empty state "Belum ada pesan berbintang"; list max-h-96 overflow-y-auto.
+- TERUSKAN via header: tombol Forward di header pane chat → Dialog 2 langkah: (1) daftar 50 pesan terbaru percakapan aktif (filter system/deleted/terjadwal, terbaru di atas) → (2) daftar percakapan LAIN dari inbox (avatar + nama + preview) → confirmForward emit messages:forward → toast.success "Diteruskan ke <nama>" (sonner) / toast.error per kode (FORBIDDEN/NOT_FOUND/INVALID_MESSAGE); tombol "Kembali pilih pesan".
+- Kirim terjadwal: tombol Clock di pill composer (aria-label "Kirim terjadwal") → Popover side=top dgn Input datetime-local (min=now+1mnt, default now+1jam via toLocalInputValue) + tombol "Jadwalkan" (disabled saat editing/ke kosongan) → messages:send + scheduledAt epoch → toast "Pesan dijadwalkan pukul HH.mm" (id-ID), kosongkan input+draft, tutup popover; INVALID_SCHEDULE/RATE_LIMITED → toast error. onCancelScheduled hanya utk pesan milik admin yg masih scheduledAt → AlertDialog "Batalkan pesan terjadwal?" → messages:schedule_cancel → broadcast menghapus bubble.
+- Badge unread tab: setTitleUnread(total) di handler conversations:update digantikan useEffect unreadCount → document.title = "(n) ChatKita Admin" | "ChatKita — Chat Sederhana" (terverifikasi live "(1) ChatKita Admin").
+- Wiring ChatBubble: starred/onToggleStar/scheduledAt/forwardedFrom/onCancelScheduled (kondisional senderId admin + scheduledAt) sesuai spesifikasi.
+- toast (sonner) diimpor; <Toaster position="top-center" richColors closeButton /> dari ui/sonner dipasang DI DALAM AdminPanel (layout tidak boleh disentuh — batasan "edit HANYA AdminPanel.tsx"; ui/toaster lama tetap utk fitur lain).
+- handleLogout: reset 9 state v22 baru. Tidak ada file lain/server/ChatBubble/chat-types yang disentuh; tidak commit.
+- E2E agent-browser (session terpisah, gateway :81): title badge ✓; bintangi "IYA IYA" → ikon Berbintang di bubble ✓; dialog berbintang isi + klik jump + dialog tertutup ✓; forward "IYA IYA" → rvg: toast "Diteruskan ke rvg" + label "Diteruskan dari" di chat target ✓; terjadwal: toast "Pesan dijadwalkan pukul 10.25", chip "2 Sep, 10.25" tampil, composer kosong, popover tertutup ✓; margin 10 dtk terlalu mepet terkena INVALID_SCHEDULE → tanpa bubble, tanpa crash (jalur error benar) ✓; setelah jatuh tempo bubble ter-UPSERT (chip hilang, tanpa duplikat, preview sidebar terupdate) ✓; Batalkan jadwal: AlertDialog → bubble hilang + toast ✓; 0 console error, 0 page error. Cleanup: unstar + hapus 2 pesan uji (tombstone moderasi tersisa, perilaku normal app).
+
+Stage Summary:
+- Task 39-c SELESAI: sisi ADMIN fitur v22 lengkap di AdminPanel.tsx saja — (1) bintang per-user (optimistic + rollback, panel Pesan berbintang dgn jump-to-message), (2) teruskan antar-percakapan via dialog 2 langkah + toast sonner, (3) kirim terjadwal (Popover datetime-local, chip jam, AlertDialog pembatalan), (4) handler message:scheduled_cancelled, (5) message:new kini UPSERT by id sehingga pesan terjadwal terganti mulus saat jatuh tempo, (6) message:updated merge starredBy, (7) badge unread di tab "(n) ChatKita Admin". Fitur existing (ghost, pin, arsip, moderasi, dashboard, Pusat) tak tersentuh dan terverifikasi jalan. Lint 0 error 0 warning; tsc bersih utk AdminPanel.tsx (error tsc lain pre-existing di file milik agent lain/mini-services). Tidak commit.

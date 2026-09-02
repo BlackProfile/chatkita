@@ -5,6 +5,7 @@ import { motion } from "framer-motion";
 import {
   Check,
   CheckCheck,
+  Clock,
   Copy,
   Download,
   History,
@@ -17,7 +18,9 @@ import {
   Play,
   Reply,
   SmilePlus,
+  Star,
   Trash2,
+  X,
 } from "lucide-react";
 
 import type { MessageReaction, ReplyPreview } from "@/lib/chat-types";
@@ -82,6 +85,12 @@ interface ChatBubbleProps {
   canEdit?: boolean;
   /** v5 — show the "Sematkan" action (admin only). */
   canPin?: boolean;
+  /** v22 — pesan berbintang oleh pengguna saat ini. */
+  starred?: boolean;
+  /** v22 — label "Diteruskan dari …" (pesan hasil forward admin). */
+  forwardedFrom?: string;
+  /** v22 — pesan terjadwal: ISO waktu kirim otomatis (belum terkirim). */
+  scheduledAt?: string;
   /** v13 — kartu pratinjau tautan diaktifkan (setting aplikasi linkPreview). */
   linkPreviewEnabled?: boolean;
   /** v11 — moderasi admin: hapus pesan pengguna lain (dengan konfirmasi di induk). */
@@ -96,6 +105,10 @@ interface ChatBubbleProps {
   onEdit?: () => void;
   onTranslate?: () => void;
   onPin?: () => void;
+  /** v22 — toggle bintang pesan ini. */
+  onToggleStar?: () => void;
+  /** v22 — batalkan pesan terjadwal milik sendiri (belum terkirim). */
+  onCancelScheduled?: () => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -136,6 +149,9 @@ export function ChatBubble({
   pinned = false,
   canEdit = false,
   canPin = false,
+  starred = false,
+  forwardedFrom,
+  scheduledAt,
   linkPreviewEnabled = true,
   onModerate,
   onEditHistory,
@@ -146,6 +162,8 @@ export function ChatBubble({
   onEdit,
   onTranslate,
   onPin,
+  onToggleStar,
+  onCancelScheduled,
 }: ChatBubbleProps) {
   const [actionsOpen, setActionsOpen] = useState(false);
   const [reactOpen, setReactOpen] = useState(false);
@@ -255,6 +273,19 @@ export function ChatBubble({
                 {replyTo.snippet}
               </p>
             </div>
+          ) : null}
+
+          {/* v22 — label pesan hasil forward */}
+          {forwardedFrom ? (
+            <p
+              className={cn(
+                "mb-1 flex items-center gap-1 text-xs italic",
+                isRight ? "text-white/80" : "text-muted-foreground"
+              )}
+            >
+              <Reply className="size-3 -scale-x-100" aria-hidden="true" />
+              Diteruskan dari {forwardedFrom}
+            </p>
           ) : null}
 
           {/* Deleted tombstone */}
@@ -468,7 +499,22 @@ export function ChatBubble({
             )}
           >
             {formatChatTime(createdAt)}
+            {scheduledAt ? (
+              <span
+                className="flex items-center gap-0.5 font-medium"
+                aria-label={`Terjadwal ${new Date(scheduledAt).toLocaleString("id-ID", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" })}`}
+              >
+                <Clock className="size-3" aria-hidden="true" />
+                {new Date(scheduledAt).toLocaleString("id-ID", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  day: "numeric",
+                  month: "short",
+                })}
+              </span>
+            ) : null}
             {edited && !deleted ? <span aria-label="Pesan diedit">· diedit</span> : null}
+            {starred && !deleted ? <Star className="size-3 fill-amber-400 text-amber-400" aria-label="Berbintang" /> : null}
             {pinned && !deleted ? <Pin className="size-3" aria-label="Disematkan" /> : null}
             {isRight ? (
               read ? (
@@ -612,6 +658,38 @@ export function ChatBubble({
             >
               <Pin className="size-3.5" aria-hidden="true" />
               {pinned ? "Lepas sematan" : "Sematkan"}
+            </button>
+          ) : null}
+          {onToggleStar ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
+              onClick={() => {
+                closeActions();
+                onToggleStar();
+              }}
+            >
+              <Star
+                className={cn(
+                  "size-3.5",
+                  starred && "fill-amber-400 text-amber-400"
+                )}
+                aria-hidden="true"
+              />
+              {starred ? "Hapus bintang" : "Bintangi"}
+            </button>
+          ) : null}
+          {scheduledAt && onCancelScheduled ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-xs text-red-600 hover:bg-red-500/10"
+              onClick={() => {
+                closeActions();
+                onCancelScheduled();
+              }}
+            >
+              <X className="size-3.5" aria-hidden="true" />
+              Batalkan jadwal
             </button>
           ) : null}
           {onEditHistory ? (
