@@ -84,8 +84,8 @@ import webpush from 'web-push'
 /* ------------------------------------------------------------------ */
 
 const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
-/** v20 — service version surfaced by the admin dashboard (Info aplikasi). */
-const SERVICE_VERSION = 'v20'
+/** v21 — caption media (foto/file membawa teks composer). */
+const SERVICE_VERSION = 'v21'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -225,6 +225,8 @@ addColumn('users', 'frozen', 'INTEGER DEFAULT 0')
 addColumn('users', 'muted_until', 'INTEGER DEFAULT 0')
 addColumn('users', 'slow_mode', 'INTEGER DEFAULT 0')
 addColumn('users', 'media_blocked', 'INTEGER DEFAULT 0')
+/* v20 — caption teks opsional yang menyertai pesan media (foto/file). */
+addColumn('messages', 'caption', 'TEXT')
 
 /** v11 — audit trail of admin actions (admin:audit). */
 db.run(`
@@ -305,6 +307,8 @@ interface MessageRow {
   deleted_content?: string | null
   edit_history?: string | null
   flagged?: number | null
+  /* v20 — caption teks opsional yang menyertai pesan media (foto/file). */
+  caption?: string | null
 }
 
 /* ------------------------------ API types ------------------------------ */
@@ -325,6 +329,8 @@ interface ChatMessageApi {
   translation?: string
   /** file messages: original file name (display only). */
   fileName?: string
+  /** v20 — caption teks opsional yang ikut dikirim bersama media. */
+  caption?: string
   /** file messages: size in bytes. */
   fileSize?: number
   /** file messages: MIME type (e.g. application/pdf, video/mp4). */
@@ -357,6 +363,8 @@ interface ConversationOverviewApi {
         deleted: boolean
         fileName?: string
         mediaExpired?: boolean
+        /** v20 — caption teks yang menyertai pesan media terakhir. */
+        caption?: string
       }
     | null
   lastMessageAt: string
@@ -887,6 +895,8 @@ const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   ...(row.file_name && !row.deleted_at ? { fileName: row.file_name } : {}),
   ...(typeof row.file_size === 'number' && !row.deleted_at ? { fileSize: row.file_size } : {}),
   ...(row.mime_type && !row.deleted_at ? { mimeType: row.mime_type } : {}),
+  // v20 — caption ikut media (tidak pernah dikirim setelah dihapus).
+  ...(row.caption && !row.deleted_at ? { caption: row.caption } : {}),
   // v8 — thumbnail + retention tombstone (never emitted after delete).
   ...(row.thumb_url && !row.deleted_at && !row.media_expired_at
     ? { thumbUrl: row.thumb_url }
@@ -898,14 +908,18 @@ const toChatMessage = (row: MessageRow): ChatMessageApi => ({
 
 /** Human-readable one-liner for previews and reply quotes. */
 const snippetOf = (
-  row: Pick<MessageRow, 'type' | 'content' | 'deleted_at' | 'file_name' | 'media_expired_at'>
+  row: Pick<
+    MessageRow,
+    'type' | 'content' | 'deleted_at' | 'file_name' | 'media_expired_at' | 'caption'
+  >
 ): string => {
   if (row.deleted_at) return 'Pesan ini dihapus'
   if (row.media_expired_at) return '⏳ Media kedaluwarsa'
   const type = row.type ?? 'text'
-  if (type === 'image') return '📷 Foto'
+  // v20 — caption menang atas label generik untuk foto/file.
+  if (type === 'image') return row.caption || '📷 Foto'
   if (type === 'voice') return '🎤 Pesan suara'
-  if (type === 'file') return `📎 ${row.file_name ?? 'File'}`
+  if (type === 'file') return row.caption || `📎 ${row.file_name ?? 'File'}`
   return row.content
 }
 
@@ -1150,6 +1164,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         lm.deleted_at AS last_deleted,
         lm.file_name AS last_file_name,
         lm.media_expired_at AS last_media_expired,
+        lm.caption AS last_caption,
         pm.id AS pin_id,
         pm.sender_id AS pin_sender,
         pm.content AS pin_content,
@@ -1199,6 +1214,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     last_deleted: number | null
     last_file_name: string | null
     last_media_expired: number | null
+    last_caption: string | null
     pin_id: number | null
     pin_sender: string | null
     pin_content: string | null
@@ -1231,6 +1247,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
             ...(r.last_file_name && !r.last_deleted
               ? { fileName: r.last_file_name }
               : {}),
+            ...(r.last_caption && !r.last_deleted ? { caption: r.last_caption } : {}),
             ...(r.last_media_expired != null && !r.last_deleted
               ? { mediaExpired: true }
               : {}),
@@ -1372,6 +1389,7 @@ const RESTORE_MESSAGE_COLUMNS = [
   'deleted_content',
   'edit_history',
   'flagged',
+  'caption',
 ] as const
 
 const scalarCount = (sql: string): number =>
@@ -1485,12 +1503,15 @@ const insertAndFanOut = (
     thumbUrl?: string
     /* v11 — 1 when the text matched an admin keyword (silent flag). */
     flagged?: number
+    /* v20 — caption teks opsional untuk pesan foto/file. */
+    caption?: string
   } = {}
 ): ChatMessageApi => {
   const ts = now()
   const hasMediaMeta = type === 'file' || type === 'image' || type === 'voice'
+  const hasCaption = type === 'file' || type === 'image'
   const result = db.run(
-    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged, caption) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     [
       conversation.id,
       senderId,
@@ -1504,6 +1525,7 @@ const insertAndFanOut = (
       hasMediaMeta ? (opts.mimeType ?? null) : null,
       opts.thumbUrl ?? null,
       opts.flagged ?? 0,
+      hasCaption ? (opts.caption ?? null) : null,
     ]
   )
   db.run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [ts, conversation.id])
@@ -2525,6 +2547,7 @@ io.on('connection', (socket) => {
       let trimmed: string
       let fileMeta: { fileName: string; fileSize: number; mimeType: string } | null = null
       let thumbUrlRef: string | undefined
+      let captionRef: string | undefined
 
       if (type === 'text') {
         trimmed = content.trim()
@@ -2596,6 +2619,19 @@ io.on('connection', (socket) => {
       } else {
         ack({ ok: false, error: 'INVALID_MESSAGE' })
         return
+      }
+
+      // v20 — caption opsional: teks di composer ikut terkirim bersama media.
+      if (type === 'image' || type === 'file') {
+        const rawCaption = typeof data?.caption === 'string' ? data.caption.trim() : ''
+        if (rawCaption) {
+          const capMax = me !== ADMIN_ID ? appSet.maxMessageLength : MAX_MESSAGE_LENGTH
+          if (rawCaption.length > capMax) {
+            ack({ ok: false, error: 'INVALID_MESSAGE' })
+            return
+          }
+          captionRef = rawCaption
+        }
       }
 
       // Optional reply target must belong to the same conversation.
@@ -2670,6 +2706,7 @@ io.on('connection', (socket) => {
         durationMs,
         ...(fileMeta ?? {}),
         ...(thumbUrlRef ? { thumbUrl: thumbUrlRef } : {}),
+        ...(captionRef ? { caption: captionRef } : {}),
         ...(flagKeyword ? { flagged: 1 } : {}),
       })
       ack({ ok: true, message })

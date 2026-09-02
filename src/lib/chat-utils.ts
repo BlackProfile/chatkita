@@ -197,20 +197,22 @@ export function resolveFileKind(mimeType?: string, fileName?: string): FileKind 
 /**
  * Sidebar/quote one-liner for a message of any type.
  * `fileName` hanya untuk pesan type "file" (pratinjau daftar percakapan);
- * `mediaExpired` = media sudah dihapus pembersih retensi (v8).
+ * `mediaExpired` = media sudah dihapus pembersih retensi (v8);
+ * `caption` = teks yang menyertai foto/file (v20) — tampil di pratinjau.
  */
 export function messagePreview(
   type: string,
   content: string,
   deleted: boolean,
   fileName?: string,
-  mediaExpired?: boolean
+  mediaExpired?: boolean,
+  caption?: string
 ): string {
   if (deleted) return "🚫 Pesan ini dihapus";
   if (mediaExpired) return "⏳ Media kedaluwarsa";
-  if (type === "image") return "📷 Foto";
+  if (type === "image") return caption || "📷 Foto";
   if (type === "voice") return "🎤 Pesan suara";
-  if (type === "file") return `📎 ${fileName ?? "File"}`;
+  if (type === "file") return caption || `📎 ${fileName ?? "File"}`;
   if (type === "system") return content;
   return content;
 }

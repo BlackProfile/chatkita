@@ -50,6 +50,8 @@ interface ChatBubbleProps {
   mimeType?: string;
   /** v8 — thumbnail kecil (<30 KB) untuk foto/video; bubble memuat ini. */
   thumbUrl?: string;
+  /** v20 — caption teks opsional yang ikut dikirim bersama media (foto/file). */
+  caption?: string;
   /** v8 — media sudah dihapus pembersih retensi (tombstone). */
   mediaExpired?: boolean;
   /** v8 — mode hemat data: media berat tanpa thumbnail tidak dimuat otomatis. */
@@ -123,6 +125,7 @@ export function ChatBubble({
   fileSize,
   mimeType,
   thumbUrl,
+  caption,
   mediaExpired = false,
   dataSaver = false,
   reactions,
@@ -412,6 +415,19 @@ export function ChatBubble({
           ) : (
             <p className="whitespace-pre-wrap break-words">{content}</p>
           )}
+
+          {/* v20 — caption teks yang menyertai pesan media, tampil di bawah
+              media di dalam bubble (gaya WhatsApp). */}
+          {!deleted && caption && (type === "image" || type === "file") ? (
+            <p
+              className={cn(
+                "mt-1.5 whitespace-pre-wrap break-words text-sm leading-relaxed",
+                isRight ? "text-white" : "text-foreground"
+              )}
+            >
+              {caption}
+            </p>
+          ) : null}
 
           {/* Task 19 — kartu pratinjau tautan (pesan teks ber-URL), di bawah
               teks, selebar bubble. Klik kartu TIDAK men-toggle baris aksi. */}

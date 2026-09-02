@@ -827,6 +827,8 @@ export function Messenger() {
       mimeType?: string;
       fileSize?: number;
       thumbUrl?: string;
+      /** v20 — caption teks yang ikut media (foto/file). */
+      caption?: string;
     } = {}
   ) => {
     const socket = socketRef.current;
@@ -980,6 +982,8 @@ export function Messenger() {
     setUploading(true);
     setUploadProgress(0);
     setImageError(null);
+    // v20 — teks yang ada di composer ikut sebagai caption media.
+    const captionText = input.trim();
     try {
       const stamp = Date.now();
       const [fullMeta, thumbMeta] = await Promise.all([
@@ -992,10 +996,12 @@ export function Messenger() {
           mimeType: fullMeta.mimeType,
           fileSize: fullMeta.size,
           thumbUrl: thumbMeta.url,
+          ...(captionText ? { caption: captionText } : {}),
         })
       ) {
         URL.revokeObjectURL(target.previewUrl);
         setPendingImage(null);
+        if (captionText) setInput(""); // teks sudah terkirim sebagai caption
       } else {
         setImageError(sendErrorDetail ?? "Pesan gagal terkirim, coba lagi.");
       }
@@ -1029,6 +1035,8 @@ export function Messenger() {
     setUploading(true);
     setUploadProgress(0);
     setFileError(null);
+    // v20 — teks yang ada di composer ikut sebagai caption file.
+    const captionText = input.trim();
     try {
       const meta = await uploadMedia(target.file, setUploadProgress);
       // Poster video (best-effort — kegagalan tidak memblokir pengiriman).
@@ -1051,9 +1059,14 @@ export function Messenger() {
         mimeType: meta.mimeType,
         fileSize: meta.size,
         ...(thumbUrl ? { thumbUrl } : {}),
+        ...(captionText ? { caption: captionText } : {}),
       });
-      if (sent) setPendingFile(null);
-      else setFileError(sendErrorDetail ?? "Pesan gagal terkirim, coba lagi.");
+      if (sent) {
+        setPendingFile(null);
+        if (captionText) setInput(""); // teks sudah terkirim sebagai caption
+      } else {
+        setFileError(sendErrorDetail ?? "Pesan gagal terkirim, coba lagi.");
+      }
     } catch {
       setFileError("Gagal mengunggah file.");
     } finally {
@@ -1698,6 +1711,7 @@ export function Messenger() {
                   fileSize={m.fileSize}
                   mimeType={m.mimeType}
                   thumbUrl={m.thumbUrl}
+                  caption={m.caption}
                   mediaExpired={!!m.mediaExpiredAt}
                   dataSaver={dataSaver}
                   read={m.senderId === me.userId && m.id <= adminReadId}

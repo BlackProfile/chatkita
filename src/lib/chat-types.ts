@@ -149,6 +149,8 @@ export interface ChatMessage {
   reactions?: MessageReaction[];
   /** file messages: original file name (display only). */
   fileName?: string;
+  /** v20 — caption teks opsional yang ikut dikirim bersama media. */
+  caption?: string;
   /** file messages: size in bytes. */
   fileSize?: number;
   /** file messages: MIME type (e.g. application/pdf, video/mp4). */
@@ -190,6 +192,8 @@ export interface ConversationOverview {
     fileName?: string;
     /** v8 — last message's media was swept by retention. */
     mediaExpired?: boolean;
+    /** v20 — caption teks yang menyertai pesan media terakhir. */
+    caption?: string;
   } | null;
   lastMessageAt: string;
   /** Unread messages sent by the partner. */
@@ -811,7 +815,8 @@ export interface ConversationResetPayload {
 //                     type?: 'text'|'image'|'voice'|'file';
 //                     replyToId?: number; durationMs?: number;
 //                     fileName?: string; fileSize?: number; mimeType?: string;
-//                     thumbUrl?: string }
+//                     thumbUrl?: string;
+//                     caption?: string }  // v20 — teks yang ikut media (foto/file)
 //                     → MessageAck | ChatErrorAck
 //                     Both roles; participant-gated. Sender auto-reads.
 //                     v8 — image/voice content is PREFERRED as the

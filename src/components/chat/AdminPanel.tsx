@@ -1028,6 +1028,8 @@ export function AdminPanel() {
       mimeType?: string;
       fileSize?: number;
       thumbUrl?: string;
+      /** v20 — caption teks yang ikut media (foto/file). */
+      caption?: string;
     } = {}
   ) => {
     const socket = socketRef.current;
@@ -1236,6 +1238,8 @@ export function AdminPanel() {
     setUploading(true);
     setUploadProgress(0);
     setImageError(null);
+    // v20 — teks yang ada di composer ikut sebagai caption media.
+    const captionText = input.trim();
     try {
       const stamp = Date.now();
       const [fullMeta, thumbMeta] = await Promise.all([
@@ -1248,10 +1252,12 @@ export function AdminPanel() {
           mimeType: fullMeta.mimeType,
           fileSize: fullMeta.size,
           thumbUrl: thumbMeta.url,
+          ...(captionText ? { caption: captionText } : {}),
         })
       ) {
         URL.revokeObjectURL(target.previewUrl);
         setPendingImage(null);
+        if (captionText) setInput(""); // teks sudah terkirim sebagai caption
       } else {
         setImageError(sendErrorDetail ?? "Pesan gagal terkirim, coba lagi.");
       }
@@ -1285,6 +1291,8 @@ export function AdminPanel() {
     setUploading(true);
     setUploadProgress(0);
     setFileError(null);
+    // v20 — teks yang ada di composer ikut sebagai caption file.
+    const captionText = input.trim();
     try {
       const meta = await uploadMedia(target.file, setUploadProgress);
       // Poster video (best-effort — kegagalan tidak memblokir pengiriman).
@@ -1307,9 +1315,14 @@ export function AdminPanel() {
         mimeType: meta.mimeType,
         fileSize: meta.size,
         ...(thumbUrl ? { thumbUrl } : {}),
+        ...(captionText ? { caption: captionText } : {}),
       });
-      if (sent) setPendingFile(null);
-      else setFileError(sendErrorDetail ?? "Pesan gagal terkirim, coba lagi.");
+      if (sent) {
+        setPendingFile(null);
+        if (captionText) setInput(""); // teks sudah terkirim sebagai caption
+      } else {
+        setFileError(sendErrorDetail ?? "Pesan gagal terkirim, coba lagi.");
+      }
     } catch {
       setFileError("Gagal mengunggah file.");
     } finally {
@@ -1836,7 +1849,8 @@ export function AdminPanel() {
                                       c.lastMessage.content,
                                       c.lastMessage.deleted,
                                       lastFileName(c.lastMessage),
-                                      lastMediaExpired(c.lastMessage)
+                                      lastMediaExpired(c.lastMessage),
+                                      c.lastMessage.caption
                                     )}`
                                   : "Belum ada pesan"}
                             </span>
@@ -2186,6 +2200,7 @@ export function AdminPanel() {
                           fileSize={m.fileSize}
                           mimeType={m.mimeType}
                           thumbUrl={m.thumbUrl}
+                          caption={m.caption}
                           mediaExpired={!!m.mediaExpiredAt}
                           dataSaver={dataSaver}
                           read={m.senderId === ADMIN_ID && m.id <= activeConversation.partnerLastReadId}
