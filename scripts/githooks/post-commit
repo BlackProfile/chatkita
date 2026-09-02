@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Hook post-commit — backup bundle otomatis setiap commit (diam-diam).
+# Aktif via: git config core.hooksPath scripts/githooks
+bash "$(git rev-parse --show-toplevel)/scripts/make-backup.sh" >/dev/null 2>&1 || true
