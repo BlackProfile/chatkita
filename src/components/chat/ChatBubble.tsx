@@ -12,6 +12,7 @@ import {
   Hourglass,
   Image as ImageIcon,
   Languages,
+  Music,
   Pause,
   Pencil,
   Pin,
@@ -360,22 +361,49 @@ export function ChatBubble({
               onClick={(e) => e.stopPropagation()}
             />
           ) : type === "file" && fileKind === "audio" ? (
+            /* v31 — file audio BUKAN voice note: kartu berbeda (ikon musik + nama
+             * + ukuran) dengan pemutar <audio> standar bawaan browser — voice
+             * note yang direkam tetap memakai VoicePlayer gelombang di atas. */
             <div
-              className="min-w-56 px-1.5 py-1"
+              className="min-w-56 max-w-72"
               onClick={(e) => e.stopPropagation()}
             >
-              <p
+              <div
                 className={cn(
-                  "mb-1 break-words text-xs font-medium",
-                  isRight ? "text-white" : "text-foreground"
+                  "flex items-center gap-2.5 rounded-t-xl p-2",
+                  isRight ? "bg-white/15" : "bg-muted/70"
                 )}
               >
-                {fileName ?? "Audio"}
-              </p>
-              <VoicePlayer
+                <span
+                  className={cn(
+                    "flex size-10 shrink-0 items-center justify-center rounded-lg",
+                    isRight ? "bg-white/20 text-white" : "bg-background text-muted-foreground"
+                  )}
+                >
+                  <Music className="size-5" aria-hidden="true" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="line-clamp-1 break-words text-sm font-medium leading-snug">
+                    {fileName ?? "Audio"}
+                  </p>
+                  <p
+                    className={cn(
+                      "text-xs",
+                      isRight ? "text-white/70" : "text-muted-foreground"
+                    )}
+                  >
+                    File audio{fileSize ? ` · ${formatFileSize(fileSize)}` : ""}
+                  </p>
+                </div>
+              </div>
+              <audio
                 src={content}
-                mine={isRight}
-                seed={messageId ?? 1}
+                controls
+                preload={dataSaver ? "none" : "metadata"}
+                className={cn(
+                  "h-9 w-full rounded-b-xl bg-background/60",
+                  isRight ? "text-white" : ""
+                )}
               />
             </div>
           ) : type === "file" ? (

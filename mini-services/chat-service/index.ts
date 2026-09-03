@@ -99,8 +99,12 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        bersihkan audit, reset pengaturan default.
  *  v30 — bersihkan chat kedua sisi KHUSUS ADMIN: event conversation:clear (user)
  *        dihapus dari protokol. Satu-satunya jalur menghapus riwayat percakapan
- *        adalah admin:reset_conversation dari panel admin (audit + broadcast). */
-const SERVICE_VERSION = 'v30'
+ *        adalah admin:reset_conversation dari panel admin (audit + broadcast).
+ *  v31 — UX lampiran: pratinjau INLINE tanpa popup (chip ala foto di atas
+ *        composer), teks composer ikut terkirim sebagai caption media, menu
+ *        lampiran dipecah per jenis (foto/video/audio/file), dan file audio
+ *        dibedakan dari voice note di bubble chat. */
+const SERVICE_VERSION = 'v31'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'

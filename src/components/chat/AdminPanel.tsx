@@ -13,6 +13,7 @@ import {
   Clock,
   DatabaseBackup,
   EyeOff,
+  Film,
   FileJson,
   FileText,
   Flag,
@@ -30,6 +31,7 @@ import {
   Mic,
   MoreVertical,
   Moon,
+  Music,
   Paperclip,
   Pin,
   Plus,
@@ -288,8 +290,9 @@ export function AdminPanel() {
     thumb: Blob;
   } | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
-  // Lampiran dokumen/video/audio: file terpilih → dialog konfirmasi → upload.
-  const [pendingFile, setPendingFile] = useState<{ file: File } | null>(null);
+  // v31 — lampiran dokumen/video/audio: pratinjau INLINE ala foto chip (tanpa
+  // popup); video mendapat cuplikan <video>, sisanya ikon jenis file.
+  const [pendingFile, setPendingFile] = useState<{ file: File; previewUrl?: string } | null>(null);
   const [uploading, setUploading] = useState(false);
   // v20 — progres unggah (0–100); null = tidak sedang mengunggah.
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
@@ -1101,6 +1104,7 @@ export function AdminPanel() {
     setEditing(null);
     if (pendingImage) URL.revokeObjectURL(pendingImage.previewUrl);
     setPendingImage(null);
+    if (pendingFile?.previewUrl) URL.revokeObjectURL(pendingFile.previewUrl);
     setPendingFile(null);
     setUploading(false);
     setFileError(null);
@@ -1227,6 +1231,16 @@ export function AdminPanel() {
   };
 
   const handleSend = () => {
+    // v31 — lampiran yang menunggu dikirim duluan (teks composer ikut sebagai
+    // caption di pesan media yang sama).
+    if (pendingFile) {
+      if (!uploading) void sendFile();
+      return;
+    }
+    if (pendingImage) {
+      if (!uploading) void sendImage();
+      return;
+    }
     const content = input.trim();
     if (!content) return;
     // v5 — edit mode: Enter saves the edited message instead of sending.
@@ -1613,8 +1627,15 @@ export function AdminPanel() {
     }
   };
 
-  /* Satu tombol lampiran: semua jenis file. Foto → alur kompres+thumbnail;
-   * sisanya → dialog unggah (maks 25MB), video ikut dibuatkan poster. */
+  /* v31 — lampiran dipecah per jenis (foto/video/audio/file) dengan ikon &
+   * filter sesuai; hasilnya TANPA popup — chip pratinjau inline ala foto. */
+  const openFilePicker = (accept: string) => {
+    const el = fileInputRef.current;
+    if (!el) return;
+    el.accept = accept;
+    el.click();
+  };
+
   const handleFilePick = (file: File | undefined | null) => {
     if (!file) return;
     setFileError(null);
@@ -1626,7 +1647,18 @@ export function AdminPanel() {
       setFileError("File terlalu besar (maks 25 MB).");
       return;
     }
-    setPendingFile({ file });
+    setPendingFile({
+      file,
+      ...(file.type.startsWith("video/") ? { previewUrl: URL.createObjectURL(file) } : {}),
+    });
+  };
+
+  /** v31 — buang lampiran menunggu + bebaskan URL pratinjau videonya. */
+  const dismissPendingFile = () => {
+    setPendingFile((p) => {
+      if (p?.previewUrl) URL.revokeObjectURL(p.previewUrl);
+      return null;
+    });
   };
 
   const sendFile = async () => {
@@ -1662,7 +1694,7 @@ export function AdminPanel() {
         ...(captionText ? { caption: captionText } : {}),
       });
       if (sent) {
-        setPendingFile(null);
+        dismissPendingFile();
         if (captionText) setInput(""); // teks sudah terkirim sebagai caption
       } else {
         setFileError(sendErrorDetail ?? "Pesan gagal terkirim, coba lagi.");
@@ -2742,6 +2774,70 @@ export function AdminPanel() {
                   </div>
                 ) : null}
 
+                {/* v31 — chip pratinjau lampiran inline (tanpa popup): video
+                 * pakai cuplikan <video>, audio/file pakai ikon jenisnya. */}
+                {pendingFile ? (
+                  <div className="mx-3 mb-1 flex items-center gap-2.5 rounded-xl border bg-card/90 px-2 py-1.5 backdrop-blur">
+                    {pendingFile.previewUrl ? (
+                      <video
+                        src={pendingFile.previewUrl}
+                        muted
+                        playsInline
+                        preload="metadata"
+                        className="h-14 w-20 shrink-0 rounded-md object-cover"
+                      />
+                    ) : (
+                      <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                        <FileKindIcon
+                          mimeType={pendingFile.file.type}
+                          fileName={pendingFile.file.name}
+                          className="size-5"
+                        />
+                      </span>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-xs font-medium">{pendingFile.file.name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {uploadProgress != null
+                          ? `Mengunggah… ${uploadProgress}%`
+                          : `${
+                              pendingFile.file.type.startsWith("video/")
+                                ? "Video"
+                                : pendingFile.file.type.startsWith("audio/")
+                                  ? "Audio"
+                                  : "File"
+                            } siap dikirim · ${formatFileSize(pendingFile.file.size)}`}
+                      </p>
+                      {uploadProgress != null ? (
+                        <div
+                          className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted"
+                          role="progressbar"
+                          aria-valuenow={uploadProgress}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                        >
+                          <div
+                            className="h-full rounded-full bg-emerald-600 transition-all"
+                            style={{ width: `${uploadProgress}%` }}
+                          />
+                        </div>
+                      ) : null}
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="Batal kirim lampiran"
+                      className="text-muted-foreground hover:text-foreground"
+                      disabled={uploading}
+                      onClick={dismissPendingFile}
+                    >
+                      <X className="size-4" />
+                    </button>
+                  </div>
+                ) : null}
+                {fileError ? (
+                  <p className="mx-3 mb-1 px-1 text-xs text-destructive">{fileError}</p>
+                ) : null}
+
                 {/* v11 — baris balasan cepat di atas composer */}
                 {quickReplies.length > 0 && !recorder.recording ? (
                   <div
@@ -2844,12 +2940,25 @@ export function AdminPanel() {
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="start" className="w-60">
-                            <DropdownMenuItem
-                              onClick={() => fileInputRef.current?.click()}
-                            >
-                              <Paperclip className="mr-2 size-4" aria-hidden="true" />
-                              Lampirkan foto atau file
+                            {/* v31 — lampiran dipecah per jenis: ikon & filter
+                             * sesuai (foto→Image, video→Film, audio→Music). */}
+                            <DropdownMenuItem onClick={() => openFilePicker("image/*")}>
+                              <ImageIcon className="mr-2 size-4" aria-hidden="true" />
+                              Foto
                             </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => openFilePicker("video/*")}>
+                              <Film className="mr-2 size-4" aria-hidden="true" />
+                              Video
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => openFilePicker("audio/*")}>
+                              <Music className="mr-2 size-4" aria-hidden="true" />
+                              Audio
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => openFilePicker("")}>
+                              <Paperclip className="mr-2 size-4" aria-hidden="true" />
+                              File
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
                             <DropdownMenuItem
                               disabled={!connected || !!editing}
                               onClick={() => handleSchedOpenChange(true)}
@@ -2880,14 +2989,16 @@ export function AdminPanel() {
                           }}
                         />
                       </div>
-                      {input.trim() || pendingImage ? (
+                      {input.trim() || pendingImage || pendingFile ? (
                         <Button
                           size="icon"
                           className="btn-gradient size-11 shrink-0 rounded-full text-white"
                           aria-label="Kirim"
-                          disabled={!connected || uploading || (!input.trim() && !pendingImage)}
+                          disabled={!connected || uploading || (!input.trim() && !pendingImage && !pendingFile)}
                           onClick={() => {
+                            // v31 — lampiran menunggu ikut dikirim bersama teks (caption).
                             if (pendingImage) void sendImage();
+                            else if (pendingFile) void sendFile();
                             else handleSend();
                           }}
                         >
@@ -2977,94 +3088,6 @@ export function AdminPanel() {
                 onClick={copyQrUrl}
               >
                 Salin tautan
-              </Button>
-            </div>
-          </DialogContent>
-        </Dialog>
-      ) : null}
-
-      {/* Dialog konfirmasi lampiran file (unggah → kirim) */}
-      {pendingFile ? (
-        <Dialog
-          open
-          onOpenChange={(open) => {
-            if (!open && !uploading) setPendingFile(null);
-          }}
-        >
-          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <FileKindIcon
-                  mimeType={pendingFile.file.type}
-                  fileName={pendingFile.file.name}
-                  className="size-5 text-emerald-600"
-                />
-                Kirim file
-              </DialogTitle>
-              <DialogDescription>
-                File ini akan dikirim ke {activeConversation?.partner.name ?? "user"}.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="flex items-center gap-3 rounded-xl border bg-muted/60 p-3">
-              <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-background text-muted-foreground">
-                <FileKindIcon
-                  mimeType={pendingFile.file.type}
-                  fileName={pendingFile.file.name}
-                  className="size-5"
-                />
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="break-words text-sm font-medium leading-snug">
-                  {pendingFile.file.name}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {formatFileSize(pendingFile.file.size)}
-                </p>
-              </div>
-            </div>
-            {uploading ? (
-              <div className="space-y-1.5">
-                <p className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                  Mengunggah… {uploadProgress != null ? `${uploadProgress}%` : ""}
-                </p>
-                <div
-                  className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
-                  role="progressbar"
-                  aria-valuenow={uploadProgress ?? 0}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                >
-                  <div
-                    className="h-full rounded-full bg-emerald-600 transition-all"
-                    style={{ width: `${uploadProgress ?? 0}%` }}
-                  />
-                </div>
-              </div>
-            ) : null}
-            {fileError ? <p className="text-sm text-destructive">{fileError}</p> : null}
-            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-              <Button
-                variant="outline"
-                className="h-11 sm:min-w-24"
-                disabled={uploading}
-                onClick={() => setPendingFile(null)}
-              >
-                Batal
-              </Button>
-              <Button
-                className="h-11 bg-emerald-600 text-white hover:bg-emerald-600/90 sm:min-w-28"
-                disabled={uploading}
-                onClick={() => void sendFile()}
-              >
-                {uploading ? (
-                  <>
-                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                    Mengunggah…
-                  </>
-                ) : (
-                  "Kirim"
-                )}
               </Button>
             </div>
           </DialogContent>

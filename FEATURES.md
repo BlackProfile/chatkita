@@ -131,6 +131,13 @@
 - Menu user tetap punya **"Reset tampilan"** (lokal, hanya ukuran huruf & hemat data — bukan data chat).
 - Verifikasi: verify-integrity seksi "v30" (7 cek; 4 cek v29 kedaluwarsa diganti, total 114).
 
+### v31 — UX Lampiran: Preview Inline, Caption Otomatis, Jenis Jelas (Task 50)
+- **Tanpa popup**: memilih video/audio/file tidak lagi membuka dialog "Kirim file" — semua lampiran kini tampil sebagai **chip pratinjau inline** di atas composer, persis seperti foto: video memakai **cuplikan `<video>` hidup**, audio/file memakai ikon jenisnya; nama + ukuran + progres unggah + tombol batal ada di chip.
+- **Teks ikut media**: apa pun yang diketik di composer saat lampiran menunggu ikut terkirim sebagai **caption di pesan yang sama** (tombol kirim maupun Enter — `handleSend` mengirim lampiran dulu); chip foto/video/audio/file semuanya mendukung.
+- **Menu lampiran per jenis**: tombol + memecah satu item generik "Lampirkan foto atau file" menjadi **Foto** (ikon gambar, `image/*`), **Video** (ikon film, `video/*`), **Audio** (ikon musik, `audio/*`), **File** (paperclip, semua) — file picker langsung terfilter sesuai jenis. Berlaku di composer user DAN panel admin.
+- **File audio ≠ voice note**: bubble untuk lampiran audio kini kartu berbeda — ikon musik + nama file + "File audio · ukuran" + **pemutar `<audio>` standar browser** (bisa di-seek) — sementara voice note yang direkam tetap memakai VoicePlayer gelombang + transkrip. (Server sudah benar sejak lama: transkripsi hanya `type='voice'`.)
+- Verifikasi: verify-integrity seksi "v31" (9 cek baru, total 121).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 
