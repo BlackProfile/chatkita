@@ -66,7 +66,7 @@ chk_grep "Form ganti password (dashboard)"   "src/components/chat/admin-dashboar
 chk_grep "Peringatan password bawaan"        "src/components/chat/admin-dashboard.tsx" "Masih memakai password bawaan"
 
 echo "[v24 — Autologin admin + delay sinkronisasi (Task 42)]"
-chk_grep "Peek password (server, tanpa sesi)" "mini-services/chat-service/index.ts" "admin:peek"
+chk_grep "Peek password (server, tanpa sesi)" "mini-services/chat-service/index.ts" "admin:password_peek"
 chk_grep "Rate limit peek admin"              "mini-services/chat-service/index.ts" "ADMIN_PEEK_MAX_PER_SOCKET"
 chk_grep "Autologin admin (efek hijau)"       "src/components/chat/AdminPanel.tsx" "pwCorrect"
 chk_grep "Status sinkronisasi login admin"    "src/components/chat/AdminPanel.tsx" "menyinkronkan database"

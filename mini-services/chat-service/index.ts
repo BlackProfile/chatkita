@@ -86,7 +86,7 @@ import webpush from 'web-push'
 const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
 /** v22 — paket pulihan: bintangi/teruskan/jadwalkan pesan + badge unread.
  *  v23 — custom login admin: password ter-hash di DB + ganti dari dashboard + rate limit.
- *  v24 — autologin admin: event admin:peek (cek password tanpa sesi) untuk UX login otomatis. */
+ *  v24 — autologin admin: event admin:password_peek (cek password tanpa sesi) untuk UX login otomatis. */
 const SERVICE_VERSION = 'v24'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
@@ -430,8 +430,10 @@ const ADMIN_FAIL_MAX_PER_SOCKET = 5
 const adminAuthFails = { windowStart: 0, count: 0 }
 const adminAuthSocketFails = new Map<string, number>()
 
-/** v24 — anti brute-force untuk admin:peek (cek password autologin, tanpa sesi).
- *  Sengaja TERPISAH dari counter admin:auth supaya mengetik bertahap di form
+/** v24 — anti brute-force untuk admin:password_peek (cek password autologin, tanpa sesi).
+ *  CATATAN: JANGAN pakai nama 'admin:peek' — itu event LAMA (v10, peek isi
+ *  percakapan tanpa mark-read). Nama ini sengaja beda supaya tidak tabrakan.
+ *  Counter sengaja TERPISAH dari admin:auth supaya mengetik bertahap di form
  *  autologin tidak mengunci login sungguhan. Tetap dibatasi agar tidak menjadi
  *  celah brute-force: maks 30 gagal/socket/menit + 120 gagal global/menit. */
 const ADMIN_PEEK_WINDOW_MS = 60_000
@@ -2540,8 +2542,9 @@ io.on('connection', (socket) => {
   // lewat event ini (TANPA membuka sesi admin). Ack hanya { ok } — tidak ada
   // data percakapan. Gagal dihitung ke counter peek (terpisah & lebih longgar
   // dari admin:auth) supaya mengetik bertahap tidak memicu RATE_LIMITED login.
+  // NAMA UNIK: 'admin:peek' sudah terpakai event v10 (peek isi percakapan).
   socket.on(
-    'admin:peek',
+    'admin:password_peek',
     handler(socket, (data, ack) => {
       const password = typeof data?.password === 'string' ? data.password : ''
       // Password terpendek yang sah = 6 kar (aturan admin:password_change v23),

@@ -1028,7 +1028,7 @@ export function AdminPanel() {
     peekTimerRef.current = setTimeout(() => {
       const socket = socketRef.current;
       if (!socket) return;
-      socket.emit("admin:peek", { password: pw }, (res: AckOf<AdminPeekAck>) => {
+      socket.emit("admin:password_peek", { password: pw }, (res: AckOf<AdminPeekAck>) => {
         if (res.ok) {
           setPwCorrect(true);
           loginTimerRef.current = setTimeout(() => handleLoginRef.current(), 900);

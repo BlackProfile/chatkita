@@ -74,7 +74,7 @@
 - Uji protokol 8/8 (ganti → login lama gagal → login baru sukses → lemah ditolak → restore). Verifikasi: verify-integrity seksi "v23".
 
 ### v24 — Autologin admin + delay sinkronisasi (Task 42)
-- **Login admin tanpa tombol**: tombol "Masuk" dihapus. Saat mengetik password, form mengecek kebenaran via event BARU `admin:peek` (tanpa membuka sesi, ack hanya `{ ok }`, tidak menyentuh data).
+- **Login admin tanpa tombol**: tombol "Masuk" dihapus. Saat mengetik password, form mengecek kebenaran via event BARU `admin:password_peek` (tanpa membuka sesi, ack hanya `{ ok }`, tidak menyentuh data).
 - **Feedback hijau**: password benar → titik-titik input berubah **hijau** (border + teks emerald) + status "Password benar — menyinkronkan database…" (spinner).
 - **Delay sinkronisasi + autologin**: setelah benar, jeda ±0,9 dtk lalu `admin:auth` dipanggil otomatis. Mengetik lagi membatalkan antrean login. Enter tetap berfungsi.
 - **Rate limit peek terpisah** (30 gagal/socket/menit + 120 gagal global/menit, minimum 6 kar) — mengetik bertahap TIDAK mengunci `admin:auth` (counter v23 tetap ketat).
