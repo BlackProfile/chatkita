@@ -7,7 +7,6 @@ import {
   ArrowRight,
   ChevronUp,
   Clock,
-  Eraser,
   Image as ImageIcon,
   Leaf,
   Loader2,
@@ -93,7 +92,6 @@ import {
   type ChatErrorAck,
   type ChatErrorCode,
   type ChatMessage,
-  type ConversationClearAck,
   type ConversationOverview,
   type ConversationPinnedPayload,
   type ConversationResetPayload,
@@ -626,8 +624,6 @@ export function Messenger() {
   const [schedOpen, setSchedOpen] = useState(false);
   const [schedValue, setSchedValue] = useState("");
   const [cancelSchedId, setCancelSchedId] = useState<number | null>(null);
-  // v29 — konfirmasi bersihkan seluruh riwayat chat sendiri.
-  const [clearChatOpen, setClearChatOpen] = useState(false);
   const { resolvedTheme, setTheme } = useTheme();
 
   /** Bumped on logout to tear down + recreate the socket (fresh rooms). */
@@ -1333,25 +1329,6 @@ export function Messenger() {
         }
       }
     );
-  };
-
-  /* v29 — user membersihkan sendiri seluruh riwayat chatnya. Server menjalankan
-   * pipeline yang sama dengan reset admin lalu mem-broadcast conversation:reset
-   * sehingga tampilan kedua pihak (termasuk AdminPanel) ikut dikosongkan. */
-  const handleClearChat = () => {
-    const socket = socketRef.current;
-    if (!socket || !connected) {
-      toast.error("Koneksi terputus — coba lagi.");
-      return;
-    }
-    socket.emit("conversation:clear", {}, (res: AckOf<ConversationClearAck>) => {
-      if (res.ok) {
-        setClearChatOpen(false);
-        toast.success(`Riwayat chat dibersihkan (${res.cleared} pesan).`);
-      } else {
-        toast.error("Gagal membersihkan riwayat chat.");
-      }
-    });
   };
 
   /* v29 — lepas SEMUA bintang milik saya (panel pesan berbintang). Perubahan
@@ -2150,14 +2127,8 @@ export function Messenger() {
                   </DropdownMenuItem>
                 ))}
                 <DropdownMenuSeparator />
-                {/* v29 — reset/hapus milik user sendiri. */}
-                <DropdownMenuItem
-                  onClick={() => setClearChatOpen(true)}
-                  className="text-destructive focus:text-destructive"
-                >
-                  <Eraser className="mr-2 size-4" aria-hidden="true" />
-                  Bersihkan chat…
-                </DropdownMenuItem>
+                {/* v30 — pembersihan chat kedua sisi hanya oleh ADMIN (panel admin);
+                 * menu user hanya menyediakan reset tampilan lokal. */}
                 <DropdownMenuItem onClick={resetAppearance}>
                   <RotateCcw className="mr-2 size-3.5" aria-hidden="true" />
                   Reset tampilan
@@ -2907,28 +2878,6 @@ export function Messenger() {
           </div>
         </DialogContent>
       </Dialog>
-
-      {/* v29 — konfirmasi membersihkan SELURUH riwayat chat sendiri */}
-      <AlertDialog open={clearChatOpen} onOpenChange={setClearChatOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Bersihkan seluruh riwayat chat?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Semua pesan di percakapan ini akan dihapus dari perangkat Anda dan dari sisi Admin.
-              Media ikut dibebaskan. Tindakan ini tidak dapat dibatalkan.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Batal</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-rose-600 text-white hover:bg-rose-600/90"
-              onClick={handleClearChat}
-            >
-              Ya, bersihkan
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       {/* v22 — konfirmasi ringan pembatalan pesan terjadwal */}
       <AlertDialog

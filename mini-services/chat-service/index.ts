@@ -93,11 +93,14 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        + notifikasi perubahan utk akun lama.
  *  v28 — UX login: public:check_name (cek nama pre-login) supaya kolom kode undangan
  *        otomatis disembunyikan ketika yang mengetik adalah akun yang sudah ada.
- *  v29 — reset & hapus menyeluruh: user bersihkan chat sendiri (conversation:clear),
- *        hapus semua bintang (messages:unstar_all), batalkan semua terjadwal
- *        (messages:schedule_cancel_all), admin hapus akun permanen (admin:user_delete),
- *        hapus kode undangan belum terpakai, bersihkan audit, reset pengaturan default. */
-const SERVICE_VERSION = 'v29'
+ *  v29 — reset & hapus menyeluruh: hapus semua bintang (messages:unstar_all),
+ *        batalkan semua terjadwal (messages:schedule_cancel_all), admin hapus
+ *        akun permanen (admin:user_delete), hapus kode undangan belum terpakai,
+ *        bersihkan audit, reset pengaturan default.
+ *  v30 — bersihkan chat kedua sisi KHUSUS ADMIN: event conversation:clear (user)
+ *        dihapus dari protokol. Satu-satunya jalur menghapus riwayat percakapan
+ *        adalah admin:reset_conversation dari panel admin (audit + broadcast). */
+const SERVICE_VERSION = 'v30'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -2344,8 +2347,8 @@ const tombstoneMessage = (row: MessageRow, conversation: ConversationRow, ts: nu
  * v29 — kosongkan SELURUH pesan satu percakapan memakai pipeline yang sama
  * dengan admin:reset_conversation: batch tombstone (original → deleted_content),
  * bebaskan file media yang tak lagi direferensikan, lalu lepas pin.
- * Return jumlah pesan yang dihapus. Dipakai admin:reset_conversation
- * dan conversation:clear (user membersihkan chat sendiri).
+ * Return jumlah pesan yang dihapus. v30 — dipakai SATU-SATUNYA oleh
+ * admin:reset_conversation (membersihkan chat kedua sisi khusus admin).
  */
 const wipeConversationMessages = (conversation: ConversationRow): number => {
   const rows = db
@@ -4241,45 +4244,6 @@ io.on('connection', (socket) => {
   /* ---------------------------------------------------------------- */
   /* v29 — RESET & HAPUS MENYELURUH                                    */
   /* ---------------------------------------------------------------- */
-
-  /**
-   * v29 — user membersihkan sendiri seluruh riwayat chatnya (paralel
-   * admin:reset_conversation, tapi tanpa conversationId — percakapan
-   * user↔admin otomatis yang dipakai). Pipeline sama persis: tombstone
-   * batch (original tersimpan di deleted_content utk forensik), media
-   * dibebaskan, pin dilepas. Broadcast conversation:reset membawa
-   * `by`/`byName` supaya toast klien tidak selalu menyalahkan admin.
-   */
-  socket.on('conversation:clear', handler(socket, (_data, ack) => {
-    const me = authedUserId(socket)
-    if (!me) {
-      ack({ ok: false, error: 'UNAUTHORIZED' })
-      return
-    }
-    const conv = db
-      .query('SELECT * FROM conversations WHERE user_a_id = ? OR user_b_id = ?')
-      .get(me, me) as ConversationRow | null
-    if (!conv || !isParticipant(conv, me)) {
-      ack({ ok: false, error: 'NOT_FOUND' })
-      return
-    }
-    const cleared = wipeConversationMessages(conv)
-    const payload = {
-      conversationId: conv.id,
-      deletedAt: new Date(now()).toISOString(),
-      deleted: cleared,
-      by: (me === ADMIN_ID ? 'admin' : 'user') as 'admin' | 'user',
-      byName: findUserById(me)?.name ?? 'Pengguna',
-    }
-    io.to(`user:${conv.user_a_id}`).emit('conversation:reset', payload)
-    io.to(`user:${conv.user_b_id}`).emit('conversation:reset', payload)
-    io.to('admins').emit('conversation:reset', payload)
-    pushConversationsTo(conv.user_a_id)
-    pushConversationsTo(conv.user_b_id)
-    audit('user_clear_chat', `${payload.byName}: ${cleared} pesan dibersihkan sendiri`)
-    console.log(`User ${payload.byName} cleared own chat: ${cleared} messages`)
-    ack({ ok: true, cleared })
-  }))
 
   /**
    * v29 — lepas SEMUA bintang milik pemanggil dalam percakapannya

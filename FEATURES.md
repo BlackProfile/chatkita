@@ -124,6 +124,13 @@
   - **Admin: "Kembalikan default"** (tab Pengaturan, zona berbahaya) — `admin:settings:reset` menghapus hanya kunci di `APP_SETTING_RESET_KEYS` (15 kunci perilaku aplikasi); password admin, VAPID, dan kunci internal lain aman.
 - Verifikasi: protokol 36/36 (`.zscripts/t48-test.ts`); verify-integrity seksi "v29" (20 cek baru, total 111).
 
+### v30 — Bersihkan Chat Kedua Sisi Khusus Admin (Task 49)
+- **Aturan baru**: membersihkan riwayat chat yang berdampak ke **kedua sisi** (user + admin) kini **hanya dapat dilakukan oleh ADMIN**.
+- **`conversation:clear` (user) DIHAPUS** dari protokol & server — menu ⋮ user tidak lagi punya item "Bersihkan chat…" (dialog konfirmasinya ikut dihapus; tipe `ConversationClearAck` ditarik dari `chat-types.ts`).
+- **Satu-satunya jalur pembersihan**: tombol **"Reset chat"** di panel admin (sudah ada sejak v11, kini satu-satunya) → `admin:reset_conversation` → pipeline `wipeConversationMessages` (tombstone batch forensik-safe + media dibebaskan + pin dilepas) + broadcast `conversation:reset { by: 'admin', byName: 'Admin' }` + entri audit `reset_conversation`. Dialog konfirmasi menyebut dengan jelas: "SEMUA pesan percakapan ini dihapus permanen untuk kedua sisi".
+- Menu user tetap punya **"Reset tampilan"** (lokal, hanya ukuran huruf & hemat data — bukan data chat).
+- Verifikasi: verify-integrity seksi "v30" (7 cek; 4 cek v29 kedaluwarsa diganti, total 114).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 

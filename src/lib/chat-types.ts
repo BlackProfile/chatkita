@@ -284,13 +284,6 @@ export interface PublicCheckNameAck {
 /* v29 — Reset & hapus menyeluruh                                     */
 /* ------------------------------------------------------------------ */
 
-/** Ack payload returned by `conversation:clear` (user membersihkan chat sendiri). */
-export interface ConversationClearAck {
-  ok: true;
-  /** Jumlah pesan yang ditombstone. */
-  cleared: number;
-}
-
 /** Ack payload returned by `messages:unstar_all` (lepas semua bintang milik saya). */
 export interface UnstarAllAck {
   ok: true;
@@ -1292,12 +1285,10 @@ export interface ConversationResetPayload {
 //                           First-time password setup for legacy accounts.
 //
 // Kategori H — reset & hapus menyeluruh (v29):
-// conversation:clear       {} → ConversationClearAck | ChatErrorAck
-//                           User membersihkan SELURUH riwayat chatnya sendiri
-//                           (pipeline sama dgn admin:reset_conversation:
-//                           tombstone batch + media dibebaskan + pin lepas).
-//                           Broadcast conversation:reset { by, byName } ke kedua
-//                           room + admins (toast klien tahu siapa pembersihnya).
+//                          v30 — conversation:clear (user) DIHAPUS dari protokol;
+//                          membersihkan chat untuk KEDUA SISI hanya dapat
+//                          dilakukan ADMIN via admin:reset_conversation
+//                          (Kategori D) — audit + broadcast conversation:reset.
 // messages:unstar_all      {} → UnstarAllAck | ChatErrorAck
 //                           Lepas semua bintang MILIK pemanggil (starred_by
 //                           per-user); tiap pesan berubah di-broadcast
