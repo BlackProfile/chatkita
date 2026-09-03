@@ -92,8 +92,12 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        (1 perangkat 1 akun) + admin kelola kode/buat akun/reset password/lepas perangkat
  *        + notifikasi perubahan utk akun lama.
  *  v28 — UX login: public:check_name (cek nama pre-login) supaya kolom kode undangan
- *        otomatis disembunyikan ketika yang mengetik adalah akun yang sudah ada. */
-const SERVICE_VERSION = 'v28'
+ *        otomatis disembunyikan ketika yang mengetik adalah akun yang sudah ada.
+ *  v29 — reset & hapus menyeluruh: user bersihkan chat sendiri (conversation:clear),
+ *        hapus semua bintang (messages:unstar_all), batalkan semua terjadwal
+ *        (messages:schedule_cancel_all), admin hapus akun permanen (admin:user_delete),
+ *        hapus kode undangan belum terpakai, bersihkan audit, reset pengaturan default. */
+const SERVICE_VERSION = 'v29'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -581,6 +585,30 @@ const APP_SETTING_LIMITS = {
   maxUploadMb: { min: 1, max: 25 },
   slowmodeSeconds: { min: 0, max: 60 },
 } as const
+
+/**
+ * v29 — kunci pengaturan aplikasi yang DIHAPUS oleh admin:settings:reset
+ * agar kembali ke default. HANYA daftar ini — kunci lain di tabel settings
+ * (hash password admin, vapid%, notice_v27_sent, cheat, keywords, dst.)
+ * TIDAK boleh ikut terhapus.
+ */
+const APP_SETTING_RESET_KEYS = [
+  'appName',
+  'welcomeMessage',
+  'maintenanceMode',
+  'maintenanceNote',
+  'allowRegistration',
+  'maxMessageLength',
+  'maxUploadMb',
+  'allowImages',
+  'allowVoice',
+  'allowFiles',
+  'allowLinks',
+  'linkPreview',
+  'allowReactions',
+  'readReceipts',
+  'slowmodeSeconds',
+] as const
 
 const getNumSetting = (key: string, dflt: number): number => {
   const v = Number(getSetting(key))
@@ -2283,7 +2311,6 @@ const rateRetryAfterSeconds = (userId: string, bucket: string): number => {
 }
 
 /* --------------- v11 — shared delete pipeline (forensics-safe) --------------- */
-
 /**
  * Soft-delete one message with the EXACT existing pipeline, extended for
  * v11 forensics: the original content is preserved in `deleted_content`
@@ -2311,6 +2338,42 @@ const tombstoneMessage = (row: MessageRow, conversation: ConversationRow, ts: nu
   io.to('admins').emit('message:updated', payload)
   pushConversationsTo(conversation.user_a_id)
   pushConversationsTo(conversation.user_b_id)
+}
+
+/**
+ * v29 — kosongkan SELURUH pesan satu percakapan memakai pipeline yang sama
+ * dengan admin:reset_conversation: batch tombstone (original → deleted_content),
+ * bebaskan file media yang tak lagi direferensikan, lalu lepas pin.
+ * Return jumlah pesan yang dihapus. Dipakai admin:reset_conversation
+ * dan conversation:clear (user membersihkan chat sendiri).
+ */
+const wipeConversationMessages = (conversation: ConversationRow): number => {
+  const rows = db
+    .query(
+      'SELECT id, content, thumb_url FROM messages WHERE conversation_id = ? AND deleted_at IS NULL'
+    )
+    .all(conversation.id) as Array<Pick<MessageRow, 'id' | 'content' | 'thumb_url'>>
+  const ts = now()
+  if (rows.length > 0) {
+    // Batched variant of the shared tombstone: originals land in
+    // deleted_content, then everything is redacted in one statement.
+    db.run(
+      `UPDATE messages SET
+         deleted_content = CASE WHEN content != '' THEN content ELSE deleted_content END,
+         content = '', transcript = NULL, file_name = NULL, file_size = NULL, mime_type = NULL,
+         deleted_at = ?
+       WHERE conversation_id = ? AND deleted_at IS NULL`,
+      [ts, conversation.id]
+    )
+    // Free disk media that no live message references anymore.
+    for (const r of rows) {
+      releaseMediaFile(mediaNameOf(r.content))
+      releaseMediaFile(mediaNameOf(r.thumb_url))
+    }
+  }
+  // A wiped conversation has nothing to pin anymore.
+  applyConversationPin(conversation, null)
+  return rows.length
 }
 
 /* ---------------------------- v11 — pin core ---------------------------- */
@@ -4175,6 +4238,213 @@ io.on('connection', (socket) => {
     ack({ ok: true, removed: res.changes })
   }))
 
+  /* ---------------------------------------------------------------- */
+  /* v29 — RESET & HAPUS MENYELURUH                                    */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * v29 — user membersihkan sendiri seluruh riwayat chatnya (paralel
+   * admin:reset_conversation, tapi tanpa conversationId — percakapan
+   * user↔admin otomatis yang dipakai). Pipeline sama persis: tombstone
+   * batch (original tersimpan di deleted_content utk forensik), media
+   * dibebaskan, pin dilepas. Broadcast conversation:reset membawa
+   * `by`/`byName` supaya toast klien tidak selalu menyalahkan admin.
+   */
+  socket.on('conversation:clear', handler(socket, (_data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const conv = db
+      .query('SELECT * FROM conversations WHERE user_a_id = ? OR user_b_id = ?')
+      .get(me, me) as ConversationRow | null
+    if (!conv || !isParticipant(conv, me)) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const cleared = wipeConversationMessages(conv)
+    const payload = {
+      conversationId: conv.id,
+      deletedAt: new Date(now()).toISOString(),
+      deleted: cleared,
+      by: (me === ADMIN_ID ? 'admin' : 'user') as 'admin' | 'user',
+      byName: findUserById(me)?.name ?? 'Pengguna',
+    }
+    io.to(`user:${conv.user_a_id}`).emit('conversation:reset', payload)
+    io.to(`user:${conv.user_b_id}`).emit('conversation:reset', payload)
+    io.to('admins').emit('conversation:reset', payload)
+    pushConversationsTo(conv.user_a_id)
+    pushConversationsTo(conv.user_b_id)
+    audit('user_clear_chat', `${payload.byName}: ${cleared} pesan dibersihkan sendiri`)
+    console.log(`User ${payload.byName} cleared own chat: ${cleared} messages`)
+    ack({ ok: true, cleared })
+  }))
+
+  /**
+   * v29 — lepas SEMUA bintang milik pemanggil dalam percakapannya
+   * (starred_by per-user; bintang pihak lain tidak tersentuh). Tiap pesan
+   * yang berubah di-broadcast message:updated ber-starredBy agar chip
+   * bintang di chat kedua pihak ikut berubah tanpa reload.
+   */
+  socket.on('messages:unstar_all', handler(socket, (_data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const conv = db
+      .query('SELECT * FROM conversations WHERE user_a_id = ? OR user_b_id = ?')
+      .get(me, me) as ConversationRow | null
+    if (!conv || !isParticipant(conv, me)) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const rows = db
+      .query(
+        'SELECT id, starred_by FROM messages WHERE conversation_id = ? AND starred_by IS NOT NULL AND deleted_at IS NULL'
+      )
+      .all(conv.id) as Array<Pick<MessageRow, 'id' | 'starred_by'>>
+    let cleared = 0
+    for (const r of rows) {
+      const list = starredByOf(r.starred_by)
+      if (!list.includes(me)) continue
+      const next = list.filter((x) => x !== me)
+      db.run('UPDATE messages SET starred_by = ? WHERE id = ?', [
+        next.length ? JSON.stringify(next) : null,
+        r.id,
+      ])
+      cleared++
+      const payload = { id: r.id, conversationId: conv.id, starredBy: next }
+      io.to(`user:${conv.user_a_id}`).emit('message:updated', payload)
+      io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
+      io.to('admins').emit('message:updated', payload)
+    }
+    console.log(`User ${me.slice(0, 8)} unstarred all: ${cleared} messages`)
+    ack({ ok: true, cleared })
+  }))
+
+  /**
+   * v29 — batalkan SEMUA pesan terjadwal milik pemanggil yang belum
+   * terkirim (hard delete, sama dengan messages:schedule_cancel per id).
+   */
+  socket.on('messages:schedule_cancel_all', handler(socket, (_data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const rows = db
+      .query(
+        'SELECT id, conversation_id FROM messages WHERE sender_id = ? AND scheduled_at IS NOT NULL AND delivered_at IS NULL'
+      )
+      .all(me) as Array<Pick<MessageRow, 'id' | 'conversation_id'>>
+    for (const r of rows) {
+      db.run('DELETE FROM messages WHERE id = ?', [r.id])
+      const conv = getConversation(r.conversation_id)
+      if (conv) {
+        const payload = { id: r.id, conversationId: conv.id }
+        io.to(`user:${conv.user_a_id}`).emit('message:scheduled_cancelled', payload)
+        io.to(`user:${conv.user_b_id}`).emit('message:scheduled_cancelled', payload)
+        io.to('admins').emit('message:scheduled_cancelled', payload)
+      }
+    }
+    if (rows.length > 0) {
+      console.log(`User ${me.slice(0, 8)} cancelled ${rows.length} scheduled message(s)`)
+    }
+    ack({ ok: true, cancelled: rows.length })
+  }))
+
+  /** v29 — hapus SEMUA kode undangan yang belum terpakai sekali jalan. */
+  socket.on('admin:invites_clear_unused', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    const res = db.run('DELETE FROM invite_codes WHERE used_by IS NULL')
+    audit('invite_clear_unused', `${res.changes} kode belum terpakai dihapus`)
+    console.log(`Admin cleared ${res.changes} unused invite code(s)`)
+    ack({ ok: true, removed: res.changes })
+  }))
+
+  /**
+   * v29 — bersihkan jejak audit. Sengaja tetap menulis SATU entri baru
+   * (audit_clear) setelah hapus supaya selalu ada jejak kapan log dibersihkan.
+   */
+  socket.on('admin:audit_clear', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    const cnt = (db.query('SELECT COUNT(*) AS c FROM audit_log').get() as { c: number }).c
+    db.run('DELETE FROM audit_log')
+    audit('audit_clear', `${cnt} entri log dihapus admin`)
+    console.log(`Admin cleared audit log: ${cnt} entries`)
+    ack({ ok: true, removed: cnt })
+  }))
+
+  /**
+   * v29 — kembalikan SEMUA pengaturan aplikasi ke default (hapus baris
+   * kunci di APP_SETTING_RESET_KEYS; kunci lain — password admin, vapid,
+   * dsb. — tidak tersentuh). Default diterapkan otomatis oleh getAppSettings.
+   */
+  socket.on('admin:settings:reset', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    for (const key of APP_SETTING_RESET_KEYS) {
+      db.run('DELETE FROM settings WHERE key = ?', [key])
+    }
+    broadcastAppSettings()
+    audit('settings_reset', 'pengaturan aplikasi dikembalikan ke default')
+    console.log('Admin reset app settings to defaults')
+    ack({ ok: true, settings: getAppSettings() })
+  }))
+
+  /**
+   * v29 — hapus PERMANEN akun user + seluruh datanya (kebalikan
+   * admin:user_create): pesan & reaksi & reads percakapannya, file media
+   * yang tak lagi direferensikan, percakapan, perangkat, langganan push,
+   * lalu baris user. Socket user langsung diputus. Kode undangan yang
+   * pernah dipakai dibiarkan sebagai catatan sejarah. Akun admin tidak
+   * bisa dihapus lewat event ini.
+   */
+  socket.on('admin:user_delete', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const userId = typeof data?.userId === 'string' ? data.userId : ''
+    const target = userId ? findUserById(userId) : null
+    if (!target || target.role !== 'user') {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    // Putuskan semua socket user lebih dulu (mencegah re-auth selama hapus).
+    io.in(`user:${target.id}`).disconnectSockets(true)
+    const convs = db
+      .query('SELECT * FROM conversations WHERE user_a_id = ? OR user_b_id = ?')
+      .all(target.id, target.id) as ConversationRow[]
+    let deletedMessages = 0
+    for (const conv of convs) {
+      const mediaRows = db
+        .query('SELECT content, thumb_url FROM messages WHERE conversation_id = ?')
+        .all(conv.id) as Array<Pick<MessageRow, 'content' | 'thumb_url'>>
+      db.run(
+        'DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE conversation_id = ?)',
+        [conv.id]
+      )
+      deletedMessages += db.run('DELETE FROM messages WHERE conversation_id = ?', [conv.id]).changes
+      db.run('DELETE FROM reads WHERE conversation_id = ?', [conv.id])
+      db.run('DELETE FROM conversations WHERE id = ?', [conv.id])
+      for (const m of mediaRows) {
+        releaseMediaFile(mediaNameOf(m.content))
+        releaseMediaFile(mediaNameOf(m.thumb_url))
+      }
+    }
+    db.run('DELETE FROM devices WHERE user_id = ?', [target.id])
+    db.run('DELETE FROM push_subscriptions WHERE user_id = ?', [target.id])
+    db.run('DELETE FROM users WHERE id = ?', [target.id])
+    audit(
+      'user_delete',
+      `akun "${target.name}" dihapus permanen (${deletedMessages} pesan, ${convs.length} percakapan)`
+    )
+    console.log(`Admin DELETED user "${target.name}" (${target.id}) — ${deletedMessages} messages`)
+    // Beri tahu semua sesi admin agar overview/dashboard menyegarkan diri.
+    io.to('admins').emit('users:changed', { userId: target.id, removed: true })
+    pushConversationsTo(ADMIN_ID)
+    ack({ ok: true, deletedMessages, conversations: convs.length })
+  }))
+
   /** Full JSON backup (users, conversations, messages, app settings). */
   socket.on('admin:backup', handler(socket, (_data, ack) => {
     if (!adminGuard(ack)) return
@@ -5122,44 +5392,24 @@ io.on('connection', (socket) => {
       ack({ ok: false, error: 'NOT_FOUND' })
       return
     }
-    const rows = db
-      .query(
-        'SELECT id, content, thumb_url FROM messages WHERE conversation_id = ? AND deleted_at IS NULL'
-      )
-      .all(conversation.id) as Array<Pick<MessageRow, 'id' | 'content' | 'thumb_url'>>
+    // v29 — pipeline bersama (tombstone batch + bebaskan media + lepas pin).
+    const cleared = wipeConversationMessages(conversation)
     const ts = now()
-    if (rows.length > 0) {
-      // Batched variant of the shared tombstone: originals land in
-      // deleted_content, then everything is redacted in one statement.
-      db.run(
-        `UPDATE messages SET
-           deleted_content = CASE WHEN content != '' THEN content ELSE deleted_content END,
-           content = '', transcript = NULL, file_name = NULL, file_size = NULL, mime_type = NULL,
-           deleted_at = ?
-         WHERE conversation_id = ? AND deleted_at IS NULL`,
-        [ts, conversation.id]
-      )
-      // Free disk media that no live message references anymore.
-      for (const r of rows) {
-        releaseMediaFile(mediaNameOf(r.content))
-        releaseMediaFile(mediaNameOf(r.thumb_url))
-      }
-    }
-    // A wiped conversation has nothing to pin anymore.
-    applyConversationPin(conversation, null)
     const payload = {
       conversationId: conversation.id,
       deletedAt: new Date(ts).toISOString(),
-      deleted: rows.length,
+      deleted: cleared,
+      by: 'admin' as const,
+      byName: 'Admin',
     }
     io.to(`user:${conversation.user_a_id}`).emit('conversation:reset', payload)
     io.to(`user:${conversation.user_b_id}`).emit('conversation:reset', payload)
     io.to('admins').emit('conversation:reset', payload)
     pushConversationsTo(conversation.user_a_id)
     pushConversationsTo(conversation.user_b_id)
-    audit('reset_conversation', `${conversation.id.slice(0, 8)}: ${rows.length} pesan`)
-    console.log(`Conversation ${conversation.id.slice(0, 8)} reset: ${rows.length} messages`)
-    ack({ ok: true, deleted: rows.length })
+    audit('reset_conversation', `${conversation.id.slice(0, 8)}: ${cleared} pesan`)
+    console.log(`Conversation ${conversation.id.slice(0, 8)} reset: ${cleared} messages`)
+    ack({ ok: true, deleted: cleared })
   }))
 
   socket.on('admin:audit', handler(socket, (data, ack) => {

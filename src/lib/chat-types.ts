@@ -280,6 +280,59 @@ export interface PublicCheckNameAck {
   exists: boolean;
 }
 
+/* ------------------------------------------------------------------ */
+/* v29 — Reset & hapus menyeluruh                                     */
+/* ------------------------------------------------------------------ */
+
+/** Ack payload returned by `conversation:clear` (user membersihkan chat sendiri). */
+export interface ConversationClearAck {
+  ok: true;
+  /** Jumlah pesan yang ditombstone. */
+  cleared: number;
+}
+
+/** Ack payload returned by `messages:unstar_all` (lepas semua bintang milik saya). */
+export interface UnstarAllAck {
+  ok: true;
+  /** Jumlah pesan yang bintangnya dilepas. */
+  cleared: number;
+}
+
+/** Ack payload returned by `messages:schedule_cancel_all`. */
+export interface ScheduleCancelAllAck {
+  ok: true;
+  /** Jumlah pesan terjadwal yang dibatalkan. */
+  cancelled: number;
+}
+
+/** Ack payload returned by `admin:user_delete` (hapus akun permanen). */
+export interface AdminUserDeleteAck {
+  ok: true;
+  deletedMessages: number;
+  conversations: number;
+}
+
+/** Ack payload returned by `admin:invites_clear_unused`. */
+export interface AdminInvitesClearAck {
+  ok: true;
+  /** Jumlah kode belum terpakai yang terhapus. */
+  removed: number;
+}
+
+/** Ack payload returned by `admin:audit_clear`. */
+export interface AdminAuditClearAck {
+  ok: true;
+  /** Jumlah entri log yang terhapus sebelum entri audit_clear ditulis. */
+  removed: number;
+}
+
+/** Ack payload returned by `admin:settings:reset` (kembalikan default). */
+export interface AdminSettingsResetAck {
+  ok: true;
+  /** Nilai default terbaru (hasil getAppSettings setelah penghapusan). */
+  settings: AppSettings;
+}
+
 /** Ack payload returned by `messages:history` (both roles, participant-only). */
 export interface HistoryAck {
   ok: true;
@@ -974,6 +1027,9 @@ export interface ConversationResetPayload {
   conversationId: string;
   deletedAt: string;
   deleted: number;
+  /** v29 — siapa yang membersihkan (toast klien tidak selalu menyalahkan admin). */
+  by?: "admin" | "user";
+  byName?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1234,6 +1290,39 @@ export interface ConversationResetPayload {
 //                           the mandatory password-setup modal.
 // user:set_password        { password } → { ok: true } | ChatErrorAck (ALREADY_SET/WEAK)
 //                           First-time password setup for legacy accounts.
+//
+// Kategori H — reset & hapus menyeluruh (v29):
+// conversation:clear       {} → ConversationClearAck | ChatErrorAck
+//                           User membersihkan SELURUH riwayat chatnya sendiri
+//                           (pipeline sama dgn admin:reset_conversation:
+//                           tombstone batch + media dibebaskan + pin lepas).
+//                           Broadcast conversation:reset { by, byName } ke kedua
+//                           room + admins (toast klien tahu siapa pembersihnya).
+// messages:unstar_all      {} → UnstarAllAck | ChatErrorAck
+//                           Lepas semua bintang MILIK pemanggil (starred_by
+//                           per-user); tiap pesan berubah di-broadcast
+//                           message:updated {starredBy}.
+// messages:schedule_cancel_all {} → ScheduleCancelAllAck | ChatErrorAck
+//                           Batalkan semua pesan terjadwal milik pemanggil
+//                           yang belum terkirim (hard delete + broadcast
+//                           message:scheduled_cancelled per id).
+// admin:user_delete        { userId } → AdminUserDeleteAck | ChatErrorAck
+//                           Hapus PERMANEN akun user: socket diputus, pesan /
+//                           reaksi / reads / percakapan / perangkat / langganan
+//                           push dihapus, media dibebaskan. Broadcast
+//                           users:changed { userId, removed } ke admins.
+// admin:invites_clear_unused {} → AdminInvitesClearAck | ChatErrorAck
+//                           Hapus semua kode undangan yang belum terpakai.
+// admin:audit_clear        {} → AdminAuditClearAck | ChatErrorAck
+//                           Bersihkan audit_log; satu entri audit_clear tetap
+//                           ditulis sebagai jejak pembersihan.
+// admin:settings:reset     {} → AdminSettingsResetAck | ChatErrorAck
+//                           Kembalikan seluruh pengaturan aplikasi ke default
+//                           (hanya kunci APP_SETTING_RESET_KEYS; password
+//                           admin/vapid/notice tidak tersentuh) + broadcast
+//                           app:settings:update.
+// users:changed            (server → admins) { userId, removed: true } — sinyal
+//                           refresh daftar pengguna/overview setelah hapus akun.
 // admin:invite_list        {} → AdminInviteListAck | ChatErrorAck
 // admin:invite_create      { count?, label? } → AdminInviteCreateAck (1–20 codes,
 //                           format CK-XXXXX-XXXX, single-use) | ChatErrorAck

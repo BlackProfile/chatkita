@@ -372,6 +372,9 @@ export function AdminPanel() {
   const handleLoginRef = useRef<() => void>(() => {});
   const ghostRef = useRef(false);
   const activeIdRef = useRef<string | null>(null);
+  // v29 — cermin daftar percakapan utk listener socket (users:changed) agar
+  // tak membaca state basi dari closure mount.
+  const conversationsRef = useRef<ConversationOverview[]>([]);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const partnerTypingTimersRef = useRef<
     Record<string, ReturnType<typeof setTimeout>>
@@ -384,6 +387,11 @@ export function AdminPanel() {
   const menuNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const recorder = useVoiceRecorder();
+
+  // v29 — jaga cermin daftar percakapan utk listener users:changed.
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
 
   // v8 — mode hemat data dibaca sekali saat mount (localStorage).
   useEffect(() => {
@@ -761,19 +769,37 @@ export function AdminPanel() {
           : null,
       }));
     });
-    // v11 — reset chat oleh admin: kosongkan list + sisipkan catatan sistem.
+    // v11 — reset chat (admin / v29 user sendiri): kosongkan list + sisipkan catatan sistem.
     socket.on("conversation:reset", (p: ConversationResetPayload) => {
+      // v29 — toast/catatan sadar-pembersih (user bisa membersihkan chatnya sendiri).
+      const cleaner = p.by === "admin" ? "admin" : (p.byName ?? "pengguna");
       const note: ChatMessage = {
         id: -Date.now(),
         conversationId: p.conversationId,
         senderId: "system",
-        content: `🧹 Riwayat chat dihapus oleh admin (${p.deleted} pesan)`,
+        content: `🧹 Riwayat chat dibersihkan oleh ${cleaner} (${p.deleted} pesan)`,
         createdAt: p.deletedAt,
         type: "system",
       };
       setMessagesMap((prev) => ({ ...prev, [p.conversationId]: [note] }));
       setHasMoreMap((prev) => ({ ...prev, [p.conversationId]: false }));
       setPinnedMap((prev) => ({ ...prev, [p.conversationId]: null }));
+    });
+    // v29 — akun user dihapus permanen (admin:user_delete): buang percakapannya
+    // dari daftar; tutup bila sedang terbuka.
+    socket.on("users:changed", (p: { userId: string; removed: boolean }) => {
+      if (!p?.removed || !p.userId) return;
+      const wasActive = conversationsRef.current.some(
+        (c) => c.id === activeIdRef.current && c.partner.id === p.userId
+      );
+      setConversations((prev) => prev.filter((c) => c.partner.id !== p.userId));
+      if (wasActive) {
+        activeIdRef.current = null;
+        setActiveId(null);
+        setSendError(false);
+        setEditing(null);
+        setUnreadDividerId(null);
+      }
     });
     // v11 — pesan cocok kata terlarang (diam-diam, hanya ke room admins).
     socket.on("admin:flagged", (p: AdminFlaggedPayload) => {

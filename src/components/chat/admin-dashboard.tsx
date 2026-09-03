@@ -30,6 +30,7 @@ import {
   Paperclip,
   PencilLine,
   RefreshCw,
+  RotateCcw,
   Save,
   ScrollText,
   Search,
@@ -78,12 +79,16 @@ import {
 } from "@/lib/chat-utils";
 import type {
   AckOf,
+  AdminAuditClearAck,
   AdminInviteCreateAck,
   AdminInviteListAck,
+  AdminInvitesClearAck,
   AdminPasswordChangeAck,
   AdminResetPasswordAck,
+  AdminSettingsResetAck,
   AdminUnbindDevicesAck,
   AdminUserCreateAck,
+  AdminUserDeleteAck,
   AppSettings,
   AppSettingsAck,
   BackupAck,
@@ -219,6 +224,12 @@ const AUDIT_LABELS: Record<string, string> = {
   user_create: "Buat akun",
   user_reset_password: "Reset password user",
   user_unbind_devices: "Lepas perangkat",
+  // v29 — reset & hapus menyeluruh.
+  user_delete: "Hapus akun permanen",
+  user_clear_chat: "User bersihkan chat",
+  invite_clear_unused: "Hapus kode belum terpakai",
+  audit_clear: "Bersihkan audit log",
+  settings_reset: "Reset pengaturan default",
 };
 
 /** KPI kecil dengan ikon — dipakai di tab Ringkasan. */
@@ -399,6 +410,11 @@ export function AdminDashboard({
   const [inviteLabel, setInviteLabel] = useState("");
   const [inviteBusy, setInviteBusy] = useState(false);
   const [inviteMsg, setInviteMsg] = useState<string | null>(null);
+  // v29 — hapus akun permanen + kembalikan default pengaturan.
+  const [deleteTarget, setDeleteTarget] = useState<DashboardUserRow | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [settingsResetOpen, setSettingsResetOpen] = useState(false);
+  const [settingsResetBusy, setSettingsResetBusy] = useState(false);
 
   const fetchStats = useCallback(() => {
     if (!socket || !socket.connected) return;
@@ -460,6 +476,16 @@ export function AdminDashboard({
     if (!open || tab !== "pengguna") return;
     fetchInvites();
   }, [open, tab]);
+
+  // v29 — akun dihapus dari sesi admin mana pun → segarkan daftar pengguna.
+  useEffect(() => {
+    if (!socket || !open) return;
+    const onChanged = () => fetchStats();
+    socket.on("users:changed", onChanged);
+    return () => {
+      socket.off("users:changed", onChanged);
+    };
+  }, [socket, open, fetchStats]);
 
   /** Admin membuat akun langsung (nama + password). */
   const createUser = () => {
@@ -582,6 +608,64 @@ export function AdminDashboard({
     } catch {
       toast.error("Gagal menyalin kode.");
     }
+  };
+
+  /** v29 — hapus SEMUA kode undangan yang belum terpakai sekali jalan. */
+  const clearUnusedInvites = () => {
+    if (!socket || inviteBusy) return;
+    setInviteBusy(true);
+    socket.emit("admin:invites_clear_unused", {}, (res: AckOf<AdminInvitesClearAck>) => {
+      setInviteBusy(false);
+      if (res.ok) {
+        setInviteMsg(
+          res.removed > 0
+            ? `${res.removed} kode belum terpakai dihapus`
+            : "Tidak ada kode yang belum terpakai."
+        );
+        fetchInvites();
+      } else {
+        setInviteMsg("Gagal menghapus kode.");
+      }
+    });
+  };
+
+  /** v29 — hapus PERMANEN akun user + seluruh datanya. */
+  const submitDeleteUser = () => {
+    if (!socket || !deleteTarget || deleteBusy) return;
+    setDeleteBusy(true);
+    socket.emit(
+      "admin:user_delete",
+      { userId: deleteTarget.id },
+      (res: AckOf<AdminUserDeleteAck>) => {
+        setDeleteBusy(false);
+        if (res.ok) {
+          toast.success(`Akun "${deleteTarget.name}" dihapus permanen`);
+          setDeleteTarget(null);
+          fetchStats();
+        } else {
+          toast.error(
+            res.error === "NOT_FOUND" ? "Akun tidak ditemukan." : "Gagal menghapus akun."
+          );
+        }
+      }
+    );
+  };
+
+  /** v29 — kembalikan seluruh pengaturan aplikasi ke default. */
+  const resetSettingsToDefault = () => {
+    if (!socket || settingsResetBusy) return;
+    setSettingsResetBusy(true);
+    socket.emit("admin:settings:reset", {}, (res: AckOf<AdminSettingsResetAck>) => {
+      setSettingsResetBusy(false);
+      if (res.ok) {
+        setSettings(res.settings);
+        setSettingsResetOpen(false);
+        setSettingsMsg("Pengaturan dikembalikan ke default.");
+        toast.success("Pengaturan dikembalikan ke default");
+      } else {
+        toast.error("Gagal mengembalikan pengaturan.");
+      }
+    });
   };
 
   const runCleanup = () => {
@@ -811,6 +895,14 @@ export function AdminDashboard({
             <DropdownMenuItem onSelect={() => setUnbindTarget(u)}>
               <Smartphone className="size-4" aria-hidden="true" />
               Lepas kunci perangkat
+            </DropdownMenuItem>
+            {/* v29 — hapus permanen akun + seluruh datanya. */}
+            <DropdownMenuItem
+              onSelect={() => setDeleteTarget(u)}
+              className="text-destructive focus:text-destructive"
+            >
+              <Trash2 className="size-4" aria-hidden="true" />
+              Hapus akun…
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -1201,10 +1293,23 @@ export function AdminDashboard({
                   <Badge variant="secondary" className="font-mono text-[10px]">
                     1 kode = 1 akun
                   </Badge>
+                  {/* v29 — semburan semua kode yang belum terpakai. */}
+                  {invites && invites.some((iv) => !iv.usedBy) ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="ml-auto h-7 gap-1.5 px-2 text-[11px] font-medium text-rose-600 hover:bg-rose-500/10 hover:text-rose-600"
+                      disabled={inviteBusy}
+                      onClick={clearUnusedInvites}
+                    >
+                      <Trash2 className="size-3.5" aria-hidden="true" />
+                      Hapus belum terpakai ({invites.filter((iv) => !iv.usedBy).length})
+                    </Button>
+                  ) : null}
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="ml-auto size-7"
+                    className="size-7"
                     onClick={fetchInvites}
                     aria-label="Muat ulang kode undangan"
                   >
@@ -1731,6 +1836,25 @@ export function AdminDashboard({
                 </Button>
               </div>
 
+              {/* v29 — zona berbahaya: kembalikan seluruh pengaturan ke default. */}
+              <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-3">
+                <p className="text-sm font-medium">Kembalikan pengaturan ke default</p>
+                <p className="mb-2 mt-0.5 text-xs text-muted-foreground">
+                  Identitas, akses, batas, fitur, dan pemeliharaan dikembalikan ke nilai
+                  awal. Password admin & undangan push tidak tersentuh.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-9 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  disabled={settingsResetBusy}
+                  onClick={() => setSettingsResetOpen(true)}
+                >
+                  <RotateCcw className="size-4" aria-hidden="true" />
+                  Kembalikan default
+                </Button>
+              </div>
+
               {settingsMsg ? (
                 <p className="flex items-center gap-1 text-xs font-medium text-emerald-600">
                   <Check className="size-3.5" aria-hidden="true" />
@@ -2126,6 +2250,83 @@ export function AdminDashboard({
                   <Loader2 className="size-4 animate-spin" aria-hidden="true" />
                 ) : (
                   "Lepas perangkat"
+                )}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* v29 — konfirmasi hapus PERMANEN akun user + seluruh datanya. */}
+        <Dialog
+          open={!!deleteTarget}
+          onOpenChange={(o) => {
+            if (!o) setDeleteTarget(null);
+          }}
+        >
+          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Trash2 className="size-5 text-destructive" aria-hidden="true" />
+                Hapus akun permanen
+              </DialogTitle>
+              <DialogDescription>
+                Akun <span className="font-semibold">{deleteTarget?.name}</span> beserta
+                SELURUH pesan, media, percakapan, perangkat, dan langganan push-nya akan
+                dihapus permanen dan tidak bisa dikembalikan. Nama akun bebas dipakai
+                lagi setelah ini. Lanjutkan?
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex gap-2">
+              <Button variant="outline" className="h-10 flex-1" onClick={() => setDeleteTarget(null)}>
+                Batal
+              </Button>
+              <Button
+                className="h-10 flex-1 bg-rose-600 text-white hover:bg-rose-600/90"
+                disabled={deleteBusy}
+                onClick={submitDeleteUser}
+              >
+                {deleteBusy ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  "Hapus permanen"
+                )}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* v29 — konfirmasi kembalikan seluruh pengaturan ke default. */}
+        <Dialog open={settingsResetOpen} onOpenChange={setSettingsResetOpen}>
+          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <RotateCcw className="size-5 text-destructive" aria-hidden="true" />
+                Kembalikan pengaturan ke default?
+              </DialogTitle>
+              <DialogDescription>
+                Nama aplikasi, pesan sambutan, mode pemeliharaan, akses (registrasi,
+                media, tautan), batas panjang/unggah/slowmode, dan read receipts
+                dikembalikan ke nilai awal. Password admin, kode undangan, dan data
+                chat TIDAK terpengaruh. Lanjutkan?
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                className="h-10 flex-1"
+                onClick={() => setSettingsResetOpen(false)}
+              >
+                Batal
+              </Button>
+              <Button
+                className="h-10 flex-1 bg-rose-600 text-white hover:bg-rose-600/90"
+                disabled={settingsResetBusy}
+                onClick={resetSettingsToDefault}
+              >
+                {settingsResetBusy ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  "Kembalikan default"
                 )}
               </Button>
             </div>

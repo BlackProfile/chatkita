@@ -112,6 +112,18 @@
 - Lapisan kedua: error `INVALID_PASSWORD` dari `user:auth` (password salah = akun pasti ada) juga memaksa `nameExists = true` — kolom tetap tersembunyi walau cek debounce belum sempat berjalan. Kode undangan yang tertinggal di state otomatis dibersihkan saat `exists`.
 - Verifikasi: verify-integrity seksi "v28" (9 cek baru, total 93).
 
+### v29 — Reset & Hapus Menyeluruh (Task 48)
+- **Semua fitur yang menumpuk data kini punya reset/hapus**, server + UI, dengan konfirmasi:
+  - **User: "Bersihkan chat…"** (menu ⋮) — menghapus SELURUH riwayat percakapan sendiri memakai pipeline yang sama dengan reset admin (`wipeConversationMessages`: tombstone batch forensik-safe + media dibebaskan + pin dilepas). Broadcast `conversation:reset` kini membawa `by`/`byName` sehingga toast/catatan sistem di kedua pihak menyebut siapa pembersihnya (tidak selalu "admin").
+  - **User: "Hapus semua bintang"** (panel pesan berbintang) — `messages:unstar_all`, per-user (`starred_by`): bintang pihak lain tidak tersentuh; tiap pesan berubah di-broadcast.
+  - **User: "Batalkan semua terjadwal (n)"** (dialog kirim terjadwal) — `messages:schedule_cancel_all`, hard delete semua jadwal milik sendiri yang belum terkirim.
+  - **User: "Reset tampilan"** (menu ⋮) — ukuran huruf & hemat data kembali ke default.
+  - **Admin: "Hapus akun…"** (menu ⋯ tab Pengguna) — `admin:user_delete`: hapus PERMANEN akun + seluruh pesan/reaksi/reads/percakapan/perangkat/langganan push (media dibebaskan), socket user langsung diputus, broadcast `users:changed` ke sesi admin lain (dashboard & panel ikut menyegarkan; percakapan aktif tertutup otomatis). Akun admin tak bisa dihapus lewat event ini.
+  - **Admin: "Hapus belum terpakai (n)"** (kartu kode undangan) — `admin:invites_clear_unused`.
+  - **Admin: "Bersihkan log"** (dialog Audit, dua langkah) — `admin:audit_clear`; server tetap menulis SATU entri `audit_clear` sebagai jejak.
+  - **Admin: "Kembalikan default"** (tab Pengaturan, zona berbahaya) — `admin:settings:reset` menghapus hanya kunci di `APP_SETTING_RESET_KEYS` (15 kunci perilaku aplikasi); password admin, VAPID, dan kunci internal lain aman.
+- Verifikasi: protokol 36/36 (`.zscripts/t48-test.ts`); verify-integrity seksi "v29" (20 cek baru, total 111).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 

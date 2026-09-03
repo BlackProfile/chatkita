@@ -32,6 +32,7 @@ import { Label } from "@/components/ui/label";
 import { formatChatTime } from "@/lib/chat-utils";
 import type {
   AckOf,
+  AdminAuditClearAck,
   AuditAck,
   ConversationOverview,
   EditHistoryAck,
@@ -42,6 +43,7 @@ import type {
   SearchAck,
 } from "@/lib/chat-types";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 
 /**
  * v11 — kumpulan dialog "Intelijen & moderasi" admin: forensik (pesan
@@ -572,12 +574,27 @@ const AUDIT_LABELS: Record<string, string> = {
   mirror: "Mode cermin",
   quick_replies: "Balasan cepat",
   keywords: "Kata terlarang",
+  // v29 — reset & hapus menyeluruh.
+  user_delete: "Hapus akun permanen",
+  user_clear_chat: "User bersihkan chat",
+  invite_clear_unused: "Hapus kode belum terpakai",
+  audit_clear: "Bersihkan audit log",
+  settings_reset: "Reset pengaturan default",
 };
 
 function AuditIcon({ action, className }: { action: string; className?: string }) {
   const cls = className ?? "size-3.5";
   if (
-    ["freeze", "mute", "slowmode", "mediablock", "kick", "delete_message", "reset_conversation"].includes(action)
+    [
+      "freeze",
+      "mute",
+      "slowmode",
+      "mediablock",
+      "kick",
+      "delete_message",
+      "reset_conversation",
+      "user_delete",
+    ].includes(action)
   ) {
     return <ShieldAlert className={cn(cls, "text-rose-500")} aria-hidden="true" />;
   }
@@ -606,16 +623,38 @@ export function AuditLogDialog({
   socket: Socket | null;
 }) {
   const [items, setItems] = useState<AuditAck["items"] | null>(null);
+  // v29 — konfirmasi dua-langkah pembersihan log (tanpa dialog bertumpuk).
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearing, setClearing] = useState(false);
+
+  const refetch = () => {
+    if (!socket) return;
+    socket.emit("admin:audit", { limit: 100 }, (res: AckOf<AuditAck>) => {
+      if (res.ok) setItems(res.items);
+    });
+  };
 
   useEffect(() => {
     if (!open || !socket) return;
-    const t = setTimeout(() => {
-      socket.emit("admin:audit", { limit: 100 }, (res: AckOf<AuditAck>) => {
-        if (res.ok) setItems(res.items);
-      });
-    }, 0);
+    const t = setTimeout(refetch, 0);
     return () => clearTimeout(t);
   }, [open, socket]);
+
+  /** v29 — bersihkan seluruh jejak audit (server tetap mencatat pembersihan ini). */
+  const clearAudit = () => {
+    if (!socket || clearing) return;
+    setClearing(true);
+    socket.emit("admin:audit_clear", {}, (res: AckOf<AdminAuditClearAck>) => {
+      setClearing(false);
+      setConfirmClear(false);
+      if (res.ok) {
+        toast.success(res.removed > 0 ? `${res.removed} entri log dihapus` : "Log sudah kosong");
+        refetch();
+      } else {
+        toast.error("Gagal membersihkan log.");
+      }
+    });
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -629,6 +668,45 @@ export function AuditLogDialog({
             100 aksi admin terbaru (terbaru dulu) — tercatat otomatis di server.
           </DialogDescription>
         </DialogHeader>
+        {/* v29 — bersihkan seluruh log sekali jalan (dua langkah). */}
+        <div className="flex justify-end">
+          {confirmClear ? (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">Hapus semua entri log?</span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                onClick={() => setConfirmClear(false)}
+              >
+                Batal
+              </Button>
+              <Button
+                size="sm"
+                className="h-7 gap-1 bg-rose-600 text-xs text-white hover:bg-rose-600/90"
+                disabled={clearing}
+                onClick={clearAudit}
+              >
+                {clearing ? (
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Trash2 className="size-3.5" aria-hidden="true" />
+                )}
+                Ya, hapus
+              </Button>
+            </div>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1.5 text-xs font-medium text-rose-600 hover:bg-rose-500/10 hover:text-rose-600"
+              onClick={() => setConfirmClear(true)}
+            >
+              <Trash2 className="size-3.5" aria-hidden="true" />
+              Bersihkan log
+            </Button>
+          )}
+        </div>
         {items === null ? (
           <p className="py-10 text-center text-sm text-muted-foreground">Memuat…</p>
         ) : items.length === 0 ? (

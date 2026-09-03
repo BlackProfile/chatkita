@@ -7,6 +7,7 @@ import {
   ArrowRight,
   ChevronUp,
   Clock,
+  Eraser,
   Image as ImageIcon,
   Leaf,
   Loader2,
@@ -18,12 +19,14 @@ import {
   Paperclip,
   Pin,
   Plus,
+  RotateCcw,
   Search,
   SendHorizonal,
   ShieldCheck,
   Smile,
   Star,
   Sun,
+  Trash2,
   Type,
   X,
   type LucideIcon,
@@ -90,19 +93,23 @@ import {
   type ChatErrorAck,
   type ChatErrorCode,
   type ChatMessage,
+  type ConversationClearAck,
   type ConversationOverview,
   type ConversationPinnedPayload,
   type ConversationResetPayload,
   type HistoryAck,
   type MessageAck,
+  type MessageStarAck,
   type MessageUpdatePayload,
   type OlderMessagesAck,
   type PartnerInfo,
   type PinUpdatePayload,
   type PublicCheckNameAck,
   type PublicSettingsAck,
+  type ScheduleCancelAllAck,
   type SetPinAck,
   type TranslateAck,
+  type UnstarAllAck,
   type UserAuthAck,
   type UserRestrictedPayload,
   type UserSetPasswordAck,
@@ -583,6 +590,12 @@ export function Messenger() {
   // + index item yang dibuka → navigasi geser/panah/chevron di viewer.
   const [viewer, setViewer] = useState<ViewerState | null>(null);
   const mediaGallery = useMemo(() => buildMediaGallery(messages), [messages]);
+  // v29 — jumlah pesan terjadwal milik saya yang belum terkirim (field
+  // scheduledAt hanya ada selama belum delivered → cocok utk chip ⏰).
+  const pendingScheduledCount = useMemo(
+    () => messages.filter((m) => m.senderId === me?.userId && m.scheduledAt).length,
+    [messages, me?.userId]
+  );
 
   // Web Push VAPID public key (null = push unavailable).
   const [pushPublicKey, setPushPublicKey] = useState<string | null>(null);
@@ -613,6 +626,8 @@ export function Messenger() {
   const [schedOpen, setSchedOpen] = useState(false);
   const [schedValue, setSchedValue] = useState("");
   const [cancelSchedId, setCancelSchedId] = useState<number | null>(null);
+  // v29 — konfirmasi bersihkan seluruh riwayat chat sendiri.
+  const [clearChatOpen, setClearChatOpen] = useState(false);
   const { resolvedTheme, setTheme } = useTheme();
 
   /** Bumped on logout to tear down + recreate the socket (fresh rooms). */
@@ -786,14 +801,16 @@ export function Messenger() {
           : null
       );
     });
-    // v11 — reset chat oleh admin: kosongkan pesan + sisipkan catatan sistem.
+    // v11 — reset chat (admin / v29 user sendiri): kosongkan pesan + sisipkan catatan sistem.
     socket.on("conversation:reset", (p: ConversationResetPayload) => {
       if (p.conversationId !== conversationIdRef.current) return;
+      // v29 — toast sadar-pembersih: bukan selalu admin (user bisa membersihkan sendiri).
+      const cleaner = p.by === "admin" ? "admin" : (p.byName ?? "pengguna lain");
       const note: ChatMessage = {
         id: -Date.now(),
         conversationId: p.conversationId,
         senderId: "system",
-        content: `🧹 Riwayat chat dihapus oleh admin (${p.deleted} pesan)`,
+        content: `🧹 Riwayat chat dibersihkan oleh ${cleaner} (${p.deleted} pesan)`,
         createdAt: p.deletedAt,
         type: "system",
       };
@@ -1316,6 +1333,74 @@ export function Messenger() {
         }
       }
     );
+  };
+
+  /* v29 — user membersihkan sendiri seluruh riwayat chatnya. Server menjalankan
+   * pipeline yang sama dengan reset admin lalu mem-broadcast conversation:reset
+   * sehingga tampilan kedua pihak (termasuk AdminPanel) ikut dikosongkan. */
+  const handleClearChat = () => {
+    const socket = socketRef.current;
+    if (!socket || !connected) {
+      toast.error("Koneksi terputus — coba lagi.");
+      return;
+    }
+    socket.emit("conversation:clear", {}, (res: AckOf<ConversationClearAck>) => {
+      if (res.ok) {
+        setClearChatOpen(false);
+        toast.success(`Riwayat chat dibersihkan (${res.cleared} pesan).`);
+      } else {
+        toast.error("Gagal membersihkan riwayat chat.");
+      }
+    });
+  };
+
+  /* v29 — lepas SEMUA bintang milik saya (panel pesan berbintang). Perubahan
+   * per-pesan di-broadcast server, daftar panel dikosongkan lokal. */
+  const handleUnstarAll = () => {
+    const socket = socketRef.current;
+    if (!socket || !connected) {
+      toast.error("Koneksi terputus — coba lagi.");
+      return;
+    }
+    socket.emit("messages:unstar_all", {}, (res: AckOf<UnstarAllAck>) => {
+      if (res.ok) {
+        setStarredList([]);
+        toast.success(
+          res.cleared > 0 ? `${res.cleared} bintang dihapus.` : "Tidak ada bintang milik Anda."
+        );
+      } else {
+        toast.error("Gagal menghapus bintang.");
+      }
+    });
+  };
+
+  /* v29 — batalkan SEMUA pesan terjadwal milik saya yang belum terkirim. */
+  const handleCancelAllScheduled = () => {
+    const socket = socketRef.current;
+    if (!socket || !connected) {
+      toast.error("Koneksi terputus — coba lagi.");
+      return;
+    }
+    socket.emit("messages:schedule_cancel_all", {}, (res: AckOf<ScheduleCancelAllAck>) => {
+      if (res.ok) {
+        toast.success(
+          res.cancelled > 0
+            ? `${res.cancelled} pesan terjadwal dibatalkan.`
+            : "Tidak ada pesan terjadwal."
+        );
+      } else {
+        toast.error("Gagal membatalkan pesan terjadwal.");
+      }
+    });
+  };
+
+  /* v29 — reset tampilan ke default: ukuran huruf sedang + hemat data nonaktif. */
+  const resetAppearance = () => {
+    setFontScale("md");
+    saveFontScale("md");
+    setDataSaver(false);
+    saveDataSaver(false);
+    toast.success("Tampilan dikembalikan ke default.");
   };
 
   /* v22 — fetch daftar pesan berbintang percakapan ini (tiap panel dibuka). */
@@ -2065,6 +2150,19 @@ export function Messenger() {
                   </DropdownMenuItem>
                 ))}
                 <DropdownMenuSeparator />
+                {/* v29 — reset/hapus milik user sendiri. */}
+                <DropdownMenuItem
+                  onClick={() => setClearChatOpen(true)}
+                  className="text-destructive focus:text-destructive"
+                >
+                  <Eraser className="mr-2 size-4" aria-hidden="true" />
+                  Bersihkan chat…
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={resetAppearance}>
+                  <RotateCcw className="mr-2 size-3.5" aria-hidden="true" />
+                  Reset tampilan
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onClick={handleLogout}
                   className="text-destructive focus:text-destructive"
@@ -2716,6 +2814,18 @@ export function Messenger() {
             >
               Jadwalkan
             </Button>
+            {/* v29 — batalkan semua jadwal milik saya sekali jalan. */}
+            {pendingScheduledCount > 0 ? (
+              <Button
+                variant="outline"
+                className="h-9 w-full rounded-lg text-xs font-medium text-rose-600 hover:bg-rose-500/10 hover:text-rose-600"
+                disabled={!connected}
+                onClick={handleCancelAllScheduled}
+              >
+                <Trash2 className="mr-1.5 size-3.5" aria-hidden="true" />
+                Batalkan semua terjadwal ({pendingScheduledCount})
+              </Button>
+            ) : null}
           </div>
         </DialogContent>
       </Dialog>
@@ -2738,6 +2848,21 @@ export function Messenger() {
               Pesan yang Anda bintangi di percakapan ini.
             </DialogDescription>
           </DialogHeader>
+          {/* v29 — hapus semua bintang milik saya sekali jalan. */}
+          {starredVisible.length > 0 ? (
+            <div className="flex justify-end">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 text-xs font-medium text-rose-600 hover:bg-rose-500/10 hover:text-rose-600"
+                disabled={!connected}
+                onClick={handleUnstarAll}
+              >
+                <Trash2 className="size-3.5" aria-hidden="true" />
+                Hapus semua bintang
+              </Button>
+            </div>
+          ) : null}
           <div className="chat-scroll max-h-96 space-y-1.5 overflow-y-auto">
             {starredLoading ? (
               <p className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
@@ -2782,6 +2907,28 @@ export function Messenger() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* v29 — konfirmasi membersihkan SELURUH riwayat chat sendiri */}
+      <AlertDialog open={clearChatOpen} onOpenChange={setClearChatOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Bersihkan seluruh riwayat chat?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Semua pesan di percakapan ini akan dihapus dari perangkat Anda dan dari sisi Admin.
+              Media ikut dibebaskan. Tindakan ini tidak dapat dibatalkan.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Batal</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-rose-600 text-white hover:bg-rose-600/90"
+              onClick={handleClearChat}
+            >
+              Ya, bersihkan
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* v22 — konfirmasi ringan pembatalan pesan terjadwal */}
       <AlertDialog
