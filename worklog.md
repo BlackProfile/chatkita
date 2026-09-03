@@ -1110,3 +1110,21 @@ Work Log:
 
 Stage Summary:
 - Task 51 SELESAI: tautan di pesan kini berperilaku seperti chat modern — SEMUA URL di teks maupun caption otomatis jadi tautan yang bisa diklik dan TERBUKA LANGSUNG di tab baru dalam SATU ketukan; kartu pratinjau tidak lagi memaksa lewat popup dialog (Dialog in-app dihapus total). Simetris untuk user & admin, aman (noopener noreferrer), tanpa mengganggu baris aksi bubble. Verify 128/128, lint 0/0, E2E desktop+admin+mobile 0 error, data uji bersih. GitHub sinkron (bcb833b + rescue-v32).
+---
+Task ID: 52
+Agent: Z.ai Code (main)
+Task: "popupnya ga muncul, otomatis terbuka ke platform yang dituju, dan tolong tambahkan thumbnail di blank hitam itu" — v33: thumbnail YouTube di kartu pratinjau tautan
+
+Work Log:
+- Konteks: konfirmasi perilaku v32 (popup tak muncul, link langsung terbuka ke platform tujuan) + keluhan kartu pratinjau YouTube tampil KOTAK HITAM kosong (fallback ikon ▶) tanpa judul (screenshot user: link youtu.be/f2xPTgQ1J_g?si=…).
+- Akar masalah: route /api/link-preview mengambil halaman YouTube sebagai bot → YouTube menyerahkan halaman persetujuan cookie TANPA og:image/og:title → parse OG kosong → PreviewThumb jatuh ke tile fallback. Curl awal: ok:true tapi hanya provider+videoId.
+- Solusi (src/app/api/link-preview/route.ts): seksi "Enrichment khusus provider (v33)" — (1) `enrichProviderMedia`: YouTube+videoId → image diisi CDN statis `https://i.ytimg.com/vi/<id>/hqdefault.jpg` (tanpa API key, selalu ada utk video valid, dimuat browser user); judul+penulis kanal dari oEmbed YouTube (`youtube.com/oembed`, timeout 4 s) bila OG kosong; TikTok → judul+thumbnail via oEmbed TikTok (best-effort); semua gagal = diam. (2) `providerFallback`: bila fetch halaman GAGAL total (upstream-X/not-html/empty-body/timeout/fetch-failed), YouTube tetap diberi kartu minimal (videoId diketahui dari URL, termasuk youtu.be pendek) alih-alih kartu menghilang; (3) helper `fetchJson` (timeout pendek, silent null); detectProvider dipanggil SEBELUM fetch untuk fallback.
+- Uji keterjangkauan: i.ytimg.com/vi/f2xPTgQ1J_g/hqdefault.jpg = 200 image/jpeg; youtube oembed = JSON judul asli; tiktok oembed = 302 (diikuti redirect).
+- Versioning: SERVICE_VERSION v32→v33 + changelog, RESCUE_TAG → rescue-v33, verify-integrity + seksi v33 (7 cek: i.ytimg, oembed youtube, oembed tiktok, providerFallback, enrichProviderMedia, versi, rescue) — 2 cek versi v32 dipindah → 133/133 PASS. FEATURES.md +seksi v33 (chmod 644). Lint 0/0. Cold restart → "chat-service v33 listening on port 3003".
+- Commit 5493a4d + tag rescue-v33 (push origin ok setelah retry — push gabungan tag+main sempat ditolak remote, push ulang tag sukses).
+- API dgn URL persis user: ok:true, title "HOROR! ROMBONGAN INI TERSESAT DAN MASUK KE MASJID KOSONG TENGAH HUTAN CIREBON - BANDUNG #OMMAMAT", image i.ytimg.com/vi/f2xPTgQ1J_g/hqdefault.jpg, siteName "RJL 5 - Fajar Aditya".
+- E2E agent-browser (t52, :81, fixture UjiBrowser52/uji52): kirim "Nonton ini, seram bener <URL user>" → kartu pratinjau: img src=i.ytimg.com LOADED 480x360 (naturalWidth>0), judul asli video tampil, pill "▶ YouTube" + "RJL 5 - Fajar Aditya", anchor href youtube watch, dialog=false, URL teks bergaris bawah ✓. Console 0 error (screenshot /tmp/t52-thumbnail.png).
+- Cleanup: UjiBrowser52 + percakapan dihapus; users kembali 5 asli; allowRegistration='0'; jejak uji 0 (t52-verify-clean.ts).
+
+Stage Summary:
+- Task 52 SELESAI: kartu pratinjau tautan YouTube kini menampilkan THUMBNAIL ASLI video (dari CDN statis i.ytimg.com) + judul video + nama kanal — kotak hitam kosong tidak ada lagi; kartu tetap muncul bahkan saat halaman YouTube diblokir bot (providerFallback); TikTok ikut di-enrich. Perilaku buka-langsung-tanpa-popup dari v32 dipertahankan. Verify 133/133, lint 0/0, E2E 0 error, data uji bersih. GitHub sinkron (5493a4d + rescue-v33).
