@@ -98,7 +98,6 @@ chk_grep "Tombol Pindai metadata (UI)"        "src/components/chat/admin-storage
 chk_grep "Tab Penyimpanan di dashboard"       "src/components/chat/admin-dashboard.tsx" "| \"penyimpanan\""
 
 echo "[v27 — 1 orang 1 akun (Task 46)]"
-chk_grep "Versi service v27"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v27'"
 chk_grep "Kolom password_hash (migrasi)"      "mini-services/chat-service/index.ts" "addColumn('users', 'password_hash', 'TEXT')"
 chk_grep "Tabel perangkat (kunci 1 perangkat)" "mini-services/chat-service/index.ts" "CREATE TABLE IF NOT EXISTS devices"
 chk_grep "Tabel kode undangan"                "mini-services/chat-service/index.ts" "CREATE TABLE IF NOT EXISTS invite_codes"
@@ -123,7 +122,17 @@ chk_grep "Aksi reset password (dashboard)"    "src/components/chat/admin-dashboa
 chk_grep "Aksi lepas perangkat (dashboard)"   "src/components/chat/admin-dashboard.tsx" "admin:user_unbind_devices"
 chk_grep "Tipe InviteCodeInfo"                "src/lib/chat-types.ts" "InviteCodeInfo"
 chk_grep "Kode error baru (union)"            "src/lib/chat-types.ts" "| \"DEVICE_TAKEN\""
-chk_grep "Rescue tag v27"                     "src/instrumentation.ts" "rescue-v27"
+
+echo "[v28 — Sembunyikan kode undangan utk akun lama (Task 47)]"
+chk_grep "Versi service v28"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v28'"
+chk_grep "Event cek nama pre-login (server)"  "mini-services/chat-service/index.ts" "public:check_name"
+chk_grep "Reserved Admin dianggap exists"     "mini-services/chat-service/index.ts" "ADMIN_NAME.toLowerCase() ||"
+chk_grep "Tipe PublicCheckNameAck"            "src/lib/chat-types.ts" "PublicCheckNameAck"
+chk_grep "Debounce cek nama (UI)"             "src/components/chat/Messenger.tsx" "public:check_name"
+chk_grep "Sembunyikan kode bila akun ada"     "src/components/chat/Messenger.tsx" "nameExists !== true"
+chk_grep "Hint akun ditemukan (UI)"           "src/components/chat/Messenger.tsx" "Akun ditemukan"
+chk_grep "Sinyal INVALID_PASSWORD (UI)"       "src/components/chat/Messenger.tsx" "setNameExists(true)"
+chk_grep "Rescue tag v28"                     "src/instrumentation.ts" "rescue-v28"
 
 echo ""
 echo "== Versi server terdaftar =="

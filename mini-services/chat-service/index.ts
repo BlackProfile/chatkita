@@ -90,8 +90,10 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *  v26 — peta penyimpanan: metadata media (dimensi/durasi/halaman) + admin:storage_map + admin:media_scan.
  *  v27 — 1 orang 1 akun: password wajib (bcrypt) + kode undangan sekali pakai + kunci perangkat
  *        (1 perangkat 1 akun) + admin kelola kode/buat akun/reset password/lepas perangkat
- *        + notifikasi perubahan utk akun lama. */
-const SERVICE_VERSION = 'v27'
+ *        + notifikasi perubahan utk akun lama.
+ *  v28 — UX login: public:check_name (cek nama pre-login) supaya kolom kode undangan
+ *        otomatis disembunyikan ketika yang mengetik adalah akun yang sudah ada. */
+const SERVICE_VERSION = 'v28'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -2630,6 +2632,22 @@ io.on('connection', (socket) => {
     // is unavailable). v10 — also carries the public app settings so the
     // login card can show the app name + maintenance notice.
     ack({ ok: true, pushPublicKey: VAPID_PUBLIC, app: getAppSettings() })
+  }))
+
+  /* v28 — cek nama pre-login (tanpa sesi): "apakah nama ini sudah dipakai
+   * akun?" Dipakai kartu login utk menyembunyikan kolom kode undangan saat
+   * user lama masuk (kode undangan hanya utk pendaftaran akun baru).
+   * Kebocoran informasi sengaja dibatasi: hanya boolean exists — sinyal yang
+   * sama yang sudah diberikan pesan error login (PASSWORD_REQUIRED dsb).
+   * Nama reserved "Admin" dianggap exists (tidak bisa didaftarkan). */
+  socket.on('public:check_name', handler(socket, (data, ack) => {
+    const name = typeof data?.name === 'string' ? data.name.trim() : ''
+    const exists =
+      name.length >= 1 &&
+      name.length <= MAX_NAME_LENGTH &&
+      (name.toLowerCase() === ADMIN_NAME.toLowerCase() ||
+        !!findUserByRoleAndName(name, 'user'))
+    ack({ ok: true, exists })
   }))
 
   /* ---------------------------- auth ---------------------------- */

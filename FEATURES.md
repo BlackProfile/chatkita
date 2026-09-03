@@ -106,6 +106,12 @@
 - Semua aksi admin di-audit (`invite_create/invite_delete/user_create/user_reset_password/user_unbind_devices`).
 - Verifikasi: verify-integrity seksi "v27" (26 cek baru, total 86).
 
+### v28 — Sembunyikan Kode Undangan untuk Akun Lama (Task 47)
+- **Masalah**: kartu login selalu menampilkan kolom "Kode undangan" padahal field itu hanya relevan untuk pendaftaran akun baru — user lama yang sekadar masuk ikut melihatnya (membingungkan).
+- **Solusi**: event pre-login baru **`public:check_name`** `{ name }` → `{ ok, exists }` (boolean saja, case-insensitive, role `user`; nama reserved "Admin" dianggap exists). Klien mengetik nama → **debounce 300 ms** → cek ke server → `exists = true` → **kolom kode undangan disembunyikan** + hint hijau kecil "Akun ditemukan — kode undangan tidak diperlukan untuk masuk." + label nama berubah dari "Nama baru" → "Nama akun". Nama dikosongkan → kolom muncul lagi.
+- Lapisan kedua: error `INVALID_PASSWORD` dari `user:auth` (password salah = akun pasti ada) juga memaksa `nameExists = true` — kolom tetap tersembunyi walau cek debounce belum sempat berjalan. Kode undangan yang tertinggal di state otomatis dibersihkan saat `exists`.
+- Verifikasi: verify-integrity seksi "v28" (9 cek baru, total 93).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 

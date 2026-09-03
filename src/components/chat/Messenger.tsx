@@ -99,6 +99,7 @@ import {
   type OlderMessagesAck,
   type PartnerInfo,
   type PinUpdatePayload,
+  type PublicCheckNameAck,
   type PublicSettingsAck,
   type SetPinAck,
   type TranslateAck,
@@ -545,6 +546,9 @@ export function Messenger() {
   const [inviteCode, setInviteCode] = useState("");
   const [pwModalOpen, setPwModalOpen] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  // v28 — hasil cek nama pre-login: true = akun sudah ada → kolom kode
+  // undangan disembunyikan (hanya relevan utk pendaftaran akun baru).
+  const [nameExists, setNameExists] = useState<boolean | null>(null);
   const [input, setInput] = useState("");
   const [sendError, setSendError] = useState(false);
 
@@ -623,6 +627,8 @@ export function Messenger() {
   const atBottomRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const translatingIdRef = useRef<number | null>(null);
+  // v28 — penanda urutan respons cek nama (buang respons kedaluwarsa).
+  const nameCheckSeqRef = useRef(0);
 
   const recorder = useVoiceRecorder();
 
@@ -953,6 +959,36 @@ export function Messenger() {
     document.title = unread > 0 ? `(${unread}) ChatKita` : "ChatKita — Chat Sederhana";
   }, [unread]);
 
+  /* v28 — cek nama pre-login (debounce 300 ms): akun sudah ada → sembunyikan
+   * kolom kode undangan (kode hanya utk pendaftaran akun baru). Nama kosong
+   * mengembalikan status netral (kolom tampil lagi). */
+  useEffect(() => {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      nameCheckSeqRef.current += 1;
+      setNameExists(null);
+      return;
+    }
+    const seq = ++nameCheckSeqRef.current;
+    const timer = window.setTimeout(() => {
+      const socket = socketRef.current;
+      if (!socket || !connected) return;
+      socket.emit(
+        "public:check_name",
+        { name: trimmed },
+        (res: AckOf<PublicCheckNameAck>) => {
+          if (seq !== nameCheckSeqRef.current) return; // respons kedaluwarsa
+          if (res.ok) {
+            setNameExists(res.exists);
+            // Kode yang tersisa tak relevan utk login akun lama.
+            if (res.exists) setInviteCode("");
+          }
+        }
+      );
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [name, connected]);
+
   /* ---------------------------------------------------------------- */
   /* Actions                                                           */
   /* ---------------------------------------------------------------- */
@@ -1023,6 +1059,9 @@ export function Messenger() {
               );
               return;
             }
+            // v28 — password salah berarti akunnya ada → pastikan kolom kode
+            // undangan tersembunyi (cek debounce mungkin belum sempat jalan).
+            if (res.error === "INVALID_PASSWORD") setNameExists(true);
             // v27 — sesi lanjutan ditolak server (perangkat terikat akun lain)
             // → pindah ke mode isi nama dan minta password.
             if (
@@ -1711,7 +1750,12 @@ export function Messenger() {
                       htmlFor="messenger-name"
                       className="text-emerald-950/80 dark:text-emerald-100/70"
                     >
-                      {lastName ? "Nama baru" : "Nama Anda"}
+                      {/* v28 — nama yang sudah terdaftar bukan "nama baru" lagi. */}
+                      {nameExists === true
+                        ? "Nama akun"
+                        : lastName
+                          ? "Nama baru"
+                          : "Nama Anda"}
                     </Label>
                     <Input
                       id="messenger-name"
@@ -1747,30 +1791,40 @@ export function Messenger() {
                         setAuthError(null);
                       }}
                     />
+                    {/* v28 — umpan balik cek nama: akun lama tidak perlu kode. */}
+                    {nameExists === true ? (
+                      <p className="text-xs font-medium text-emerald-700/85 dark:text-emerald-300/60">
+                        Akun ditemukan — kode undangan tidak diperlukan untuk masuk.
+                      </p>
+                    ) : null}
                   </div>
-                  <div className="space-y-2">
-                    <Label
-                      htmlFor="messenger-invite"
-                      className="text-emerald-950/80 dark:text-emerald-100/70"
-                    >
-                      Kode undangan{" "}
-                      <span className="font-normal text-emerald-900/45 dark:text-emerald-100/35">
-                        (hanya untuk daftar akun baru)
-                      </span>
-                    </Label>
-                    <Input
-                      id="messenger-invite"
-                      value={inviteCode}
-                      maxLength={20}
-                      placeholder="cth. CK-ABC12-3456"
-                      autoCapitalize="characters"
-                      className="h-12 rounded-xl border-emerald-900/10 bg-white/70 font-mono uppercase tracking-wider dark:border-white/10 dark:bg-white/5"
-                      onChange={(e) => {
-                        setInviteCode(e.target.value.toUpperCase());
-                        setAuthError(null);
-                      }}
-                    />
-                  </div>
+                  {/* v28 — kode undangan HANYA untuk pendaftaran akun baru:
+                      disembunyikan begitu nama terdeteksi milik akun yang ada. */}
+                  {nameExists !== true ? (
+                    <div className="space-y-2">
+                      <Label
+                        htmlFor="messenger-invite"
+                        className="text-emerald-950/80 dark:text-emerald-100/70"
+                      >
+                        Kode undangan{" "}
+                        <span className="font-normal text-emerald-900/45 dark:text-emerald-100/35">
+                          (hanya untuk daftar akun baru)
+                        </span>
+                      </Label>
+                      <Input
+                        id="messenger-invite"
+                        value={inviteCode}
+                        maxLength={20}
+                        placeholder="cth. CK-ABC12-3456"
+                        autoCapitalize="characters"
+                        className="h-12 rounded-xl border-emerald-900/10 bg-white/70 font-mono uppercase tracking-wider dark:border-white/10 dark:bg-white/5"
+                        onChange={(e) => {
+                          setInviteCode(e.target.value.toUpperCase());
+                          setAuthError(null);
+                        }}
+                      />
+                    </div>
+                  ) : null}
                   {needsPin ? (
                     <div className="space-y-2">
                       <Label

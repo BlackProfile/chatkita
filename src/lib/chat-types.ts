@@ -269,6 +269,17 @@ export interface AdminPeekAck {
   ok: true;
 }
 
+/**
+ * Ack payload returned by `public:check_name` (v28 — cek nama pre-login).
+ * Dipakai kartu login utk menyembunyikan kolom kode undangan ketika nama
+ * yang diketik sudah dipakai akun yang ada (atau reserved "Admin").
+ */
+export interface PublicCheckNameAck {
+  ok: true;
+  /** true = nama sudah terdaftar (akun user ada / reserved) → bukan pendaftaran baru. */
+  exists: boolean;
+}
+
 /** Ack payload returned by `messages:history` (both roles, participant-only). */
 export interface HistoryAck {
   ok: true;
@@ -971,6 +982,12 @@ export interface ConversationResetPayload {
 //
 // public:settings    {} → PublicSettingsAck | ChatErrorAck
 //                      Pre-login fetch of the Web Push VAPID public key.
+//
+// public:check_name  { name: string } → PublicCheckNameAck | ChatErrorAck  (v28)
+//                      Pre-login probe (tanpa sesi): apakah nama (case-
+//                      insensitive) sudah dipakai akun user / reserved
+//                      "Admin". Hanya boolean `exists` — dipakai kartu login
+//                      utk menyembunyikan kolom kode undangan pada user lama.
 //
 // user:auth         { name: string; userId?: string; pin?: string }
 //                     → UserAuthAck | ChatErrorAck
