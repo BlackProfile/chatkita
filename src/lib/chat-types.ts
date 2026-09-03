@@ -262,6 +262,11 @@ export interface AdminPasswordChangeAck {
   ok: true;
 }
 
+/** Ack payload returned by `admin:peek` (v24 — cek password autologin, tanpa sesi). */
+export interface AdminPeekAck {
+  ok: true;
+}
+
 /** Ack payload returned by `messages:history` (both roles, participant-only). */
 export interface HistoryAck {
   ok: true;

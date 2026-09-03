@@ -4,7 +4,7 @@
 > untuk tahu fitur apa saja yang harus ada, di file mana, dan cara memulihkannya —
 > TANPA user perlu ngeprompt ulang dari nol.
 >
-> Terakhir diperbarui: versi server **v23** (Task 41 — custom login admin).
+> Terakhir diperbarui: versi server **v24** (Task 42 — autologin admin + delay sinkronisasi).
 
 ---
 
@@ -72,6 +72,14 @@
 - **`admin:auth` kini async** (Bun.password.verify) + ack berisi `usingDefault:true` bila masih bawaan → AdminPanel menampilkan peringatan amber di kartu Login admin.
 - UI: login admin memakai mapping error RATE_LIMITED (login + layar kunci), Dashboard props `usingDefaultPassword`.
 - Uji protokol 8/8 (ganti → login lama gagal → login baru sukses → lemah ditolak → restore). Verifikasi: verify-integrity seksi "v23".
+
+### v24 — Autologin admin + delay sinkronisasi (Task 42)
+- **Login admin tanpa tombol**: tombol "Masuk" dihapus. Saat mengetik password, form mengecek kebenaran via event BARU `admin:peek` (tanpa membuka sesi, ack hanya `{ ok }`, tidak menyentuh data).
+- **Feedback hijau**: password benar → titik-titik input berubah **hijau** (border + teks emerald) + status "Password benar — menyinkronkan database…" (spinner).
+- **Delay sinkronisasi + autologin**: setelah benar, jeda ±0,9 dtk lalu `admin:auth` dipanggil otomatis. Mengetik lagi membatalkan antrean login. Enter tetap berfungsi.
+- **Rate limit peek terpisah** (30 gagal/socket/menit + 120 gagal global/menit, minimum 6 kar) — mengetik bertahap TIDAK mengunci `admin:auth` (counter v23 tetap ketat).
+- **Login user ber-delay**: klik Masuk/Lanjut/PIN → tombol berubah "Menyinkronkan database…" (spinner) ±0,9 dtk → auth dikirim. Proteksi dobel-kirim; auto re-auth saat reconnect TIDAK ter-delay.
+- Logout admin mengosongkan form password (autologin tidak menyala ulang). Verifikasi: verify-integrity seksi "v24".
 
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).

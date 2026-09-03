@@ -130,6 +130,7 @@ import {
   type AckOf,
   type AdminAuthAck,
   type AdminFlaggedPayload,
+  type AdminPeekAck,
   type AdminPinAck,
   type AlwaysOnlineAck,
   type AppSettings,
@@ -268,6 +269,9 @@ export function AdminPanel() {
   const [connected, setConnected] = useState(false);
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
+  // v24 — autologin: password benar (via admin:peek) → titik input jadi hijau
+  // → jeda singkat "menyinkronkan database" → masuk otomatis tanpa tombol.
+  const [pwCorrect, setPwCorrect] = useState(false);
   const [filter, setFilter] = useState("");
   const [filterTab, setFilterTab] = useState<FilterTab>("all");
   const [input, setInput] = useState("");
@@ -362,6 +366,10 @@ export function AdminPanel() {
 
   const socketRef = useRef<Socket | null>(null);
   const passwordRef = useRef<string | null>(null);
+  // v24 — timer autologin (debounce peek + jeda sinkronisasi) & handleLogin terkini.
+  const peekTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const loginTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleLoginRef = useRef<() => void>(() => {});
   const ghostRef = useRef(false);
   const activeIdRef = useRef<string | null>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -989,6 +997,7 @@ export function AdminPanel() {
           setUsingDefault(!!res.usingDefault);
           setConversations(res.conversations);
         } else {
+          setPwCorrect(false); // v24 — auth sungguhan gagal: hilangkan efek hijau
           setAuthError(
             res.error === "UNAUTHORIZED"
               ? "Password salah."
@@ -1001,9 +1010,53 @@ export function AdminPanel() {
     );
   };
 
+  // v24 — sinkronkan handleLogin terbaru untuk dipanggil timer autologin.
+  useEffect(() => {
+    handleLoginRef.current = handleLogin;
+  });
+
+  // v24 — autologin admin: setelah 350 ms berhenti mengetik, cek password via
+  // admin:peek (tanpa sesi). Bila benar → titik input hijau → jeda 900 ms
+  // "menyinkronkan database" → login sungguhan (admin:auth) dipanggil otomatis.
+  // Password < 6 kar tidak dicek (batas minimum password custom).
+  useEffect(() => {
+    if (peekTimerRef.current) clearTimeout(peekTimerRef.current);
+    if (loginTimerRef.current) clearTimeout(loginTimerRef.current);
+    const pw = password.trim();
+    setPwCorrect(false);
+    if (!pw || !connected || pw.length < 6) return;
+    peekTimerRef.current = setTimeout(() => {
+      const socket = socketRef.current;
+      if (!socket) return;
+      socket.emit("admin:peek", { password: pw }, (res: AckOf<AdminPeekAck>) => {
+        if (res.ok) {
+          setPwCorrect(true);
+          loginTimerRef.current = setTimeout(() => handleLoginRef.current(), 900);
+        }
+      });
+    }, 350);
+    return () => {
+      if (peekTimerRef.current) clearTimeout(peekTimerRef.current);
+    };
+  }, [password, connected]);
+
+  // v24 — bersihkan sisa timer autologin saat komponen dibongkar.
+  useEffect(
+    () => () => {
+      if (peekTimerRef.current) clearTimeout(peekTimerRef.current);
+      if (loginTimerRef.current) clearTimeout(loginTimerRef.current);
+    },
+    []
+  );
+
   const handleLogout = () => {
     passwordRef.current = null;
     activeIdRef.current = null;
+    // v24 — kosongkan form password supaya autologin tidak langsung masuk lagi.
+    if (peekTimerRef.current) clearTimeout(peekTimerRef.current);
+    if (loginTimerRef.current) clearTimeout(loginTimerRef.current);
+    setPassword("");
+    setPwCorrect(false);
     setAuthed(false);
     setConversations([]);
     setMessagesMap({});
@@ -1722,7 +1775,11 @@ export function AdminPanel() {
                   value={password}
                   autoComplete="current-password"
                   placeholder="••••••••"
-                  className="h-12 rounded-xl bg-white/70 dark:bg-white/5"
+                  className={cn(
+                    "h-12 rounded-xl bg-white/70 dark:bg-white/5",
+                    pwCorrect &&
+                      "border-emerald-500/70 text-emerald-600 focus-visible:ring-emerald-500/30 dark:text-emerald-400"
+                  )}
                   onChange={(e) => {
                     setPassword(e.target.value);
                     setAuthError(null);
@@ -1730,13 +1787,20 @@ export function AdminPanel() {
                 />
               </div>
               {authError ? <p className="text-sm text-destructive">{authError}</p> : null}
-              <Button
-                type="submit"
-                className="btn-gradient h-12 w-full rounded-xl text-base font-semibold text-white"
-                disabled={!connected || !password.trim()}
-              >
-                {connected ? "Masuk" : "Menghubungkan…"}
-              </Button>
+              {/* v24 — tanpa tombol Masuk: password benar → hijau → jeda
+                  sinkronisasi database → autologin. Enter tetap berfungsi. */}
+              {pwCorrect ? (
+                <p
+                  className="flex items-center gap-2 text-sm font-medium text-emerald-600 dark:text-emerald-400"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                  Password benar — menyinkronkan database…
+                </p>
+              ) : !connected ? (
+                <p className="text-xs text-muted-foreground">Menghubungkan…</p>
+              ) : null}
               <p className="flex items-center justify-center gap-1.5 text-center text-xs text-muted-foreground">
                 <Lock className="size-3" aria-hidden="true" />
                 Demo: password default {ADMIN_PASSWORD_HINT}

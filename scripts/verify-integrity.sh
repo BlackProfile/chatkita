@@ -64,7 +64,15 @@ chk_grep "Event ganti password admin"        "mini-services/chat-service/index.t
 chk_grep "Rate limit login admin"            "mini-services/chat-service/index.ts" "ADMIN_FAIL_MAX_PER_WINDOW"
 chk_grep "Form ganti password (dashboard)"   "src/components/chat/admin-dashboard.tsx" "Ganti password"
 chk_grep "Peringatan password bawaan"        "src/components/chat/admin-dashboard.tsx" "Masih memakai password bawaan"
-chk_grep "Rescue tag v23"                    "src/instrumentation.ts" "rescue-v23"
+
+echo "[v24 — Autologin admin + delay sinkronisasi (Task 42)]"
+chk_grep "Peek password (server, tanpa sesi)" "mini-services/chat-service/index.ts" "admin:peek"
+chk_grep "Rate limit peek admin"              "mini-services/chat-service/index.ts" "ADMIN_PEEK_MAX_PER_SOCKET"
+chk_grep "Autologin admin (efek hijau)"       "src/components/chat/AdminPanel.tsx" "pwCorrect"
+chk_grep "Status sinkronisasi login admin"    "src/components/chat/AdminPanel.tsx" "menyinkronkan database"
+chk_grep "Tombol Masuk admin dihapus"         "src/components/chat/AdminPanel.tsx" "tanpa tombol Masuk"
+chk_grep "Delay sinkronisasi login user"      "src/components/chat/Messenger.tsx" "Menyinkronkan database"
+chk_grep "Rescue tag v24"                    "src/instrumentation.ts" "rescue-v24"
 
 echo ""
 echo "== Versi server terdaftar =="

@@ -85,8 +85,9 @@ import webpush from 'web-push'
 
 const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
 /** v22 — paket pulihan: bintangi/teruskan/jadwalkan pesan + badge unread.
- *  v23 — custom login admin: password ter-hash di DB + ganti dari dashboard + rate limit. */
-const SERVICE_VERSION = 'v23'
+ *  v23 — custom login admin: password ter-hash di DB + ganti dari dashboard + rate limit.
+ *  v24 — autologin admin: event admin:peek (cek password tanpa sesi) untuk UX login otomatis. */
+const SERVICE_VERSION = 'v24'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -428,6 +429,16 @@ const ADMIN_FAIL_MAX_PER_WINDOW = 10
 const ADMIN_FAIL_MAX_PER_SOCKET = 5
 const adminAuthFails = { windowStart: 0, count: 0 }
 const adminAuthSocketFails = new Map<string, number>()
+
+/** v24 — anti brute-force untuk admin:peek (cek password autologin, tanpa sesi).
+ *  Sengaja TERPISAH dari counter admin:auth supaya mengetik bertahap di form
+ *  autologin tidak mengunci login sungguhan. Tetap dibatasi agar tidak menjadi
+ *  celah brute-force: maks 30 gagal/socket/menit + 120 gagal global/menit. */
+const ADMIN_PEEK_WINDOW_MS = 60_000
+const ADMIN_PEEK_MAX_PER_WINDOW = 120
+const ADMIN_PEEK_MAX_PER_SOCKET = 30
+const adminPeekFails = { windowStart: 0, count: 0 }
+const adminPeekSocketFails = new Map<string, number>()
 
 /* ------------- v10 — application settings (admin dashboard) ------------- */
 
@@ -2521,6 +2532,53 @@ io.on('connection', (socket) => {
           conversations: getConversationsFor(ADMIN_ID),
           usingDefault: storedHash === null,
         })
+      })
+    })
+  )
+
+  // v24 — autologin admin: klien mengetik password → form mengecek kebenaran
+  // lewat event ini (TANPA membuka sesi admin). Ack hanya { ok } — tidak ada
+  // data percakapan. Gagal dihitung ke counter peek (terpisah & lebih longgar
+  // dari admin:auth) supaya mengetik bertahap tidak memicu RATE_LIMITED login.
+  socket.on(
+    'admin:peek',
+    handler(socket, (data, ack) => {
+      const password = typeof data?.password === 'string' ? data.password : ''
+      // Password terpendek yang sah = 6 kar (aturan admin:password_change v23),
+      // jadi input lebih pendek pasti salah — tidak perlu dihitung sebagai fail.
+      if (password.length < 6) {
+        ack({ ok: false, error: 'TOO_SHORT' })
+        return
+      }
+      const nowMs = Date.now()
+      if (nowMs - adminPeekFails.windowStart > ADMIN_PEEK_WINDOW_MS) {
+        adminPeekFails.windowStart = nowMs
+        adminPeekFails.count = 0
+      }
+      const socketPeekFails = adminPeekSocketFails.get(socket.id) ?? 0
+      if (
+        adminPeekFails.count >= ADMIN_PEEK_MAX_PER_WINDOW ||
+        socketPeekFails >= ADMIN_PEEK_MAX_PER_SOCKET
+      ) {
+        console.warn(`Admin peek rate-limited (socket ${socket.id})`)
+        ack({ ok: false, error: 'RATE_LIMITED' })
+        return
+      }
+      const storedHash = getAdminPasswordHash()
+      const check = storedHash
+        ? Bun.password.verify(password, storedHash)
+        : Promise.resolve(password === (process.env.ADMIN_PASSWORD || 'admin123'))
+      void check.then((match) => {
+        if (!match) {
+          adminPeekFails.count += 1
+          adminPeekSocketFails.set(socket.id, socketPeekFails + 1)
+          if (adminPeekSocketFails.size > 1000) adminPeekSocketFails.clear()
+          ack({ ok: false, error: 'UNAUTHORIZED' })
+          return
+        }
+        // Benar — reset counter socket ini (pola sama dengan admin:auth).
+        adminPeekSocketFails.delete(socket.id)
+        ack({ ok: true })
       })
     })
   )

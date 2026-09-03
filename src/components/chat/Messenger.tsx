@@ -803,6 +803,11 @@ export function Messenger() {
   /* Actions                                                           */
   /* ---------------------------------------------------------------- */
 
+  // v24 — jeda singkat "sinkronisasi database" saat login user (per button):
+  // klik → tampilkan status sync ±0,9 dtk → auth dikirim → masuk.
+  const [loggingIn, setLoggingIn] = useState(false);
+  const loginBusyRef = useRef(false);
+
   /**
    * Login. `override` lets the "Lanjut chat sebagai …" button authenticate
    * with the stored last name without putting it back into the input.
@@ -811,56 +816,64 @@ export function Messenger() {
     const socket = socketRef.current;
     const trimmed = (override ?? name).trim();
     if (!socket || !connected || !trimmed) return;
+    if (loginBusyRef.current) return; // v24 — cegah dobel kirim selama jeda sinkronisasi
     if (override && override !== name) setName(override);
     setAuthError(null);
-    socket.emit(
-      "user:auth",
-      {
-        name: trimmed,
-        pin: needsPin && pinEntry ? pinEntry : undefined,
-      },
-      (res: AckOf<UserAuthAck>) => {
-        if (res.ok) {
-          const next = { userId: res.user.id, name: res.user.name };
-          window.localStorage.setItem(CHAT_SESSION_KEY, JSON.stringify(next));
-          saveLastName(res.user.name);
-          setLastName(res.user.name);
-          meRef.current = next;
-          conversationIdRef.current = res.conversationId;
-          setMe(next);
-          setHasPin(res.user.hasPin ?? false);
-          setNeedsPin(false);
-          setPinEntry("");
-          setConversationId(res.conversationId);
-          setPartner(res.partner);
-          setMessages(res.messages);
-          setAdminReadId(res.partnerLastReadId);
-          setPushPublicKey(res.pushPublicKey || null);
-          setPinnedMsg(res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null);
-          setInput(readDraft("user", res.user.id));
-          void subscribeToPush(socket, res.pushPublicKey || pushPublicKey || "");
-        } else {
-          if (res.error === "PIN_REQUIRED" || res.error === "INVALID_PIN") {
-            setNeedsPin(true);
+    // v24 — tunda pengiriman auth sebentar: kesan "menyinkronkan database".
+    loginBusyRef.current = true;
+    setLoggingIn(true);
+    window.setTimeout(() => {
+      socket.emit(
+        "user:auth",
+        {
+          name: trimmed,
+          pin: needsPin && pinEntry ? pinEntry : undefined,
+        },
+        (res: AckOf<UserAuthAck>) => {
+          loginBusyRef.current = false;
+          setLoggingIn(false);
+          if (res.ok) {
+            const next = { userId: res.user.id, name: res.user.name };
+            window.localStorage.setItem(CHAT_SESSION_KEY, JSON.stringify(next));
+            saveLastName(res.user.name);
+            setLastName(res.user.name);
+            meRef.current = next;
+            conversationIdRef.current = res.conversationId;
+            setMe(next);
+            setHasPin(res.user.hasPin ?? false);
+            setNeedsPin(false);
+            setPinEntry("");
+            setConversationId(res.conversationId);
+            setPartner(res.partner);
+            setMessages(res.messages);
+            setAdminReadId(res.partnerLastReadId);
+            setPushPublicKey(res.pushPublicKey || null);
+            setPinnedMsg(res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null);
+            setInput(readDraft("user", res.user.id));
+            void subscribeToPush(socket, res.pushPublicKey || pushPublicKey || "");
+          } else {
+            if (res.error === "PIN_REQUIRED" || res.error === "INVALID_PIN") {
+              setNeedsPin(true);
+              setAuthError(
+                res.error === "PIN_REQUIRED"
+                  ? "Akun ini dilindungi PIN — masukkan PIN Anda."
+                  : "PIN salah, coba lagi."
+              );
+              return;
+            }
             setAuthError(
-              res.error === "PIN_REQUIRED"
-                ? "Akun ini dilindungi PIN — masukkan PIN Anda."
-                : "PIN salah, coba lagi."
+              res.error === "INVALID_NAME"
+                ? "Nama tidak valid (1–40 karakter)."
+                : res.error === "NAME_RESERVED"
+                  ? "Nama “Admin” tidak tersedia — coba nama lain."
+                  : res.error === "REGISTRATION_CLOSED"
+                    ? "Pendaftaran sedang ditutup admin — masuk dengan akun yang sudah ada."
+                    : "Terjadi kesalahan, coba lagi."
             );
-            return;
           }
-          setAuthError(
-            res.error === "INVALID_NAME"
-              ? "Nama tidak valid (1–40 karakter)."
-              : res.error === "NAME_RESERVED"
-                ? "Nama “Admin” tidak tersedia — coba nama lain."
-                : res.error === "REGISTRATION_CLOSED"
-                  ? "Pendaftaran sedang ditutup admin — masuk dengan akun yang sudah ada."
-                  : "Terjadi kesalahan, coba lagi."
-          );
         }
-      }
-    );
+      );
+    }, 900);
   };
 
   const handleLogout = () => {
@@ -1390,7 +1403,7 @@ export function Messenger() {
                   {!needsPin ? (
                     <button
                       type="button"
-                      disabled={!connected}
+                      disabled={!connected || loggingIn}
                       onClick={() => handleAuth(lastName)}
                       className="group flex w-full items-center gap-3 rounded-2xl border border-emerald-900/10 bg-white/60 p-3 text-left transition-all hover:border-emerald-500/50 hover:bg-white/90 hover:shadow-lg hover:shadow-emerald-600/10 disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/10 dark:bg-white/5 dark:hover:border-emerald-400/40 dark:hover:bg-white/10"
                     >
@@ -1408,9 +1421,11 @@ export function Messenger() {
                           {lastName}
                         </span>
                         <span className="block truncate text-xs text-emerald-900/55 dark:text-emerald-100/45">
-                          {connected
-                            ? "Ketuk untuk lanjut — riwayat pesan tetap ada"
-                            : "Menghubungkan…"}
+                          {loggingIn
+                            ? "Menyinkronkan database…"
+                            : connected
+                              ? "Ketuk untuk lanjut — riwayat pesan tetap ada"
+                              : "Menghubungkan…"}
                         </span>
                       </span>
                       <span
@@ -1458,9 +1473,18 @@ export function Messenger() {
                     <Button
                       type="submit"
                       className="btn-gradient h-12 w-full rounded-xl text-base font-semibold text-white"
-                      disabled={!connected || !pinEntry}
+                      disabled={!connected || !pinEntry || loggingIn}
                     >
-                      {connected ? "Konfirmasi & lanjut chat" : "Menghubungkan…"}
+                      {loggingIn ? (
+                        <>
+                          <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                          Menyinkronkan database…
+                        </>
+                      ) : connected ? (
+                        "Konfirmasi & lanjut chat"
+                      ) : (
+                        "Menghubungkan…"
+                      )}
                     </Button>
                   ) : null}
                   <div className="flex items-center gap-3" aria-hidden="true">
@@ -1536,13 +1560,22 @@ export function Messenger() {
                   <Button
                     type="submit"
                     className="btn-gradient h-12 w-full rounded-xl text-base font-semibold text-white"
-                    disabled={!connected || !name.trim() || (needsPin && !pinEntry)}
+                    disabled={!connected || !name.trim() || (needsPin && !pinEntry) || loggingIn}
                   >
-                    {connected
-                      ? lastName
-                        ? "Mulai chat"
-                        : "Masuk"
-                      : "Menghubungkan…"}
+                    {loggingIn ? (
+                      <>
+                        <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                        Menyinkronkan database…
+                      </>
+                    ) : connected ? (
+                      lastName ? (
+                        "Mulai chat"
+                      ) : (
+                        "Masuk"
+                      )
+                    ) : (
+                      "Menghubungkan…"
+                    )}
                   </Button>
                   {!lastName ? (
                     <p className="text-center text-xs text-emerald-900/55 dark:text-emerald-100/45">
