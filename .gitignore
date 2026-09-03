@@ -59,3 +59,4 @@ server.log
 # runtime sqlite sidecar (jangan di-track; chat.db tetap di-track utk backup)
 mini-services/chat-service/chat.db-wal
 mini-services/chat-service/chat.db-shm
+tool-results/
