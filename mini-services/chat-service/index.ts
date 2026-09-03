@@ -87,8 +87,11 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
 /** v22 — paket pulihan: bintangi/teruskan/jadwalkan pesan + badge unread.
  *  v23 — custom login admin: password ter-hash di DB + ganti dari dashboard + rate limit.
  *  v24 — autologin admin: event admin:password_peek (cek password tanpa sesi) untuk UX login otomatis.
- *  v26 — peta penyimpanan: metadata media (dimensi/durasi/halaman) + admin:storage_map + admin:media_scan. */
-const SERVICE_VERSION = 'v26'
+ *  v26 — peta penyimpanan: metadata media (dimensi/durasi/halaman) + admin:storage_map + admin:media_scan.
+ *  v27 — 1 orang 1 akun: password wajib (bcrypt) + kode undangan sekali pakai + kunci perangkat
+ *        (1 perangkat 1 akun) + admin kelola kode/buat akun/reset password/lepas perangkat
+ *        + notifikasi perubahan utk akun lama. */
+const SERVICE_VERSION = 'v27'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -237,6 +240,30 @@ addColumn('messages', 'scheduled_at', 'INTEGER')
 addColumn('messages', 'delivered_at', 'INTEGER')
 /* v26 — metadata media (dimensi/durasi/halaman) untuk Peta Penyimpanan. */
 addColumn('messages', 'meta_json', 'TEXT')
+/* v27 — 1 orang 1 akun: password akun + asal-usul pendaftaran. */
+addColumn('users', 'password_hash', 'TEXT')
+addColumn('users', 'password_set_at', 'INTEGER')
+addColumn('users', 'created_via', 'TEXT')
+/* v27 — perangkat terikat (1 perangkat maks 1 akun, append-only;
+ * admin bisa melepas lewat dashboard). */
+db.run(`
+  CREATE TABLE IF NOT EXISTS devices (
+    device_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    bound_at INTEGER NOT NULL
+  )
+`)
+/* v27 — kode undangan sekali pakai (1 kode = 1 akun). */
+db.run(`
+  CREATE TABLE IF NOT EXISTS invite_codes (
+    code TEXT PRIMARY KEY,
+    created_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    label TEXT,
+    used_by TEXT,
+    used_at INTEGER
+  )
+`)
 
 /** v11 — audit trail of admin actions (admin:audit). */
 db.run(`
@@ -276,6 +303,10 @@ interface UserRow {
   created_at: number
   last_seen_at: number
   pin_hash?: string | null
+  /* v27 — 1 orang 1 akun: password (bcrypt) + jejak pendaftaran. */
+  password_hash?: string | null
+  password_set_at?: number | null
+  created_via?: string | null
   /* v11 — session control columns (0 = off). */
   frozen?: number | null
   muted_until?: number | null
@@ -291,6 +322,23 @@ interface ConversationRow {
   last_message_at: number
   archived_at?: number | null
   pinned_message_id?: number | null
+}
+
+/* v27 — perangkat terikat 1 perangkat ↔ 1 akun. */
+interface DeviceRow {
+  device_id: string
+  user_id: string
+  bound_at: number
+}
+
+/* v27 — kode undangan sekali pakai. */
+interface InviteCodeRow {
+  code: string
+  created_by: string
+  created_at: number
+  label?: string | null
+  used_by?: string | null
+  used_at?: number | null
 }
 
 interface MessageRow {
@@ -446,6 +494,54 @@ const ADMIN_PEEK_MAX_PER_WINDOW = 120
 const ADMIN_PEEK_MAX_PER_SOCKET = 30
 const adminPeekFails = { windowStart: 0, count: 0 }
 const adminPeekSocketFails = new Map<string, number>()
+
+/* ------- v27 — 1 orang 1 akun: password + undangan + perangkat ------- */
+
+/** v27 — batas panjang password (bcrypt backend membaca maks 72 byte). */
+const MIN_PASSWORD_LENGTH = 4
+const MAX_PASSWORD_LENGTH = 72
+/** v27 — batas aman perangkat terikat per akun (admin bisa melepas). */
+const DEVICE_LIMIT_PER_USER = 8
+
+/** v27 — hash password user (bcrypt, sama seperti admin). */
+const hashUserPassword = (password: string) =>
+  Bun.password.hashSync(password, { algorithm: 'bcrypt', cost: 10 })
+
+/** v27 — anti brute-force login user: per-nama, jendela 60 dtk, maks 10 gagal. */
+const USER_PW_WINDOW_MS = 60_000
+const USER_PW_MAX_FAILS = 10
+const userPwFails = new Map<string, { windowStart: number; count: number }>()
+const userPwBlocked = (key: string): boolean => {
+  const rec = userPwFails.get(key)
+  if (!rec) return false
+  if (Date.now() - rec.windowStart > USER_PW_WINDOW_MS) {
+    userPwFails.delete(key)
+    return false
+  }
+  return rec.count >= USER_PW_MAX_FAILS
+}
+const userPwRecordFail = (key: string) => {
+  const rec = userPwFails.get(key)
+  const t = Date.now()
+  if (!rec || t - rec.windowStart > USER_PW_WINDOW_MS) {
+    userPwFails.set(key, { windowStart: t, count: 1 })
+    return
+  }
+  rec.count += 1
+}
+const userPwClear = (key: string) => {
+  userPwFails.delete(key)
+}
+
+/** v27 — kode undangan sekali pakai: CK-XXXXX-XXXX (tanpa karakter membingungkan). */
+const INVITE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+const randomInviteChunk = (len: number) => {
+  const bytes = crypto.getRandomValues(new Uint8Array(len))
+  let out = ''
+  for (const b of bytes) out += INVITE_ALPHABET[b % INVITE_ALPHABET.length]
+  return out
+}
+const makeInviteCode = () => `CK-${randomInviteChunk(5)}-${randomInviteChunk(4)}`
 
 /* ------------- v10 — application settings (admin dashboard) ------------- */
 
@@ -794,6 +890,8 @@ const dashboardStats = () => {
     db
       .query(
         `SELECT u.id, u.name, u.created_at, u.last_seen_at,
+           u.password_hash IS NOT NULL AS has_pw,
+           (SELECT COUNT(*) FROM devices d WHERE d.user_id = u.id) AS dev,
            (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id) AS c,
            (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id AND m.type != 'text') AS media,
            (SELECT MAX(m.created_at) FROM messages m WHERE m.sender_id = u.id) AS last_msg
@@ -805,6 +903,8 @@ const dashboardStats = () => {
       name: string
       created_at: number
       last_seen_at: number
+      has_pw: number
+      dev: number
       c: number
       media: number
       last_msg: number | null
@@ -816,6 +916,8 @@ const dashboardStats = () => {
     lastSeenAt: new Date(r.last_seen_at).toISOString(),
     messages: r.c,
     online: isOnline(r.id),
+    hasPassword: r.has_pw === 1,
+    devices: r.dev,
     ...(typeof r.media === 'number' ? { mediaCount: r.media } : {}),
     ...(r.last_msg ? { lastMessageAt: new Date(r.last_msg).toISOString() } : {}),
   }))
@@ -2546,6 +2648,19 @@ io.on('connection', (socket) => {
         return
       }
 
+      /* v27 — 1 orang 1 akun: kredensial baru.
+       * deviceId: UUID stabil dari localStorage klien (kunci 1 perangkat 1 akun).
+       * password: wajib utk akun yang sudah punya password & utk pendaftaran baru.
+       * inviteCode: wajib utk pendaftaran akun baru (kode sekali pakai). */
+      const deviceIdRaw =
+        typeof data?.deviceId === 'string' ? data.deviceId.trim() : ''
+      const deviceId = /^[\w-]{8,80}$/.test(deviceIdRaw) ? deviceIdRaw : ''
+      const password = typeof data?.password === 'string' ? data.password : ''
+      const inviteCode =
+        typeof data?.inviteCode === 'string'
+          ? data.inviteCode.trim().toUpperCase()
+          : ''
+
       // Find-or-create among role='user' rows only:
       // 1) stored userId login, 2) case-insensitive name, 3) create.
       let user: UserRow | null =
@@ -2556,6 +2671,13 @@ io.on('connection', (socket) => {
       // the stored account (it was validated when the session was created).
       if (user && user.name.toLowerCase() !== name.toLowerCase()) user = null
       if (!user) user = findUserByRoleAndName(name, 'user')
+      /* v27 — sesi tersimpan (userId + nama cocok) = restore: melewati gate
+       * password/PIN seperti semula. Login baru harus membuktikan kredensial. */
+      const sessionRestore = !!(
+        user &&
+        typeof data?.userId === 'string' &&
+        data.userId === user.id
+      )
 
       if (!user) {
         // v13 — registration may be closed from the dashboard (Pengaturan → Akses).
@@ -2564,17 +2686,92 @@ io.on('connection', (socket) => {
           ack({ ok: false, error: 'REGISTRATION_CLOSED' })
           return
         }
+        /* v27 — 1 orang 1 akun: pendaftaran butuh password + kode undangan
+         * sekali pakai + perangkat yang belum pernah terdaftar. */
+        if (password.length < MIN_PASSWORD_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+          ack({ ok: false, error: password ? 'WEAK_PASSWORD' : 'PASSWORD_REQUIRED' })
+          return
+        }
+        if (!inviteCode) {
+          ack({ ok: false, error: 'INVITE_REQUIRED' })
+          return
+        }
+        const invite = db
+          .query('SELECT * FROM invite_codes WHERE code = ?')
+          .get(inviteCode) as InviteCodeRow | undefined
+        if (!invite) {
+          ack({ ok: false, error: 'INVITE_INVALID' })
+          return
+        }
+        if (invite.used_by) {
+          ack({ ok: false, error: 'INVITE_USED' })
+          return
+        }
+        if (!deviceId) {
+          ack({ ok: false, error: 'DEVICE_REQUIRED' })
+          return
+        }
+        const deviceTaken = db
+          .query('SELECT user_id FROM devices WHERE device_id = ?')
+          .get(deviceId) as { user_id: string } | undefined
+        if (deviceTaken) {
+          console.log(`Rejected registration "${name}" — device already bound (socket ${socket.id})`)
+          ack({ ok: false, error: 'DEVICE_TAKEN' })
+          return
+        }
         const id = crypto.randomUUID()
         const ts = now()
+        const passwordHash = hashUserPassword(password)
         db.run(
-          "INSERT INTO users (id, name, role, created_at, last_seen_at) VALUES (?, ?, 'user', ?, ?)",
-          [id, name, ts, ts]
+          "INSERT INTO users (id, name, role, created_at, last_seen_at, password_hash, password_set_at, created_via) VALUES (?, ?, 'user', ?, ?, ?, ?, 'self')",
+          [id, name, ts, ts, passwordHash, ts]
         )
-        user = { id, name, role: 'user', created_at: ts, last_seen_at: ts }
-        console.log(`New user registered: "${name}" (${id})`)
+        db.run('UPDATE invite_codes SET used_by = ?, used_at = ? WHERE code = ?', [
+          id,
+          ts,
+          inviteCode,
+        ])
+        db.run('INSERT INTO devices (device_id, user_id, bound_at) VALUES (?, ?, ?)', [
+          deviceId,
+          id,
+          ts,
+        ])
+        user = {
+          id,
+          name,
+          role: 'user',
+          created_at: ts,
+          last_seen_at: ts,
+          password_hash: passwordHash,
+          password_set_at: ts,
+          created_via: 'self',
+        }
+        console.log(`New user registered: "${name}" (${id}) via kode undangan`)
       } else {
-        // PIN gate: fresh (name-only) logins must present the PIN.
-        if (user.pin_hash) {
+        /* v27 — password gate: akun yang sudah punya password harus
+         * membuktikannya saat login baru (sesi tersimpan tetap lolos).
+         * Rate limit per-nama mencegah brute-force. */
+        if (user.password_hash && !sessionRestore) {
+          if (!password) {
+            ack({ ok: false, error: 'PASSWORD_REQUIRED' })
+            return
+          }
+          if (userPwBlocked(user.name.toLowerCase())) {
+            ack({ ok: false, error: 'TOO_MANY_ATTEMPTS' })
+            return
+          }
+          const pwOk = Bun.password.verifySync(password, user.password_hash)
+          if (!pwOk) {
+            userPwRecordFail(user.name.toLowerCase())
+            console.log(`Rejected login "${user.name}" — wrong password (socket ${socket.id})`)
+            ack({ ok: false, error: 'INVALID_PASSWORD' })
+            return
+          }
+          userPwClear(user.name.toLowerCase())
+        }
+        // PIN gate: fresh (name-only) logins must present the PIN (akun lama
+        // yang memakai PIN dan belum punya password).
+        if (!user.password_hash && user.pin_hash) {
           const pin = typeof data?.pin === 'string' ? data.pin : ''
           const cameFromSession =
             typeof data?.userId === 'string' &&
@@ -2590,6 +2787,35 @@ io.on('connection', (socket) => {
             if (pinHash(pin, user.id) !== user.pin_hash) {
               ack({ ok: false, error: 'INVALID_PIN', hasPin: true })
               return
+            }
+          }
+        }
+        /* v27 — kunci perangkat: bind perangkat ke akun saat login (maks
+         * DEVICE_LIMIT_PER_USER). Sesi restore di perangkat yang sudah
+         * terikat akun LAIN tidak sah bila tak bisa membuktikan password
+         * (menutup celah salin localStorage antar browser). */
+        if (deviceId) {
+          const bound = db
+            .query('SELECT user_id FROM devices WHERE device_id = ?')
+            .get(deviceId) as { user_id: string } | undefined
+          if (bound && bound.user_id !== user.id) {
+            if (sessionRestore && !password) {
+              ack({ ok: false, error: user.password_hash ? 'PASSWORD_REQUIRED' : 'DEVICE_TAKEN' })
+              return
+            }
+            // Login fresh dengan password benar di perangkat milik akun lain
+            // tetap diizinkan (lintas perangkat via kredensial) — perangkat
+            // TETAP terikat ke akun asal (tidak berpindah).
+          } else if (!bound) {
+            const devCount = db
+              .query('SELECT COUNT(*) AS c FROM devices WHERE user_id = ?')
+              .get(user.id) as { c: number }
+            if (devCount.c < DEVICE_LIMIT_PER_USER) {
+              db.run('INSERT INTO devices (device_id, user_id, bound_at) VALUES (?, ?, ?)', [
+                deviceId,
+                user.id,
+                now(),
+              ])
             }
           }
         }
@@ -2627,6 +2853,9 @@ io.on('connection', (socket) => {
       ack({
         ok: true,
         user: { id: user.id, name: user.name, hasPin: !!user.pin_hash },
+        /* v27 — akun lama tanpa password → klien wajib menampilkan modal
+         * pemasangan password (tak bisa ditutup sampai dipasang). */
+        mustSetPassword: !user.password_hash,
         conversationId: conversation.id,
         partner: admin
           ? toPartnerInfo(admin, user.id)
@@ -3799,6 +4028,135 @@ io.on('connection', (socket) => {
     ack({ ok: true, count: rows.length, kind })
   }))
 
+  /* ------------------------------------------------------------------ */
+  /* v27 — 1 orang 1 akun: kode undangan + kelola akun                   */
+  /* ------------------------------------------------------------------ */
+
+  const inviteRowToInfo = (r: InviteCodeRow) => ({
+    code: r.code,
+    label: r.label ?? null,
+    createdAt: new Date(r.created_at).toISOString(),
+    usedBy: r.used_by ?? null,
+    ...(r.used_by ? { usedByName: findUserById(r.used_by)?.name ?? null } : {}),
+    usedAt: r.used_at ? new Date(r.used_at).toISOString() : null,
+  })
+
+  /** Daftar semua kode undangan (terbaru dulu). */
+  socket.on('admin:invite_list', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    const rows = db
+      .query('SELECT * FROM invite_codes ORDER BY created_at DESC LIMIT 200')
+      .all() as InviteCodeRow[]
+    ack({ ok: true, invites: rows.map(inviteRowToInfo) })
+  }))
+
+  /** Buat 1–20 kode undangan sekali pakai sekaligus. */
+  socket.on('admin:invite_create', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const count = Math.max(1, Math.min(20, Number(data?.count) || 1))
+    const label = typeof data?.label === 'string' ? data.label.trim().slice(0, 60) : ''
+    const created = []
+    for (let i = 0; i < count; i++) {
+      const code = makeInviteCode()
+      db.run(
+        'INSERT INTO invite_codes (code, created_by, created_at, label) VALUES (?, ?, ?, ?)',
+        [code, ADMIN_ID, now(), label || null]
+      )
+      const row = db
+        .query('SELECT * FROM invite_codes WHERE code = ?')
+        .get(code) as InviteCodeRow
+      created.push(inviteRowToInfo(row))
+    }
+    audit('invite_create', `${count} kode undangan dibuat${label ? ` (${label})` : ''}`)
+    console.log(`Admin created ${count} invite code(s)`)
+    ack({ ok: true, created })
+  }))
+
+  /** Hapus satu kode undangan (terpakai maupun belum). */
+  socket.on('admin:invite_delete', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const code = typeof data?.code === 'string' ? data.code.trim().toUpperCase() : ''
+    const res = db.run('DELETE FROM invite_codes WHERE code = ?', [code])
+    if (res.changes === 0) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    audit('invite_delete', `kode ${code} dihapus`)
+    ack({ ok: true })
+  }))
+
+  /** Admin membuat akun langsung (tanpa kode undangan, tanpa perangkat). */
+  socket.on('admin:user_create', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const name = typeof data?.name === 'string' ? data.name.trim() : ''
+    const password = typeof data?.password === 'string' ? data.password : ''
+    if (name.length < 1 || name.length > MAX_NAME_LENGTH) {
+      ack({ ok: false, error: 'INVALID_NAME' })
+      return
+    }
+    if (name.toLowerCase() === ADMIN_NAME.toLowerCase()) {
+      ack({ ok: false, error: 'NAME_RESERVED' })
+      return
+    }
+    if (password.length < MIN_PASSWORD_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+      ack({ ok: false, error: 'WEAK_PASSWORD' })
+      return
+    }
+    if (findUserByRoleAndName(name, 'user')) {
+      ack({ ok: false, error: 'NAME_TAKEN' })
+      return
+    }
+    const id = crypto.randomUUID()
+    const ts = now()
+    db.run(
+      "INSERT INTO users (id, name, role, created_at, last_seen_at, password_hash, password_set_at, created_via) VALUES (?, ?, 'user', ?, ?, ?, ?, 'admin')",
+      [id, name, ts, ts, hashUserPassword(password), ts]
+    )
+    ensureConversationWithAdmin(id)
+    pushConversationsTo(ADMIN_ID)
+    audit('user_create', `akun "${name}" dibuat admin dari dashboard`)
+    console.log(`Admin created user "${name}" (${id})`)
+    ack({ ok: true, userId: id, name })
+  }))
+
+  /** Reset password user dari dashboard (mis. user lupa password). */
+  socket.on('admin:user_reset_password', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const userId = typeof data?.userId === 'string' ? data.userId : ''
+    const password = typeof data?.password === 'string' ? data.password : ''
+    const target = userId ? findUserById(userId) : null
+    if (!target || target.role !== 'user') {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    if (password.length < MIN_PASSWORD_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+      ack({ ok: false, error: 'WEAK_PASSWORD' })
+      return
+    }
+    db.run('UPDATE users SET password_hash = ?, password_set_at = ? WHERE id = ?', [
+      hashUserPassword(password),
+      now(),
+      target.id,
+    ])
+    userPwClear(target.name.toLowerCase())
+    audit('user_reset_password', `password "${target.name}" direset admin`)
+    ack({ ok: true })
+  }))
+
+  /** Lepas seluruh kunci perangkat milik user (mis. user ganti HP). */
+  socket.on('admin:user_unbind_devices', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const userId = typeof data?.userId === 'string' ? data.userId : ''
+    const target = userId ? findUserById(userId) : null
+    if (!target || target.role !== 'user') {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const res = db.run('DELETE FROM devices WHERE user_id = ?', [target.id])
+    audit('user_unbind_devices', `${res.changes} perangkat dilepas dari "${target.name}"`)
+    ack({ ok: true, removed: res.changes })
+  }))
+
   /** Full JSON backup (users, conversations, messages, app settings). */
   socket.on('admin:backup', handler(socket, (_data, ack) => {
     if (!adminGuard(ack)) return
@@ -4936,6 +5294,43 @@ io.on('connection', (socket) => {
     })
   )
 
+  /* ------------------- v27 — pasang password pertama ------------------- */
+
+  /** Dipanggil dari modal wajib di klien untuk AKUN LAMA yang belum punya
+   *  password. Setelah terpasang, login baru selalu butuh password. */
+  socket.on(
+    'user:set_password',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me || me === ADMIN_ID) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const target = findUserById(me)
+      if (!target) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      if (target.password_hash) {
+        ack({ ok: false, error: 'ALREADY_SET' })
+        return
+      }
+      const password = typeof data?.password === 'string' ? data.password : ''
+      if (password.length < MIN_PASSWORD_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+        ack({ ok: false, error: 'WEAK_PASSWORD' })
+        return
+      }
+      db.run('UPDATE users SET password_hash = ?, password_set_at = ? WHERE id = ?', [
+        hashUserPassword(password),
+        now(),
+        me,
+      ])
+      userPwClear(target.name.toLowerCase())
+      console.log(`Password set for ${me.slice(0, 8)}`)
+      ack({ ok: true })
+    })
+  )
+
   /* ---------------------------- lifecycle ---------------------------- */
 
   socket.on('disconnect', (reason) => {
@@ -5007,6 +5402,28 @@ const ensureAdmin = () => {
   console.log(`Admin account seeded (${ADMIN_ID})`)
 }
 ensureAdmin()
+
+/* v27 — notifikasi perubahan: sekali saja setelah upgrade, sisipkan pesan
+ * sistem ke percakapan setiap akun lama yang belum punya password. Klien
+ * juga menampilkan modal wajib pemasangan password saat login. */
+const ensureV27Notice = () => {
+  if (getSetting('notice_v27_sent') === '1') return
+  const legacy = db
+    .query("SELECT * FROM users WHERE role = 'user' AND password_hash IS NULL")
+    .all() as UserRow[]
+  for (const u of legacy) {
+    const conv = ensureConversationWithAdmin(u.id)
+    insertAndFanOut(
+      conv,
+      ADMIN_ID,
+      '🔐 Pembaruan keamanan: mulai sekarang 1 orang hanya bisa memiliki 1 akun. Akun kamu perlu dilindungi password — kamu akan diminta memasangnya saat login berikutnya (minimal 4 karakter). Akun baru mendaftar dengan password + kode undangan dari admin.',
+      'system'
+    )
+  }
+  setSetting('notice_v27_sent', '1')
+  if (legacy.length > 0) console.log(`v27 notice: ${legacy.length} akun lama diberi notifikasi`)
+}
+ensureV27Notice()
 
 // v8 — periodic server-lightening: expire old media (frees disk) + WAL
 // checkpoint/VACUUM (keeps the DB lean). First pass shortly after boot,

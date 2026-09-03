@@ -247,6 +247,8 @@ export interface UserAuthAck {
   /** Pinned banner state. */
   pinnedMessageId?: number | null;
   pinned?: { id: number; senderId: string; snippet: string; type: string } | null;
+  /** v27 — akun lama tanpa password → klien wajib buka modal pemasangan. */
+  mustSetPassword?: boolean;
 }
 
 /** Ack payload returned by `admin:auth`. */
@@ -352,7 +354,21 @@ export type ChatErrorCode =
   | "SLOW_MODE"
   | "MEDIA_BLOCKED"
   // v23 — custom login admin (admin:password_change):
-  | "WEAK_PASSWORD";
+  | "WEAK_PASSWORD"
+  // v27 — 1 orang 1 akun (login/pendaftaran + kelola akun admin):
+  | "PASSWORD_REQUIRED"
+  | "INVALID_PASSWORD"
+  | "TOO_MANY_ATTEMPTS"
+  | "INVITE_REQUIRED"
+  | "INVITE_INVALID"
+  | "INVITE_USED"
+  | "DEVICE_REQUIRED"
+  | "DEVICE_TAKEN"
+  | "ALREADY_SET"
+  | "NAME_TAKEN"
+  // v13 — pendaftaran ditutup admin (di-kirim server sejak v13, resmi
+  // terdaftar di union sekarang):
+  | "REGISTRATION_CLOSED";
 
 export interface ChatErrorAck {
   ok: false;
@@ -414,6 +430,9 @@ export interface DashboardUserRow {
   /* v13 — richer per-user analytics. */
   mediaCount?: number;
   lastMessageAt?: string;
+  /* v27 — 1 orang 1 akun. */
+  hasPassword?: boolean;
+  devices?: number;
 }
 
 /** Full stats payload returned by `admin:dashboard`. */
@@ -566,6 +585,61 @@ export interface AdminMediaScanAck {
   scanned: number;
   filled: number;
   remaining: number;
+}
+
+/* ------------------------------------------------------------------ */
+/* v27 — 1 orang 1 akun                                                */
+/* ------------------------------------------------------------------ */
+
+/** v27 — satu kode undangan sekali pakai (1 kode = 1 akun). */
+export interface InviteCodeInfo {
+  code: string;
+  label: string | null;
+  createdAt: string;
+  usedBy: string | null;
+  /** Nama akun pemakai kode (bila sudah dipakai). */
+  usedByName?: string | null;
+  usedAt: string | null;
+}
+
+/** Ack `admin:invite_list`. */
+export interface AdminInviteListAck {
+  ok: true;
+  invites: InviteCodeInfo[];
+}
+
+/** Ack `admin:invite_create`. */
+export interface AdminInviteCreateAck {
+  ok: true;
+  created: InviteCodeInfo[];
+}
+
+/** Ack `admin:invite_delete`. */
+export interface AdminInviteDeleteAck {
+  ok: true;
+}
+
+/** Ack `admin:user_create` — akun dibuat admin dari dashboard. */
+export interface AdminUserCreateAck {
+  ok: true;
+  userId: string;
+  name: string;
+}
+
+/** Ack `admin:user_reset_password`. */
+export interface AdminResetPasswordAck {
+  ok: true;
+}
+
+/** Ack `admin:user_unbind_devices` — lepas semua kunci perangkat user. */
+export interface AdminUnbindDevicesAck {
+  ok: true;
+  removed: number;
+}
+
+/** Ack `user:set_password` — pemasangan password pertama (akun lama). */
+export interface UserSetPasswordAck {
+  ok: true;
 }
 
 export interface BackupAck {
@@ -1127,6 +1201,31 @@ export interface ConversationResetPayload {
 //                           file headers (PNG/GIF/WebP/JPEG dims, MP4 dims+
 //                           duration, PDF page count) and fills meta_json.
 //                           New image/file sends extract metadata at send time.
+//
+// Kategori G — 1 orang 1 akun (v27):
+// user:auth                { name, pin?, password?, inviteCode?, deviceId?, userId? }
+//                           → UserAuthAck (mustSetPassword) | error:
+//                           REGISTRATION_CLOSED / PASSWORD_REQUIRED / WEAK_PASSWORD /
+//                           INVITE_REQUIRED / INVITE_INVALID / INVITE_USED /
+//                           DEVICE_REQUIRED / DEVICE_TAKEN / INVALID_PASSWORD /
+//                           TOO_MANY_ATTEMPTS / PIN_REQUIRED / INVALID_PIN
+//                           Registration = password (4–72) + single-use invite code
+//                           + unbound device (1 device = 1 account, append-only).
+//                           Login with a password account requires the password
+//                           (session restore exempt); legacy accounts keep the
+//                           PIN gate and receive mustSetPassword → client shows
+//                           the mandatory password-setup modal.
+// user:set_password        { password } → { ok: true } | ChatErrorAck (ALREADY_SET/WEAK)
+//                           First-time password setup for legacy accounts.
+// admin:invite_list        {} → AdminInviteListAck | ChatErrorAck
+// admin:invite_create      { count?, label? } → AdminInviteCreateAck (1–20 codes,
+//                           format CK-XXXXX-XXXX, single-use) | ChatErrorAck
+// admin:invite_delete      { code } → { ok: true } | ChatErrorAck (NOT_FOUND)
+// admin:user_create        { name, password } → AdminUserCreateAck | ChatErrorAck
+//                           Admin creates an account directly (no invite/device).
+// admin:user_reset_password { userId, password } → { ok: true } | ChatErrorAck
+// admin:user_unbind_devices { userId } → AdminUnbindDevicesAck — releases ALL
+//                           device bindings of a user (e.g. they changed phone).
 //
 // Kategori D — moderation & advanced forensics:
 // admin:delete_message    { messageId } → { ok: true } | ChatErrorAck

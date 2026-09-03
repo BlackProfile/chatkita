@@ -104,6 +104,7 @@ import {
   type TranslateAck,
   type UserAuthAck,
   type UserRestrictedPayload,
+  type UserSetPasswordAck,
 } from "@/lib/chat-types";
 import {
   avatarColorClass,
@@ -250,6 +251,30 @@ function starredSnippet(m: ChatMessage): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* v27 — ID perangkat stabil (kunci 1 perangkat 1 akun)                */
+/* ------------------------------------------------------------------ */
+
+const DEVICE_ID_KEY = "chatkita:deviceId";
+
+/** UUID acak yang disimpan di localStorage — klien mengirimnya saat auth.
+ *  Server menolak pendaftaran akun kedua dari perangkat yang sama. */
+function readDeviceId(): string {
+  try {
+    let id = window.localStorage.getItem(DEVICE_ID_KEY);
+    if (!id) {
+      id =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `dev-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+      window.localStorage.setItem(DEVICE_ID_KEY, id);
+    }
+    return id;
+  } catch {
+    return "";
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* PIN dialog (protect this account with a 4–8 digit code)             */
 /* ------------------------------------------------------------------ */
 
@@ -363,6 +388,127 @@ function PinDialog({
 }
 
 /* ------------------------------------------------------------------ */
+/* v27 — modal WAJIB pasang password (akun lama tanpa password)        */
+/* ------------------------------------------------------------------ */
+
+function PasswordSetupDialog({
+  onClose,
+  socketRef,
+}: {
+  onClose: () => void;
+  socketRef: React.RefObject<Socket | null>;
+}) {
+  const [value, setValue] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [done, setDone] = useState(false);
+
+  // Mounted only while open — state resets on remount.
+
+  const submit = () => {
+    const socket = socketRef.current;
+    if (!socket || saving || done) return;
+    const pw = value;
+    if (pw.length < 4 || pw.length > 72) {
+      setError("Password minimal 4 karakter (maksimal 72).");
+      return;
+    }
+    setSaving(true);
+    socket.emit(
+      "user:set_password",
+      { password: pw },
+      (res: AckOf<UserSetPasswordAck>) => {
+        setSaving(false);
+        if (res.ok) {
+          setDone(true);
+          setError(null);
+          setTimeout(onClose, 900);
+        } else {
+          setError(
+            res.error === "WEAK_PASSWORD"
+              ? "Password minimal 4 karakter (maksimal 72)."
+              : res.error === "ALREADY_SET"
+                ? "Password sudah terpasang sebelumnya."
+                : "Gagal, coba lagi."
+          );
+        }
+      }
+    );
+  };
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(o) => {
+        if (!o && !done) return; // wajib: tak bisa ditutup sebelum password dipasang
+        if (!o && done) onClose();
+      }}
+    >
+      <DialogContent
+        onInteractOutside={(e) => {
+          if (!done) e.preventDefault();
+        }}
+        onEscapeKeyDown={(e) => {
+          if (!done) e.preventDefault();
+        }}
+        className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm [&>button]:hidden"
+      >
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <ShieldCheck className="size-5 text-emerald-600" aria-hidden="true" />
+            Pasang Password Akun
+          </DialogTitle>
+          <DialogDescription>
+            Aturan baru: 1 orang cukup 1 akun. Akun Anda perlu dilindungi
+            password agar tidak bisa dibuka orang lain — wajib dipasang
+            sebelum lanjut chat.
+          </DialogDescription>
+        </DialogHeader>
+        {done ? (
+          <p className="text-sm font-medium text-emerald-600">Password terpasang ✓</p>
+        ) : (
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <Label htmlFor="pw-setup">Password (min. 4 karakter)</Label>
+              <Input
+                id="pw-setup"
+                type="password"
+                value={value}
+                placeholder="Buat password Anda"
+                maxLength={72}
+                autoFocus
+                onChange={(e) => {
+                  setValue(e.target.value);
+                  setError(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submit();
+                }}
+              />
+              {error ? <p className="text-sm text-destructive">{error}</p> : null}
+            </div>
+            <Button
+              className="h-10 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+              disabled={saving || value.length < 4}
+              onClick={submit}
+            >
+              {saving ? (
+                <>
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                  Menyimpan…
+                </>
+              ) : (
+                "Pasang & lanjut chat"
+              )}
+            </Button>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Messenger                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -394,6 +540,10 @@ export function Messenger() {
   );
   const [pinEntry, setPinEntry] = useState("");
   const [needsPin, setNeedsPin] = useState(false);
+  // v27 — 1 orang 1 akun: password + kode undangan + modal wajib password.
+  const [password, setPassword] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
+  const [pwModalOpen, setPwModalOpen] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [sendError, setSendError] = useState(false);
@@ -539,7 +689,7 @@ export function Messenger() {
       // the freshest history (also closes reconnect gaps).
       socket.emit(
         "user:auth",
-        { name: current.name, userId: current.userId },
+        { name: current.name, userId: current.userId, deviceId: readDeviceId() },
         (res: AckOf<UserAuthAck>) => {
           if (res.ok) {
             const next = { userId: res.user.id, name: res.user.name };
@@ -552,6 +702,8 @@ export function Messenger() {
             setHasPin(res.user.hasPin ?? false);
             setNeedsPin(false);
             setPinEntry("");
+            // v27 — akun lama tanpa password → wajib pasang lewat modal.
+            if (res.mustSetPassword) setPwModalOpen(true);
             setConversationId(res.conversationId);
             setPartner(res.partner);
             setMessages(res.messages);
@@ -830,6 +982,10 @@ export function Messenger() {
         {
           name: trimmed,
           pin: needsPin && pinEntry ? pinEntry : undefined,
+          // v27 — 1 orang 1 akun: password / kode undangan / perangkat.
+          password: password || undefined,
+          inviteCode: inviteCode.trim() || undefined,
+          deviceId: readDeviceId(),
         },
         (res: AckOf<UserAuthAck>) => {
           loginBusyRef.current = false;
@@ -845,6 +1001,10 @@ export function Messenger() {
             setHasPin(res.user.hasPin ?? false);
             setNeedsPin(false);
             setPinEntry("");
+            setPassword("");
+            setInviteCode("");
+            // v27 — akun lama tanpa password → wajib pasang lewat modal.
+            if (res.mustSetPassword) setPwModalOpen(true);
             setConversationId(res.conversationId);
             setPartner(res.partner);
             setMessages(res.messages);
@@ -863,6 +1023,20 @@ export function Messenger() {
               );
               return;
             }
+            // v27 — sesi lanjutan ditolak server (perangkat terikat akun lain)
+            // → pindah ke mode isi nama dan minta password.
+            if (
+              res.error === "PASSWORD_REQUIRED" &&
+              override &&
+              loginMode === "continue"
+            ) {
+              setLoginMode("other");
+              setName(override);
+              setAuthError(
+                "Perangkat ini terikat ke akun lain — masukkan password untuk melanjutkan."
+              );
+              return;
+            }
             setAuthError(
               res.error === "INVALID_NAME"
                 ? "Nama tidak valid (1–40 karakter)."
@@ -870,7 +1044,23 @@ export function Messenger() {
                   ? "Nama “Admin” tidak tersedia — coba nama lain."
                   : res.error === "REGISTRATION_CLOSED"
                     ? "Pendaftaran sedang ditutup admin — masuk dengan akun yang sudah ada."
-                    : "Terjadi kesalahan, coba lagi."
+                    : res.error === "PASSWORD_REQUIRED"
+                      ? "Akun ini memakai password — masukkan password Anda."
+                      : res.error === "INVALID_PASSWORD"
+                        ? "Nama atau password salah."
+                        : res.error === "TOO_MANY_ATTEMPTS"
+                          ? "Terlalu banyak percobaan gagal — tunggu ±1 menit."
+                          : res.error === "WEAK_PASSWORD"
+                            ? "Password minimal 4 karakter (maksimal 72)."
+                            : res.error === "INVITE_REQUIRED"
+                              ? "Pendaftaran akun baru wajib memakai kode undangan dari admin."
+                              : res.error === "INVITE_INVALID"
+                                ? "Kode undangan tidak dikenal — periksa kembali."
+                                : res.error === "INVITE_USED"
+                                  ? "Kode undangan ini sudah pernah dipakai."
+                                  : res.error === "DEVICE_TAKEN"
+                                    ? "1 perangkat 1 akun: perangkat ini sudah terdaftar dengan akun lain."
+                                    : "Terjadi kesalahan, coba lagi."
             );
           }
         }
@@ -886,6 +1076,11 @@ export function Messenger() {
     conversationIdRef.current = null;
     setMe(null);
     setHasPin(false);
+    setNeedsPin(false);
+    setPinEntry("");
+    setPassword("");
+    setInviteCode("");
+    setPwModalOpen(false);
     setConversationId(null);
     setPartner(null);
     setMessages([]);
@@ -1531,6 +1726,51 @@ export function Messenger() {
                       }}
                     />
                   </div>
+                  {/* v27 — 1 orang 1 akun: password (login & daftar) + kode undangan (daftar). */}
+                  <div className="space-y-2">
+                    <Label
+                      htmlFor="messenger-password"
+                      className="text-emerald-950/80 dark:text-emerald-100/70"
+                    >
+                      Password
+                    </Label>
+                    <Input
+                      id="messenger-password"
+                      type="password"
+                      value={password}
+                      maxLength={72}
+                      placeholder="Password akun (min. 4 karakter)"
+                      autoComplete="current-password"
+                      className="h-12 rounded-xl border-emerald-900/10 bg-white/70 dark:border-white/10 dark:bg-white/5"
+                      onChange={(e) => {
+                        setPassword(e.target.value);
+                        setAuthError(null);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label
+                      htmlFor="messenger-invite"
+                      className="text-emerald-950/80 dark:text-emerald-100/70"
+                    >
+                      Kode undangan{" "}
+                      <span className="font-normal text-emerald-900/45 dark:text-emerald-100/35">
+                        (hanya untuk daftar akun baru)
+                      </span>
+                    </Label>
+                    <Input
+                      id="messenger-invite"
+                      value={inviteCode}
+                      maxLength={20}
+                      placeholder="cth. CK-ABC12-3456"
+                      autoCapitalize="characters"
+                      className="h-12 rounded-xl border-emerald-900/10 bg-white/70 font-mono uppercase tracking-wider dark:border-white/10 dark:bg-white/5"
+                      onChange={(e) => {
+                        setInviteCode(e.target.value.toUpperCase());
+                        setAuthError(null);
+                      }}
+                    />
+                  </div>
                   {needsPin ? (
                     <div className="space-y-2">
                       <Label
@@ -1581,7 +1821,8 @@ export function Messenger() {
                   </Button>
                   {!lastName ? (
                     <p className="text-center text-xs text-emerald-900/55 dark:text-emerald-100/45">
-                      Nama yang sama = akun yang sama, jadi Anda bisa lanjut chat kapan saja
+                      1 orang 1 akun — akun lama masuk dengan password, akun
+                      baru daftar dengan kode undangan dari admin
                     </p>
                   ) : (
                     <Button
@@ -2298,6 +2539,11 @@ export function Messenger() {
           hasPin={hasPin}
           onHasPin={setHasPin}
         />
+      ) : null}
+
+      {/* v27 — modal wajib pasang password (akun lama tanpa password) */}
+      {pwModalOpen ? (
+        <PasswordSetupDialog onClose={() => setPwModalOpen(false)} socketRef={socketRef} />
       ) : null}
 
       {/* Dialog konfirmasi lampiran file (unggah → kirim) */}

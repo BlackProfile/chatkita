@@ -26,6 +26,7 @@ import {
   MessagesSquare,
   Megaphone,
   Mic,
+  MoreVertical,
   Paperclip,
   PencilLine,
   RefreshCw,
@@ -35,7 +36,9 @@ import {
   Send,
   Settings2,
   ShieldCheck,
+  Smartphone,
   Smile,
+  Ticket,
   Timer,
   Trash2,
   TrendingUp,
@@ -59,6 +62,12 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -69,7 +78,12 @@ import {
 } from "@/lib/chat-utils";
 import type {
   AckOf,
+  AdminInviteCreateAck,
+  AdminInviteListAck,
   AdminPasswordChangeAck,
+  AdminResetPasswordAck,
+  AdminUnbindDevicesAck,
+  AdminUserCreateAck,
   AppSettings,
   AppSettingsAck,
   BackupAck,
@@ -79,11 +93,13 @@ import type {
   DashboardStats,
   DashboardStatsAck,
   DashboardUserRow,
+  InviteCodeInfo,
   SystemInfo,
   SystemInfoAck,
   VacuumAck,
 } from "@/lib/chat-types";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 
 /**
  * v13 — Dashboard aplikasi khusus admin: analitik pemakaian mendalam
@@ -198,6 +214,11 @@ const AUDIT_LABELS: Record<string, string> = {
   cheat_time: "Cheat waktu",
   storage_map: "Peta penyimpanan",
   media_scan: "Pindai metadata",
+  invite_create: "Buat kode undangan",
+  invite_delete: "Hapus kode undangan",
+  user_create: "Buat akun",
+  user_reset_password: "Reset password user",
+  user_unbind_devices: "Lepas perangkat",
 };
 
 /** KPI kecil dengan ikon — dipakai di tab Ringkasan. */
@@ -361,6 +382,23 @@ export function AdminDashboard({
   const [userQuery, setUserQuery] = useState("");
   const [userSort, setUserSort] = useState<"messages" | "recent" | "name" | "new">("messages");
   const [onlineOnly, setOnlineOnly] = useState(false);
+  // v27 — 1 orang 1 akun: buat akun, reset password, lepas perangkat, kode undangan.
+  const [userCreateOpen, setUserCreateOpen] = useState(false);
+  const [newUserName, setNewUserName] = useState("");
+  const [newUserPw, setNewUserPw] = useState("");
+  const [newUserMsg, setNewUserMsg] = useState<string | null>(null);
+  const [userCreating, setUserCreating] = useState(false);
+  const [resetTarget, setResetTarget] = useState<DashboardUserRow | null>(null);
+  const [resetPw, setResetPw] = useState("");
+  const [resetMsg, setResetMsg] = useState<string | null>(null);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [unbindTarget, setUnbindTarget] = useState<DashboardUserRow | null>(null);
+  const [unbindBusy, setUnbindBusy] = useState(false);
+  const [invites, setInvites] = useState<InviteCodeInfo[] | null>(null);
+  const [inviteCount, setInviteCount] = useState(5);
+  const [inviteLabel, setInviteLabel] = useState("");
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [inviteMsg, setInviteMsg] = useState<string | null>(null);
 
   const fetchStats = useCallback(() => {
     if (!socket || !socket.connected) return;
@@ -406,6 +444,145 @@ export function AdminDashboard({
     const t = setTimeout(fetchSystem, 0);
     return () => clearTimeout(t);
   }, [open, tab, fetchSystem]);
+
+  /* ---------------- v27 — 1 orang 1 akun ---------------- */
+
+  /** Muat daftar kode undangan (tab Pengguna). */
+  const fetchInvites = () => {
+    if (!socket || !socket.connected) return;
+    socket.emit("admin:invite_list", {}, (res: AckOf<AdminInviteListAck>) => {
+      if (res.ok) setInvites(res.invites);
+    });
+  };
+
+  // Muat kode undangan saat tab Pengguna dibuka.
+  useEffect(() => {
+    if (!open || tab !== "pengguna") return;
+    fetchInvites();
+  }, [open, tab]);
+
+  /** Admin membuat akun langsung (nama + password). */
+  const createUser = () => {
+    if (!socket || userCreating) return;
+    const nm = newUserName.trim();
+    if (!nm || newUserPw.length < 4) {
+      setNewUserMsg("Nama wajib diisi & password minimal 4 karakter.");
+      return;
+    }
+    setUserCreating(true);
+    setNewUserMsg(null);
+    socket.emit(
+      "admin:user_create",
+      { name: nm, password: newUserPw },
+      (res: AckOf<AdminUserCreateAck>) => {
+        setUserCreating(false);
+        if (res.ok) {
+          setNewUserMsg(null);
+          setNewUserName("");
+          setNewUserPw("");
+          setUserCreateOpen(false);
+          toast.success(`Akun "${res.name}" dibuat`);
+          fetchStats();
+        } else {
+          setNewUserMsg(
+            res.error === "NAME_TAKEN"
+              ? "Nama sudah dipakai akun lain."
+              : res.error === "NAME_RESERVED"
+                ? "Nama “Admin” tidak tersedia."
+                : res.error === "WEAK_PASSWORD"
+                  ? "Password minimal 4 karakter."
+                  : res.error === "INVALID_NAME"
+                    ? "Nama tidak valid (1–40 karakter)."
+                    : "Gagal membuat akun."
+          );
+        }
+      }
+    );
+  };
+
+  /** Reset password user dari dashboard. */
+  const submitResetPassword = () => {
+    if (!socket || !resetTarget || resetBusy) return;
+    if (resetPw.length < 4) {
+      setResetMsg("Password minimal 4 karakter.");
+      return;
+    }
+    setResetBusy(true);
+    setResetMsg(null);
+    socket.emit(
+      "admin:user_reset_password",
+      { userId: resetTarget.id, password: resetPw },
+      (res: AckOf<AdminResetPasswordAck>) => {
+        setResetBusy(false);
+        if (res.ok) {
+          toast.success(`Password "${resetTarget.name}" direset`);
+          setResetTarget(null);
+          setResetPw("");
+        } else {
+          setResetMsg(res.error === "WEAK_PASSWORD" ? "Password minimal 4 karakter." : "Gagal reset password.");
+        }
+      }
+    );
+  };
+
+  /** Lepas semua kunci perangkat user (1 perangkat 1 akun). */
+  const submitUnbindDevices = () => {
+    if (!socket || !unbindTarget || unbindBusy) return;
+    setUnbindBusy(true);
+    socket.emit(
+      "admin:user_unbind_devices",
+      { userId: unbindTarget.id },
+      (res: AckOf<AdminUnbindDevicesAck>) => {
+        setUnbindBusy(false);
+        if (res.ok) {
+          toast.success(`${res.removed} perangkat dilepas dari "${unbindTarget.name}"`);
+          setUnbindTarget(null);
+          fetchStats();
+        } else {
+          toast.error("Gagal melepas perangkat.");
+        }
+      }
+    );
+  };
+
+  /** Buat 1–20 kode undangan sekali pakai. */
+  const createInvites = () => {
+    if (!socket || inviteBusy) return;
+    setInviteBusy(true);
+    setInviteMsg(null);
+    socket.emit(
+      "admin:invite_create",
+      { count: inviteCount, label: inviteLabel.trim() || undefined },
+      (res: AckOf<AdminInviteCreateAck>) => {
+        setInviteBusy(false);
+        if (res.ok) {
+          setInviteMsg(`${res.created.length} kode dibuat`);
+          setInviteLabel("");
+          fetchInvites();
+        } else {
+          setInviteMsg("Gagal membuat kode.");
+        }
+      }
+    );
+  };
+
+  const deleteInvite = (code: string) => {
+    if (!socket || inviteBusy) return;
+    setInviteBusy(true);
+    socket.emit("admin:invite_delete", { code }, () => {
+      setInviteBusy(false);
+      fetchInvites();
+    });
+  };
+
+  const copyInvite = async (code: string) => {
+    try {
+      await navigator.clipboard.writeText(code);
+      toast.success(`Kode ${code} disalin`);
+    } catch {
+      toast.error("Gagal menyalin kode.");
+    }
+  };
 
   const runCleanup = () => {
     if (!socket || busy) return;
@@ -593,6 +770,13 @@ export function AdminDashboard({
             ? "Online"
             : formatLastSeen(u.lastSeenAt)}
           {u.joinedAt ? ` · bergabung ${fmtIsoDay(u.joinedAt)}` : ""}
+          {/* v27 — status password + jumlah perangkat terikat. */}
+          {typeof u.hasPassword === "boolean"
+            ? u.hasPassword
+              ? " · 🔑 ber-password"
+              : " · ⚠ tanpa password"
+            : ""}
+          {typeof u.devices === "number" && u.devices > 0 ? ` · ${u.devices} perangkat` : ""}
         </p>
       </div>
       <div className="shrink-0 text-right">
@@ -602,6 +786,35 @@ export function AdminDashboard({
           {u.mediaCount ? ` · ${u.mediaCount} media` : ""}
         </p>
       </div>
+      {/* v27 — aksi per akun: reset password / lepas kunci perangkat. */}
+      {!rank ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 shrink-0 rounded-lg"
+              aria-label={`Aksi akun ${u.name}`}
+            >
+              <MoreVertical className="size-4" aria-hidden="true" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuItem onSelect={() => {
+              setResetTarget(u);
+              setResetPw("");
+              setResetMsg(null);
+            }}>
+              <KeyRound className="size-4" aria-hidden="true" />
+              Reset password…
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setUnbindTarget(u)}>
+              <Smartphone className="size-4" aria-hidden="true" />
+              Lepas kunci perangkat
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : null}
     </div>
   );
 
@@ -947,6 +1160,20 @@ export function AdminDashboard({
                   />
                   <span>Online saja</span>
                 </label>
+                {/* v27 — buat akun langsung dari dashboard. */}
+                <Button
+                  size="sm"
+                  className="h-8 shrink-0 rounded-full bg-emerald-600 text-xs text-white hover:bg-emerald-600/90"
+                  onClick={() => {
+                    setNewUserName("");
+                    setNewUserPw("");
+                    setNewUserMsg(null);
+                    setUserCreateOpen(true);
+                  }}
+                >
+                  <UserPlus className="size-3.5" aria-hidden="true" />
+                  Buat akun
+                </Button>
               </div>
 
               <div className="rounded-xl border bg-card p-2">
@@ -964,6 +1191,112 @@ export function AdminDashboard({
                     {visibleUsers.map((u) => userRow(u))}
                   </div>
                 )}
+              </div>
+
+              {/* v27 — kode undangan sekali pakai (1 kode = 1 akun baru). */}
+              <div className="rounded-xl border bg-card p-3">
+                <div className="mb-2 flex items-center gap-2">
+                  <Ticket className="size-4 text-emerald-600" aria-hidden="true" />
+                  <p className="text-sm font-medium">Kode undangan</p>
+                  <Badge variant="secondary" className="font-mono text-[10px]">
+                    1 kode = 1 akun
+                  </Badge>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="ml-auto size-7"
+                    onClick={fetchInvites}
+                    aria-label="Muat ulang kode undangan"
+                  >
+                    <RefreshCw className="size-3.5" aria-hidden="true" />
+                  </Button>
+                </div>
+                <div className="mb-2 flex flex-col gap-2 sm:flex-row">
+                  <select
+                    value={inviteCount}
+                    onChange={(e) => setInviteCount(Number(e.target.value))}
+                    aria-label="Jumlah kode"
+                    className="h-9 rounded-lg border bg-background px-2 text-xs"
+                  >
+                    {[1, 5, 10, 20].map((n) => (
+                      <option key={n} value={n}>
+                        {n} kode
+                      </option>
+                    ))}
+                  </select>
+                  <Input
+                    value={inviteLabel}
+                    onChange={(e) => setInviteLabel(e.target.value)}
+                    placeholder="Catatan (opsional) — cth. undangan keluarga"
+                    maxLength={60}
+                    className="h-9 flex-1"
+                    aria-label="Catatan kode undangan"
+                  />
+                  <Button
+                    size="sm"
+                    className="h-9 rounded-lg bg-emerald-600 text-xs text-white hover:bg-emerald-600/90"
+                    disabled={inviteBusy}
+                    onClick={createInvites}
+                  >
+                    {inviteBusy ? (
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Ticket className="size-3.5" aria-hidden="true" />
+                    )}
+                    Buat kode
+                  </Button>
+                </div>
+                {inviteMsg ? (
+                  <p className="mb-2 text-xs text-emerald-600">{inviteMsg}</p>
+                ) : null}
+                <div className="max-h-64 divide-y divide-border/60 overflow-y-auto">
+                  {!invites ? (
+                    <p className="py-4 text-center text-xs text-muted-foreground">
+                      Memuat kode…
+                    </p>
+                  ) : invites.length === 0 ? (
+                    <p className="py-4 text-center text-xs text-muted-foreground">
+                      Belum ada kode undangan — buat kode untuk mengundang anggota baru.
+                    </p>
+                  ) : (
+                    invites.map((iv) => (
+                      <div key={iv.code} className="flex items-center gap-2 py-2">
+                        <button
+                          type="button"
+                          onClick={() => copyInvite(iv.code)}
+                          title="Klik untuk salin"
+                          className="rounded-md bg-muted/70 px-2 py-1 font-mono text-xs font-semibold tracking-wider transition-colors hover:bg-accent"
+                        >
+                          {iv.code}
+                        </button>
+                        <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
+                          {iv.usedBy
+                            ? `Dipakai oleh ${iv.usedByName ?? iv.usedBy}${iv.usedAt ? ` · ${fmtIsoDay(iv.usedAt)}` : ""}`
+                            : "Belum dipakai"}
+                          {iv.label ? ` · ${iv.label}` : ""}
+                        </span>
+                        {iv.usedBy ? (
+                          <Badge variant="secondary" className="text-[10px]">
+                            terpakai
+                          </Badge>
+                        ) : (
+                          <Badge className="bg-emerald-600 text-[10px] text-white">
+                            tersedia
+                          </Badge>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-7 shrink-0 text-destructive hover:text-destructive"
+                          onClick={() => deleteInvite(iv.code)}
+                          aria-label={`Hapus kode ${iv.code}`}
+                        >
+                          <Trash2 className="size-3.5" aria-hidden="true" />
+                        </Button>
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
             </div>
           ) : tab === "siaran" ? (
@@ -1646,6 +1979,158 @@ export function AdminDashboard({
             </div>
           )}
         </div>
+
+        {/* v27 — dialog buat akun (nama + password, tanpa kode undangan). */}
+        <Dialog open={userCreateOpen} onOpenChange={setUserCreateOpen}>
+          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <UserPlus className="size-5 text-emerald-600" aria-hidden="true" />
+                Buat akun baru
+              </DialogTitle>
+              <DialogDescription>
+                Akun dibuat langsung oleh admin — tanpa kode undangan dan tanpa
+                perangkat. Bagikan password-nya ke pemakai.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3">
+              <div className="space-y-2">
+                <Label htmlFor="new-user-name">Nama akun</Label>
+                <Input
+                  id="new-user-name"
+                  value={newUserName}
+                  maxLength={40}
+                  placeholder="cth. Budi Santoso"
+                  onChange={(e) => {
+                    setNewUserName(e.target.value);
+                    setNewUserMsg(null);
+                  }}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="new-user-pw">Password (min. 4 karakter)</Label>
+                <Input
+                  id="new-user-pw"
+                  type="text"
+                  value={newUserPw}
+                  maxLength={72}
+                  placeholder="Password awal"
+                  onChange={(e) => {
+                    setNewUserPw(e.target.value);
+                    setNewUserMsg(null);
+                  }}
+                />
+              </div>
+              {newUserMsg ? <p className="text-sm text-destructive">{newUserMsg}</p> : null}
+              <Button
+                className="h-10 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+                disabled={userCreating || !newUserName.trim() || newUserPw.length < 4}
+                onClick={createUser}
+              >
+                {userCreating ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                    Membuat…
+                  </>
+                ) : (
+                  "Buat akun"
+                )}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* v27 — dialog reset password user. */}
+        <Dialog
+          open={!!resetTarget}
+          onOpenChange={(o) => {
+            if (!o) setResetTarget(null);
+          }}
+        >
+          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <KeyRound className="size-5 text-emerald-600" aria-hidden="true" />
+                Reset password
+              </DialogTitle>
+              <DialogDescription>
+                Password baru untuk akun{" "}
+                <span className="font-semibold">{resetTarget?.name}</span>. Kabari
+                pemakainya setelah direset.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3">
+              <div className="space-y-2">
+                <Label htmlFor="reset-pw">Password baru (min. 4 karakter)</Label>
+                <Input
+                  id="reset-pw"
+                  type="text"
+                  value={resetPw}
+                  maxLength={72}
+                  placeholder="Password baru"
+                  onChange={(e) => {
+                    setResetPw(e.target.value);
+                    setResetMsg(null);
+                  }}
+                />
+              </div>
+              {resetMsg ? <p className="text-sm text-destructive">{resetMsg}</p> : null}
+              <Button
+                className="h-10 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
+                disabled={resetBusy || resetPw.length < 4}
+                onClick={submitResetPassword}
+              >
+                {resetBusy ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                    Menyimpan…
+                  </>
+                ) : (
+                  "Reset password"
+                )}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* v27 — konfirmasi lepas kunci perangkat. */}
+        <Dialog
+          open={!!unbindTarget}
+          onOpenChange={(o) => {
+            if (!o) setUnbindTarget(null);
+          }}
+        >
+          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Smartphone className="size-5 text-emerald-600" aria-hidden="true" />
+                Lepas kunci perangkat
+              </DialogTitle>
+              <DialogDescription>
+                Semua perangkat yang terikat ke akun{" "}
+                <span className="font-semibold">{unbindTarget?.name}</span> akan
+                dilepas — perangkat itu bisa dipakai mendaftarkan akun lain.
+                Cocok saat pemakai berganti HP. Lanjutkan?
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex gap-2">
+              <Button variant="outline" className="h-10 flex-1" onClick={() => setUnbindTarget(null)}>
+                Batal
+              </Button>
+              <Button
+                className="h-10 flex-1 bg-emerald-600 text-white hover:bg-emerald-600/90"
+                disabled={unbindBusy}
+                onClick={submitUnbindDevices}
+              >
+                {unbindBusy ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  "Lepas perangkat"
+                )}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
       </DialogContent>
     </Dialog>
   );

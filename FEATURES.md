@@ -97,6 +97,15 @@
 - Metadata tampil di daftar file terbesar (emerald: `1600×900`, `0:42`, `12 hlm`). Semua aksi audit (`storage_map`, `media_scan`).
 - Verifikasi: verify-integrity seksi "v26" (12 cek baru).
 
+### v27 — 1 Orang 1 Akun (Task 46)
+- **Registrasi baru wajib 3 syarat** (server-side, `user:auth`): **password** (4–72 karakter, bcrypt cost 10) + **kode undangan sekali pakai** (`CK-XXXXX-XXXX`, 1 kode = 1 akun, hangus setelah dipakai) + **perangkat yang belum pernah terdaftar** (`devices` table, 1 perangkat = 1 akun, append-only). Registrasi tetap bisa dibuka/ditutup admin (Pengaturan → Akses).
+- **Login akun ber-password**: nama + password benar (rate limit per-nama 10 gagal/menit → `TOO_MANY_ATTEMPTS`). **Lintas perangkat diperbolehkan via username+password**; perangkat baru ikut tercatat ke akun (maks 8). Sesi tersimpan (restore) tetap bekerja, tapi sesi di perangkat milik akun lain ditolak (menutup celah salin localStorage).
+- **Akun lama dimigrasi**: login name-only/PIN tetap jalan, tapi auth mengembalikan `mustSetPassword` → **modal wajib pasang password** (tidak bisa ditutup/di-Esc) via event `user:set_password`. Sekali saja saat boot v27, server menyisipkan **pesan sistem pemberitahuan** ke chat setiap akun lama ("🔐 Pembaruan keamanan…", tanda `notice_v27_sent`).
+- **Dashboard admin (tab Pengguna)**: tombol **"Buat akun"** (nama + password langsung, tanpa kode), **kartu Kode undangan** (buat 1–20 kode + catatan, klik kode = salin, status tersedia/terpakai oleh siapa, hapus), **menu aksi per user** (⋯): **Reset password…** dan **Lepas kunci perangkat** (untuk ganti HP / reset device-lock). Badge per user: 🔑 ber-password / ⚠ tanpa password + jumlah perangkat.
+- Klien mengirim **deviceId** (UUID di localStorage `chatkita:deviceId`) pada setiap auth. Error baru: `PASSWORD_REQUIRED`, `INVALID_PASSWORD`, `TOO_MANY_ATTEMPTS`, `INVITE_REQUIRED/INVALID/USED`, `DEVICE_REQUIRED/TAKEN`, `ALREADY_SET`, `NAME_TAKEN` (semua terdaftar di `ChatErrorCode`).
+- Semua aksi admin di-audit (`invite_create/invite_delete/user_create/user_reset_password/user_unbind_devices`).
+- Verifikasi: verify-integrity seksi "v27" (26 cek baru, total 86).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 
