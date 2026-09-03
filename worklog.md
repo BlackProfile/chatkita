@@ -964,3 +964,17 @@ Work Log:
 
 Stage Summary:
 - Task 43 SELESAI: fitur cheating LENGKAP jadi SATU tempat — tab "Cheat" di Dashboard Aplikasi berisi spoof kirim sebagai user (bisa backdate), edit/hapus pesan siapa saja, reaksi atas nama user, ubah waktu pesan, plus seluruh sinyal ilusi lama (typing/dibaca/online/mirror/ghost/last seen). Protokol 16/16, verify-integrity 52/52, lint 0/0, E2E desktop+mobile+user-side 0 error. Commit 1ba16b5 (+0da415b mode fix); rescue-v25 = tag baru; GitHub sinkron.
+---
+Task ID: 44
+Agent: Z.ai Code (main)
+Task: "perbaiki panah scroll down yg ikut ke scroll" — tombol jump-to-bottom melayang stabil (tidak ikut ter-scroll)
+
+Work Log:
+- Diagnosa: tombol "Ke pesan terbaru" (ArrowDown, showJump) berada DI DALAM div scroll (`chat-scroll chat-wallpaper relative min-h-0 flex-1 overflow-y-auto`) di KEDUA sisi (Messenger.tsx ~1999, AdminPanel.tsx ~2590). Karena scroll container `relative`, tombol `absolute bottom-*` diposisikan terhadap kotak KONTEN scroll → ikut bergeser saat di-scroll (kelihatan "lari"/hilang).
+- Fix (kedua sisi identik): tambah wrapper `<div className="relative min-h-0 flex-1">` di LUAR div scroll; div scroll jadi anak `relative h-full min-h-0 overflow-y-auto` (flex-1 pindah ke wrapper); tombol dikeluarkan dari div scroll → anak wrapper (absolute sekarang mengacu ke viewport chat yang tidak scroll). Messenger bottom-24 → bottom-4 (konsisten dengan admin; posisi lama tidak lagi relevan di dalam wrapper). Ref scrollRef + onScroll + scrollToBottom tidak berubah.
+- PELAJARAN: `position:absolute` di dalam scroll container selalu ikut ter-scroll meski mengacu ke kontainer — solusi pattern: wrapper relative non-scroll membungkus scroll container, elemen melayang jadi anak wrapper.
+- E2E agent-browser (t44+t44u, :81): user uji UjiScroll44 + 30 pesan via bun:sqlite. Admin: scrollTop 0 → tombol top=775; scrollTop 600 → top TETAP 775 (tidak ikut scroll ✓); klik → scrollTop=1357 (dasar), tombol hilang, atBottom=true. User: pola sama, top=775 tetap pada scrollTop 0→700 ✓. Screenshot bukti (t44-jump.png, t44-user-jump2.png): panah ↓ melayang di pojok kanan bawah viewport chat saat daftar di posisi tengah. Console/page errors 0 (kedua sesi). lint 0/0. Cleanup: user+conv+30 pesan uji dihapus (sisa 5 users).
+- Tanpa perubahan server → SERVICE_VERSION tetap v25, verify-integrity 52/52 tetap lolos.
+
+Stage Summary:
+- Task 44 SELESAI: panah jump-to-bottom kini melayang tetap di pojok kanan bawah area chat (user & admin), tidak ikut ter-scroll; klik tetap melompat ke pesan terbaru. Murni perbaikan layout (2 file), server tak tersentuh.
