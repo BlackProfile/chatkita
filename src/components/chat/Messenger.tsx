@@ -1870,10 +1870,12 @@ export function Messenger() {
           </div>
         ) : null}
 
-        {/* Messages */}
+        {/* Messages — wrapper relative: tombol jump melayang tetap di viewport
+            chat (absolute di dalam scroll container ikut ter-scroll). */}
+        <div className="relative min-h-0 flex-1">
         <div
           ref={scrollRef}
-          className="chat-scroll chat-wallpaper relative min-h-0 flex-1 overflow-y-auto overscroll-contain"
+          className="chat-scroll chat-wallpaper relative h-full min-h-0 overflow-y-auto overscroll-contain"
           onScroll={(e) => {
             const el = e.currentTarget;
             const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
@@ -1994,13 +1996,14 @@ export function Messenger() {
               ))
             )}
           </div>
+          </div>
 
-          {/* Jump to latest */}
+          {/* Jump to latest — anak wrapper (bukan scroll container). */}
           {showJump ? (
             <Button
               size="icon"
               aria-label={newCount > 0 ? `${newCount} pesan baru` : "Ke pesan terbaru"}
-              className="absolute bottom-24 right-4 z-10 size-10 rounded-full bg-emerald-600 text-white shadow-lg hover:bg-emerald-600/90"
+              className="absolute bottom-4 right-4 z-10 size-10 rounded-full bg-emerald-600 text-white shadow-lg hover:bg-emerald-600/90"
               onClick={() => {
                 setNewCount(0);
                 scrollToBottom(true);

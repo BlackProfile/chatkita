@@ -2461,10 +2461,12 @@ export function AdminPanel() {
                   </div>
                 ) : null}
 
-                {/* Messages */}
+                {/* Messages — wrapper relative: tombol jump melayang tetap di viewport
+                    chat (absolute di dalam scroll container ikut ter-scroll). */}
+                <div className="relative min-h-0 flex-1">
                 <div
                   ref={scrollRef}
-                  className="chat-scroll chat-wallpaper relative min-h-0 flex-1 overflow-y-auto overscroll-contain"
+                  className="chat-scroll chat-wallpaper relative h-full min-h-0 overflow-y-auto overscroll-contain"
                   onScroll={(e) => {
                     const el = e.currentTarget;
                     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
@@ -2585,8 +2587,9 @@ export function AdminPanel() {
                       ))
                     )}
                   </div>
+                  </div>
 
-                  {/* Jump to latest */}
+                  {/* Jump to latest — anak wrapper (bukan scroll container). */}
                   {showJump ? (
                     <Button
                       size="icon"
