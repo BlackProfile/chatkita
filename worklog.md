@@ -907,3 +907,22 @@ Work Log:
 
 Stage Summary:
 - Task 40 SELESAI: tampilan digabung sesuai permintaan — header user 7→2, admin 4→2, composer 3→2 tombol; SEMUA fitur tetap bisa diakses via "Menu lainnya" dan tombol "+". Verify-integrity 29/29, lint 0/0, E2E desktop+mobile 0 error. Insiden stash→inode ditangani + dijaga .gitignore wal/shm.
+---
+Task ID: 41
+Agent: main (Z.ai Code)
+Task: "custom login admin" — v23: password admin dapat diganti (hash di DB) + ganti dari dashboard + rate limit anti brute-force
+
+Work Log:
+- Audit awal: password admin hardcoded (process.env.ADMIN_PASSWORD || 'admin123') di admin:auth, plaintext compare, tanpa rate limit, tak bisa diganti.
+- Server (index.ts): SERVICE_VERSION → 'v23'; helper getAdminPasswordHash + verifyAdminPassword (Bun.password.verify async; fallback env/admin123 bila tanpa hash); state brute-force (jendela global 10 gagal/60 dtk + Map per-socket 5 gagal → RATE_LIMITED, reset saat sukses/ganti password); admin:auth di-rewrite async (ack + usingDefault:true bila masih bawaan); event BARU admin:password_change (adminGuard, verifikasi password sekarang, validasi 6–64 kar → WEAK_PASSWORD, hash bcrypt cost 10 via Bun.password.hashSync, setSetting('adminPasswordHash'), audit('password', …)).
+- chat-types.ts: AdminAuthAck += usingDefault?: boolean; ChatErrorCode += "WEAK_PASSWORD"; interface AdminPasswordChangeAck; komentar protokol diperbarui.
+- AdminPanel.tsx: state usingDefault (di-set di handleLogin + re-auth connect); mapping error RATE_LIMITED di login + layar kunci ("Terlalu banyak percobaan — tunggu 1 menit."); prop usingDefaultPassword diteruskan ke AdminDashboard.
+- admin-dashboard.tsx: props usingDefaultPassword; kartu "Login admin" di tab Pengaturan (ikon KeyRound; peringatan amber "⚠ Masih memakai password bawaan admin123" bila usingDefault; input password sekarang/baru/ulangi; tombol Ganti password dengan spinner; mapping error UNAUTHORIZED/WEAK_PASSWORD/RATE_LIMITED; pesan sukses + reset form; catatan "tersimpan ter-hash").
+- Uji protokol socket (bun + socket.io-client) 8/8 PASS: login default ok+usingDefault:true; salah → UNAUTHORIZED; ganti ke UjiPass23 ok; login lama → UNAUTHORIZED; login baru ok+usingDefault:false; password lemah → WEAK_PASSWORD; restore admin123 ok; final ok. Setelah uji: DELETE settings.adminPasswordHash via bun:sqlite → state kembali fallback murni (usingDefault:true).
+- Temuan --hot: touch TIDAK memicu reload, tetapi perubahan KONTEN index.ts ter-reload oleh bun --hot (terbukti ack v23 langsung aktif tanpa restart) — berbeda dari dugaan di Task 40.
+- Insiden data uji kembali: checkpoint platform menulis ulang chat.db dari blob commit (blob f190929 masih berisi UjiGabung karena commit 0938220 dilakukan sebelum cleanup Task 40) → UjiGabung muncul lagi di DB; dihapus ulang + adminPasswordHash dipastikan null; DB bersih (5 users) ikut ter-commit di commit worklog ini sehingga blob HEAD bersih.
+- E2E agent-browser (session t41, gateway :81): login admin123 sukses; heading "Dashboard Aplikasi v23"; tab Pengaturan → kartu Login admin + peringatan amber tampil (diverifikasi visual via screenshot); password sekarang salah → "Password sekarang salah." (server menolak, tidak ada perubahan); tombol Ganti password disabled saat form kosong; console 0 error, page errors 0.
+- verify-integrity 29 → 35 cek (seksi v23: hash server, event ganti password, rate limit, form dashboard, peringatan bawaan, rescue tag v23). FEATURES.md +seksi v23 +header "Terakhir diperbarui". instrumentation RESCUE_TAG → rescue-v23; tag rescue-v23 dibuat + di-push.
+
+Stage Summary:
+- Task 41 SELESAI: login admin kini custom — password bisa diganti dari Dashboard → Pengaturan (bcrypt di DB, persist), tetap kompatibel admin123 bila belum diganti, dilindungi rate limit (10/menit global + 5/socket), dan admin diberi peringatan visual bila masih memakai password bawaan. Protokol 8/8, verify-integrity 35/35, lint 0/0, E2E 0 error, tag rescue-v23 + GitHub sinkron (49e5286).
