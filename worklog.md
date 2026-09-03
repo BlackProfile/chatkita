@@ -1056,3 +1056,22 @@ Work Log:
 
 Stage Summary:
 - Task 48 SELESAI: seluruh fitur yang menumpuk data kini punya reset/hapus — user (bersihkan chat sendiri, hapus semua bintang, batalkan semua terjadwal, reset tampilan) dan admin (hapus akun permanen berkaskade, semburan kode undangan bebas, bersihkan audit dengan jejak, reset pengaturan default) — semuanya berkonfirmasi, sadar-pembersih, dan ter-audit. Protokol 36/36, verify 111/111, lint 0/0, E2E desktop+mobile 0 error, data nyata dipulihkan sempurna. Commit + tag rescue-v29, GitHub sinkron.
+---
+Task ID: 49
+Agent: Z.ai Code (main)
+Task: "buat bersihkan chat untuk kedua sisi hanya dapat dilakukan oleh admin" — v30: event conversation:clear (user) dihapus, pembersihan riwayat percakapan jadi monopoli admin
+
+Work Log:
+- Konteks: Task 48 (v29) baru saja memberi user "Bersihkan chat…" yang realitasnya menghapus SELURUH percakapan (kedua sisi, user↔admin). User memutuskan aksi kedua-sisi seperti itu harus monopoli admin.
+- Server (index.ts): SERVICE_VERSION 'v29' → 'v30'; handler `conversation:clear` DIHAPUS total dari protokol (tidak ada guard — eventnya lenyap, ack tak pernah dipanggil); komentar wipeConversationMessages diperbarui ("v30 — dipakai SATU-SATUNYA oleh admin:reset_conversation"); blok changelog +v30. Jalur admin `admin:reset_conversation` (v11) tetap utuh: pipeline wipeConversationMessages (tombstone batch forensik + media dibebaskan + pin lepas), broadcast conversation:reset { by:'admin', byName:'Admin' }, audit reset_conversation, konfirmasi dialog "dihapus permanen untuk kedua sisi".
+- chat-types.ts: interface ConversationClearAck ditarik; komentar protokol Kategori H kini mendokumentasikan penghapusan ("v30 — conversation:clear (user) DIHAPUS… hanya ADMIN via admin:reset_conversation").
+- Messenger.tsx: import ConversationClearAck + Eraser dilepas; state clearChatOpen, handleClearChat, item menu "Bersihkan chat…", AlertDialog konfirmasinya — semua dihapus. Menu ⋮ user kini: Pesan berbintang / PIN / Hemat data / Tema / Ukuran huruf / Reset tampilan (lokal) / Keluar. Komentar menu menjelaskan pembersihan kedua sisi hanya oleh admin.
+- Audit label `user_clear_chat` sengaja DIPERTAHANKAN di dashboard/admin-tools sebagai pemetaan tampilan untuk entri audit historis.
+- verify-integrity.sh: 4 cek v29 kedaluwarsa dihapus (Versi v29, conversation:clear server, Menu bersihkan chat UI, Rescue v29) + seksi "v30" 7 cek baru → 114/114 PASS. FEATURES.md +seksi v30 (chmod 644). instrumentation RESCUE_TAG → rescue-v30.
+- Uji protokol (.zscripts/t49-test.ts) 16/16 PASS: conversation:clear (user maupun socket admin) → TIDAK ada ack (emitTimeout Symbol sentinel); admin:reset_conversation oleh user/anonim → UNAUTHORIZED; reset admin deleted=3 + broadcast by='admin' + 3 tombstone + pin lepas + audit; id palsu → NOT_FOUND; regresi messages:unstar_all hidup (cleared=0).
+- E2E agent-browser (t49, :81, desktop 1440×900 + mobile 390×844): login UjiBrowser49 → kirim 2 pesan → menu ⋮ TANPA "Bersihkan chat…" ✓ (screenshot /tmp/t49-user-menu.png); admin /?admin autologin → buka percakapan → "Reset chat" → dialog "SEMUA pesan percakapan ini dihapus permanen untuk kedua sisi…" (screenshot /tmp/t49-admin-confirm.png) → "Ya, reset" → notifikasi "Chat direset (2 pesan dihapus)" ✓; kembali ke user → kedua pesan jadi tombstone "Pesan ini dihapus" (pipeline forensik, kedua sisi kosong) ✓; mobile 390×844 → menu user sama, adaBersihkan:false ✓ (screenshot /tmp/t49-mobile-menu.png). Console 0 error, page errors 0.
+- Cleanup: UjiBrowser49 + percakapan + perangkat + push dihapus; users kembali 5 asli (Admin, Jawa, KIANI, hanapi, rvg); allowRegistration='0'; kode uji & entri audit uji = 0 (t49-verify-clean.ts).
+- Commit a048730 + tag rescue-v30 (push origin ok, hook post-commit backup jalan).
+
+Stage Summary:
+- Task 49 SELESAI: prinsip "bersihkan chat kedua sisi = wewenang admin" kini ditegakkan teknis — user tidak lagi punya celah menghapus riwayat percakapan bersama (event dihapus dari protokol, bukan sekadar disembunyikan di UI); admin tetap punya tombol Reset chat berdialog konfirmasi yang jelas, ter-audit, dan menyiarkan pembersihan ke semua pihak. Protokol 16/16, verify 114/114, lint 0/0, E2E desktop+mobile 0 error, data uji bersih. GitHub sinkron (a048730 + rescue-v30).
