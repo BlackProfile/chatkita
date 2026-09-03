@@ -167,8 +167,6 @@ chk_grep "Kirim lampiran via tombol (admin)"  "src/components/chat/AdminPanel.ts
 chk_grep "Audio file bukan voice note"        "src/components/chat/ChatBubble.tsx" "File audio"
 
 echo "[v32 — Tautan dibuka langsung tanpa popup (Task 51)]"
-chk_grep "Versi service v32"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v32'"
-chk_grep "Rescue tag v32"                     "src/instrumentation.ts" "rescue-v32"
 chk_grep "Teks URL bisa diklik (LinkifiedText)" "src/components/chat/link-preview.tsx" "export function LinkifiedText"
 chk_grep "URL jadi tautan tab baru"           "src/components/chat/link-preview.tsx" 'target="_blank"'
 chk_grep "Tautan aman noopener"               "src/components/chat/link-preview.tsx" 'rel="noopener noreferrer"'
@@ -176,6 +174,15 @@ chk_grep "Teks bubble via LinkifiedText"      "src/components/chat/ChatBubble.ts
 chk_grep "Caption juga bisa diklik"           "src/components/chat/ChatBubble.tsx" "text={caption}"
 chk_grep "Kartu pratinjau kini anchor buka"   "src/components/chat/link-preview.tsx" "href={data.url}"
 chk_grep "Label buka langsung di kartu"       "src/components/chat/link-preview.tsx" "di browser"
+
+echo "[v33 — Thumbnail pratinjau tautan YouTube (Task 52)]"
+chk_grep "Versi service v33"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v33'"
+chk_grep "Rescue tag v33"                     "src/instrumentation.ts" "rescue-v33"
+chk_grep "Thumbnail YouTube dari CDN i.ytimg" "src/app/api/link-preview/route.ts" "i.ytimg.com/vi/"
+chk_grep "Judul asli via oEmbed YouTube"      "src/app/api/link-preview/route.ts" "youtube.com/oembed"
+chk_grep "TikTok thumbnail via oEmbed"        "src/app/api/link-preview/route.ts" "tiktok.com/oembed"
+chk_grep "Kartu minimal saat halaman diblokir" "src/app/api/link-preview/route.ts" "providerFallback"
+chk_grep "Enrichment best-effort gagal=diam"  "src/app/api/link-preview/route.ts" "enrichProviderMedia"
 
 echo ""
 echo "== Versi server terdaftar =="

@@ -145,6 +145,14 @@
 - **Aman & rapi**: `rel="noopener noreferrer"` di semua tautan eksternal; ketukan tautan tidak men-toggle baris aksi bubble; berlaku simetris di chat user dan panel admin (sama-sama memakai ChatBubble).
 - Verifikasi: verify-integrity seksi "v32" (9 cek; 2 cek versi v31 dipindah, total 128).
 
+### v33 — Thumbnail Pratinjau Tautan YouTube (Task 52)
+- **Keluhan**: kartu pratinjau tautan YouTube tampil **kotak hitam kosong** (fallback ikon ▶) tanpa judul — YouTube memblokir `og:image`/`og:title` untuk fetch bot (halaman persetujuan cookie), jadi parse Open Graph selalu kosong untuk link YouTube/youtu.be.
+- **Thumbnail selalu ada**: bila OG tak memberi gambar, server mengisi `image` dari **CDN statis YouTube `i.ytimg.com/vi/<id>/hqdefault.jpg`** (tanpa API key, selalu tersedia untuk video valid) — thumbnail asli video langsung tampil di kartu, dimuat oleh browser pengguna.
+- **Judul asli video**: bila OG tak memberi judul, server mengambil **oEmbed YouTube** (`youtube.com/oembed`, timeout 4 s) → judul video + nama kanal (jadi siteName kartu) — bukan lagi "youtube.com" generik.
+- **Kartu anti-gagal**: bila fetch halaman gagal total (diblokir/timeout/bukan HTML), handler baru `providerFallback` tetap memberi kartu minimal untuk YouTube (videoId sudah diketahui dari URL — termasuk bentuk pendek `youtu.be`) alih-alih kartu menghilang.
+- **TikTok ikut di-enrich**: judul + thumbnail via oEmbed TikTok (best-effort, gagal = diam).
+- Verifikasi: verify-integrity seksi "v33" (7 cek; 2 cek versi v32 dipindah, total 133).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 

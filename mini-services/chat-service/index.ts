@@ -107,8 +107,12 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *  v32 — tautan pesan BISA DIKLIK & TERBUKA LANGSUNG: semua URL di teks
  *        pesan/caption jadi <a target=_blank> (LinkifiedText) dan kartu
  *        pratinjau tautan langsung membuka tautan — tanpa popup dialog.
- *        (Perubahan sisi klien; versi hanya label rilis.) */
-const SERVICE_VERSION = 'v32'
+ *  v33 — thumbnail pratinjau tautan: YouTube tak lagi kosong hitam —
+ *        thumbnail dari CDN statis i.ytimg.com + judul asli via oEmbed;
+ *        kartu minimal tetap muncul meski fetch halaman diblokir bot
+ *        (providerFallback); TikTok di-enrich via oEmbed. (Perubahan di
+ *        API Next /api/link-preview; versi hanya label rilis.) */
+const SERVICE_VERSION = 'v33'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'

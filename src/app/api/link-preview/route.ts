@@ -17,6 +17,13 @@ import { NextRequest, NextResponse } from "next/server";
  * Cache: in-memory Map url → {data, at}, TTL 30 menit, maks 300 entri
  * (tertua dibuang saat penuh). Field `undefined` otomatis tak ikut di-JSON.
  *
+ * v33 — ENRICHMENT PROVIDER: YouTube memblokir og:image/og:title untuk fetch
+ * bot (halaman persetujuan), sehingga kartu pratinjau tampil kosong hitam.
+ * Kini thumbnail diambil dari CDN statis i.ytimg.com (selalu ada utk video
+ * valid) + judul asli dari oEmbed YouTube; bila fetch halaman gagal total,
+ * kartu minimal tetap diberikan (providerFallback). TikTok di-enrich via
+ * oEmbed TikTok (best-effort).
+ *
  * Kontrak respons:
  *  - 400 {ok:false, error:"invalid-url"|"missing-url"} — input buruk.
  *  - 200 {ok:false, error:"timeout"|"not-html"|"fetch-failed"|...} — gagal diam.
@@ -255,6 +262,91 @@ async function readBodyCapped(res: Response): Promise<string> {
 }
 
 /* ------------------------------------------------------------------ */
+/* Enrichment khusus provider (v33)                                    */
+/* ------------------------------------------------------------------ */
+
+const OEMBED_TIMEOUT_MS = 4000;
+
+/** fetch JSON kecil dengan timeout pendek; gagal/tidak-JSON → null (diam). */
+async function fetchJson(url: string): Promise<Record<string, unknown> | null> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OEMBED_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        signal: controller.signal,
+        headers: { "user-agent": USER_AGENT },
+      });
+      if (!res.ok) return null;
+      const json = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+      return json && typeof json === "object" ? json : null;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * v33 — lengkapi data pratinjau untuk provider yang memblokir OG bot.
+ * YouTube: thumbnail = CDN statis i.ytimg.com (hqdefault, selalu ada untuk
+ * video valid); judul/penulis dari oEmbed YouTube bila OG tak memberinya.
+ * TikTok: judul + thumbnail via oEmbed TikTok (best-effort).
+ * Semua gagal = diam — field tetap seperti hasil parse halaman.
+ */
+async function enrichProviderMedia(data: LinkPreviewSuccess): Promise<LinkPreviewSuccess> {
+  if (data.provider === "youtube" && data.videoId) {
+    if (!data.image) {
+      data.image = `https://i.ytimg.com/vi/${encodeURIComponent(data.videoId)}/hqdefault.jpg`;
+    }
+    if (!data.title) {
+      const oe = await fetchJson(
+        `https://www.youtube.com/oembed?url=${encodeURIComponent(
+          `https://www.youtube.com/watch?v=${data.videoId}`
+        )}&format=json`
+      );
+      const title = slice(typeof oe?.title === "string" ? oe.title : undefined, TITLE_MAX);
+      if (title) data.title = title;
+      const author = slice(typeof oe?.author_name === "string" ? oe.author_name : undefined, TITLE_MAX);
+      if (author) data.siteName = data.siteName ?? author;
+    }
+  }
+  if (data.provider === "tiktok" && data.tiktokId && (!data.image || !data.title)) {
+    const oe = await fetchJson(`https://www.tiktok.com/oembed?url=${encodeURIComponent(data.url)}`);
+    const title = slice(typeof oe?.title === "string" ? oe.title : undefined, TITLE_MAX);
+    if (title && !data.title) data.title = title;
+    if (!data.image && typeof oe?.thumbnail_url === "string") {
+      data.image = safeAbsolute(oe.thumbnail_url) ?? undefined;
+    }
+    if (!data.siteName && typeof oe?.author_name === "string") {
+      data.siteName = slice(oe.author_name, TITLE_MAX);
+    }
+  }
+  return data;
+}
+
+/**
+ * v33 — jalur saat fetch halaman GAGAL (diblokir/timeout/bukan-html):
+ * untuk YouTube kita tetap tahu videoId dari URL → beri kartu minimal
+ * (thumbnail statis + judul oEmbed) alih-alih menghilang sama sekali.
+ */
+async function providerFallback(
+  key: string,
+  providerInfo: Pick<LinkPreviewSuccess, "provider" | "videoId" | "tiktokId">,
+  error: string
+): Promise<NextResponse> {
+  if (providerInfo.provider === "youtube" && providerInfo.videoId) {
+    const data = await enrichProviderMedia({ url: key, ...providerInfo });
+    if (data.image) {
+      cacheSet(key, data);
+      return NextResponse.json({ ok: true, ...data });
+    }
+  }
+  return fail(error);
+}
+
+/* ------------------------------------------------------------------ */
 /* Handler                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -295,6 +387,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: true, ...cached.data });
   }
 
+  /* v33 — deteksi provider SEBELUM fetch: dipakai fallback kartu minimal. */
+  const providerInfo = detectProvider(key);
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -307,21 +402,23 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         "accept-language": "id,en;q=0.8",
       },
     });
-    if (!res.ok) return fail(`upstream-${res.status}`);
+    if (!res.ok) return providerFallback(key, providerInfo, `upstream-${res.status}`);
     const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
     if (!contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {
-      return fail("not-html");
+      return providerFallback(key, providerInfo, "not-html");
     }
     const html = await readBodyCapped(res);
-    if (!html) return fail("empty-body");
+    if (!html) return providerFallback(key, providerInfo, "empty-body");
 
     const finalUrl = safeAbsolute(res.url) || key;
-    const data = parseHtml(html, finalUrl);
+    let data = parseHtml(html, finalUrl);
+    /* v33 — isi thumbnail/judul provider yang memblokir OG (YouTube dkk.). */
+    data = await enrichProviderMedia(data);
     cacheSet(key, data);
     return NextResponse.json({ ok: true, ...data });
   } catch (err) {
     const aborted = err instanceof Error && err.name === "AbortError";
-    return fail(aborted ? "timeout" : "fetch-failed");
+    return providerFallback(key, providerInfo, aborted ? "timeout" : "fetch-failed");
   } finally {
     clearTimeout(timer);
   }
