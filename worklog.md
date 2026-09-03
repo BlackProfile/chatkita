@@ -926,3 +926,21 @@ Work Log:
 
 Stage Summary:
 - Task 41 SELESAI: login admin kini custom — password bisa diganti dari Dashboard → Pengaturan (bcrypt di DB, persist), tetap kompatibel admin123 bila belum diganti, dilindungi rate limit (10/menit global + 5/socket), dan admin diberi peringatan visual bila masih memakai password bawaan. Protokol 8/8, verify-integrity 35/35, lint 0/0, E2E 0 error, tag rescue-v23 + GitHub sinkron (49e5286).
+
+---
+Task ID: 42
+Agent: Z.ai Code (main)
+Task: "pada login admin, hapus tombol masuknya, buat jadi autologin jika memasukan password dengan benar, buat placeholdernya ijo jika memasukan password dengan benar dan delay sebentar untuk sinkronisasi database dan autologin. buat juga pada user pas login ada delay sebentar, untuk sinkronisasi database" — v24: autologin admin (tanpa tombol, hijau, delay) + delay login user.
+
+Work Log:
+- Server (index.ts): SERVICE_VERSION 'v23' → 'v24'; event BARU `admin:password_peek` (cek kebenaran password TANPA membuka sesi; ack hanya {ok}; password <6 kar → TOO_SHORT tanpa dihitung gagal); rate limit TERPISAH dari admin:auth (ADMIN_PEEK_*: 30 gagal/socket/menit + 120 global/menit) supaya mengetik bertahap tidak memicu RATE_LIMITED login sungguhan.
+- ⚠️ INSIDEN: nama `admin:peek` TABRAKAN dengan event LAMA v10 (peek isi percakapan, adminGuard) di line 3948 — dua handler jalan, ack lama (UNAUTHORIZED/NOT_FOUND) menang; gejala menyesatkan (admin:auth ok tapi peek gagal) → butuh forensik: uji peek langsung via socket.io-client, instrumentasi console.log, ketemu registrasi kedua. Fix: rename → `admin:password_peek` + komentar peringatan di kode.
+- AdminPanel.tsx: tombol "Masuk" DIHAPUS dari form login; state pwCorrect + efek autologin (debounce 350ms → admin:password_peek → benar: titik input hijau (border+teks emerald) + status "Password benar — menyinkronkan database…" (Loader2) → delay 900ms → handleLoginRef (admin:auth sungguhan)); mengetik ulang membatalkan timer (cleanup effect); auth gagal (rate limit) → hijau dimatikan; handleLogout mengosongkan password+timer (autologin tidak menyala ulang); Enter tetap login langsung (form onSubmit).
+- Messenger.tsx: state loggingIn + loginBusyRef; handleAuth kini menunda emit 900ms (klik → tombol "Menyinkronkan database…" disabled + spinner → emit); guard dobel-kirim; label sama dipakai kartu "lanjut sebagai", tombol Masuk & PIN; auto re-auth saat reconnect TIDAK ter-delay (hanya jalur UI).
+- chat-types.ts: +AdminPeekAck; verify-integrity 35 → 41 cek (seksi v24); FEATURES.md +seksi v24; instrumentation RESCUE_TAG → rescue-v24.
+
+Stage Summary:
+- E2E agent-browser (t42, gateway :81): admin — password salah → netral tanpa login; password benar → screenshot bukti titik hijau + border + status sync → autologin masuk inbox (desktop 1440×900 & mobile 390×844); Enter → login instan. user — klik Masuk → tombol "Menyinkronkan database…" disabled (snapshot) → user baru ditolak REGISTRATION_CLOSED (pesan merah tampil, screenshot) → user uji dibuat via bun:sqlite → login sukses "User Uji42 authenticated"; sesi restore mobile ok. Console/page errors 0.
+- Bun --hot catatan: intermediate MultiEdit sempat bikin parse error "Unterminated string literal" di log child (reload gagal, modul lama tetap jalan) — cold restart via watchdog adalah cara pasti; JANGAN andalkan hot reload untuk verifikasi.
+- Pelajaran: SEBELUM menambah event socket baru, `rg "socket.on('<nama>'"` dulu — namespace admin sudah padat sejak v10 (admin:peek, admin:search, admin:user_stats, dst).
+- verify-integrity 41/41, lint 0/0. Commit: 62bb2d0 (v24), 512f483 (rename fix) + worklog. Tag rescue-v24 dibuat & di-push; GitHub sinkron.
