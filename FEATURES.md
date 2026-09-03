@@ -90,6 +90,13 @@
 - Guard: tanpa auth → UNAUTHORIZED; target admin → NOT_FOUND; teks kosong/emoji di luar palet → INVALID_MESSAGE; waktu di luar −90 hari/+1 hari → INVALID_SCHEDULE.
 - Uji protokol 16/16 PASS. Verifikasi: verify-integrity seksi "v25" (13 cek baru).
 
+### v26 — Peta Penyimpanan + metadata media (Task 45)
+- **Tab baru "Penyimpanan"** di Dashboard Aplikasi (`admin-storage.tsx`, event `admin:storage_map`): peta disk (Database + WAL + file media, jumlah file, total), rincian media **per jenis** (foto/audio/video/PDF/file lain — jumlah + byte + bar), **per pengguna** vs kuota 250 MiB/akun (bar emerald/amber/rose), daftar **12 file terbesar** dengan metadata, dan **tombol "Pindai metadata"** (`admin:media_scan`, maks 500 file/run) + badge cakupan metadata.
+- **Aplikasi kini MEMBACA METADATA media/file user langsung dari header file** (kolom baru `messages.meta_json`): PNG/JPEG/GIF/WebP → dimensi `W×H`; MP4/MOV → dimensi + durasi (mvhd/tkhd); PDF → perkiraan jumlah halaman. Parser header murni TS (baca maks 4 MiB pertama, tanpa dependensi).
+- **Metadata otomatis saat kirim**: pesan foto/file baru langsung dibaca metadata-nya di server (`attachMediaMeta`), termasuk pesan terjadwal. Media lama diisi lewat "Pindai metadata".
+- Metadata tampil di daftar file terbesar (emerald: `1600×900`, `0:42`, `12 hlm`). Semua aksi audit (`storage_map`, `media_scan`).
+- Verifikasi: verify-integrity seksi "v26" (12 cek baru).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 

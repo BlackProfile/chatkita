@@ -515,6 +515,59 @@ export interface AdminCheatTimeAck {
   ok: true;
 }
 
+/* v26 — Peta Penyimpanan: metadata media file user dibaca dari header file. */
+
+/** Metadata yang bisa dibaca server dari header file media. */
+export interface MediaMetaInfo {
+  width?: number;
+  height?: number;
+  durationMs?: number;
+  pages?: number;
+}
+
+/** Satu baris media pada daftar "file terbesar". */
+export interface StorageLargestItem {
+  id: number;
+  type: string;
+  fileName: string;
+  mime: string;
+  size: number;
+  senderId: string;
+  senderName: string;
+  conversationId: string;
+  createdAt: string;
+  meta: MediaMetaInfo | null;
+}
+
+/** Ack `admin:storage_map` — peta lengkap pemakaian penyimpanan. */
+export interface AdminStorageMapAck {
+  ok: true;
+  map: {
+    generatedAt: string;
+    storage: {
+      dbBytes: number;
+      walBytes: number;
+      mediaBytes: number;
+      mediaFiles: number;
+      quotaBytes: number;
+    };
+    /** Total byte media menurut catatan DB (logical). */
+    logicalBytes: number;
+    byType: Record<string, { count: number; bytes: number }>;
+    byUser: { id: string; name: string; count: number; bytes: number }[];
+    largest: StorageLargestItem[];
+    coverage: { withMeta: number; withoutMeta: number };
+  };
+}
+
+/** Ack `admin:media_scan` — hasil pemindaian metadata file yang belum terisi. */
+export interface AdminMediaScanAck {
+  ok: true;
+  scanned: number;
+  filled: number;
+  remaining: number;
+}
+
 export interface BackupAck {
   ok: true;
   exportedAt: string;
@@ -1061,6 +1114,19 @@ export interface ConversationResetPayload {
 // admin:cheat_time        { messageId, createdAt } → AdminCheatTimeAck | ChatErrorAck
 //                           Rewrites created_at; clients update the time chip
 //                           + day separator via message:updated.createdAt.
+//
+// Kategori F — Peta Penyimpanan (v26):
+// admin:storage_map       {} → AdminStorageMapAck | ChatErrorAck
+//                           Storage breakdown: disk (db/wal/media + file count),
+//                           logical media bytes per type bucket (image/audio/
+//                           video/pdf/file), per-user usage vs quota, top-12
+//                           largest files (with parsed header metadata), and
+//                           metadata coverage (withMeta/withoutMeta).
+// admin:media_scan        {} → AdminMediaScanAck | ChatErrorAck
+//                           Scans up to 500 media rows lacking meta_json, reads
+//                           file headers (PNG/GIF/WebP/JPEG dims, MP4 dims+
+//                           duration, PDF page count) and fills meta_json.
+//                           New image/file sends extract metadata at send time.
 //
 // Kategori D — moderation & advanced forensics:
 // admin:delete_message    { messageId } → { ok: true } | ChatErrorAck

@@ -73,7 +73,7 @@
 import { createServer } from 'http'
 import { join, resolve } from 'path'
 import { createHash } from 'crypto'
-import { readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import { closeSync, openSync, readFileSync, readdirSync, readSync, statSync, unlinkSync } from 'node:fs'
 import { Database } from 'bun:sqlite'
 import { Server, type Socket as IoSocket } from 'socket.io'
 import ZAI from 'z-ai-web-dev-sdk'
@@ -86,8 +86,9 @@ import webpush from 'web-push'
 const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
 /** v22 — paket pulihan: bintangi/teruskan/jadwalkan pesan + badge unread.
  *  v23 — custom login admin: password ter-hash di DB + ganti dari dashboard + rate limit.
- *  v24 — autologin admin: event admin:password_peek (cek password tanpa sesi) untuk UX login otomatis. */
-const SERVICE_VERSION = 'v25'
+ *  v24 — autologin admin: event admin:password_peek (cek password tanpa sesi) untuk UX login otomatis.
+ *  v26 — peta penyimpanan: metadata media (dimensi/durasi/halaman) + admin:storage_map + admin:media_scan. */
+const SERVICE_VERSION = 'v26'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -234,6 +235,8 @@ addColumn('messages', 'starred_by', 'TEXT')
 addColumn('messages', 'forwarded_from', 'TEXT')
 addColumn('messages', 'scheduled_at', 'INTEGER')
 addColumn('messages', 'delivered_at', 'INTEGER')
+/* v26 — metadata media (dimensi/durasi/halaman) untuk Peta Penyimpanan. */
+addColumn('messages', 'meta_json', 'TEXT')
 
 /** v11 — audit trail of admin actions (admin:audit). */
 db.run(`
@@ -321,6 +324,8 @@ interface MessageRow {
   forwarded_from?: string | null
   scheduled_at?: number | null
   delivered_at?: number | null
+  /* v26 — metadata media (JSON: width/height/durationMs/pages). */
+  meta_json?: string | null
 }
 
 /* ------------------------------ API types ------------------------------ */
@@ -1758,6 +1763,167 @@ const mediaNameOf = (content: string | null | undefined): string | null => {
   return m ? m[1] : null
 }
 
+/* ------------------------------------------------------------------ */
+/* v26 — Pembaca metadata media (header file) untuk Peta Penyimpanan   */
+/* ------------------------------------------------------------------ */
+
+interface MediaMeta {
+  width?: number
+  height?: number
+  durationMs?: number
+  pages?: number
+}
+
+/** Baca header file media (maks 4 MiB) tanpa memuat seluruh file. */
+const readMediaHeader = (name: string): Buffer | null => {
+  try {
+    const fd = openSync(join(MEDIA_DIR, name), 'r')
+    try {
+      const buf = Buffer.alloc(4 * 1024 * 1024)
+      const bytes = readSync(fd, buf, 0, buf.length, 0)
+      return buf.subarray(0, bytes)
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    return null
+  }
+}
+
+/** Dimensi gambar: PNG / GIF / WebP / JPEG (dari magic bytes). */
+const parseImageMeta = (buf: Buffer): MediaMeta => {
+  const meta: MediaMeta = {}
+  try {
+    if (buf.length > 24 && buf.toString('ascii', 1, 4) === 'PNG') {
+      meta.width = buf.readUInt32BE(16)
+      meta.height = buf.readUInt32BE(20)
+    } else if (buf.length > 10 && buf.toString('ascii', 0, 3) === 'GIF') {
+      meta.width = buf.readUInt16LE(6)
+      meta.height = buf.readUInt16LE(8)
+    } else if (
+      buf.length > 30 &&
+      buf.toString('ascii', 0, 4) === 'RIFF' &&
+      buf.toString('ascii', 8, 12) === 'WEBP'
+    ) {
+      const chunk = buf.toString('ascii', 12, 16)
+      if (chunk === 'VP8X') {
+        meta.width = 1 + (buf[24] | (buf[25] << 8) | (buf[26] << 16))
+        meta.height = 1 + (buf[27] | (buf[28] << 8) | (buf[29] << 16))
+      } else if (chunk === 'VP8 ') {
+        meta.width = buf.readUInt16LE(26) & 0x3fff
+        meta.height = buf.readUInt16LE(28) & 0x3fff
+      } else if (chunk === 'VP8L') {
+        const b = buf.readUInt32LE(21)
+        meta.width = (b & 0x3fff) + 1
+        meta.height = ((b >> 14) & 0x3fff) + 1
+      }
+    } else if (buf.length > 12 && buf[0] === 0xff && buf[1] === 0xd8) {
+      // JPEG — pindai marker SOFn.
+      let off = 2
+      while (off + 9 < buf.length) {
+        if (buf[off] !== 0xff) {
+          off++
+          continue
+        }
+        const marker = buf[off + 1]
+        if (
+          marker >= 0xc0 &&
+          marker <= 0xcf &&
+          marker !== 0xc4 &&
+          marker !== 0xc8 &&
+          marker !== 0xcc
+        ) {
+          meta.height = buf.readUInt16BE(off + 5)
+          meta.width = buf.readUInt16BE(off + 7)
+          break
+        }
+        if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd9)) {
+          off += 2
+          continue
+        }
+        off += 2 + buf.readUInt16BE(off + 2)
+      }
+    }
+  } catch {
+    /* header tidak terbaca — biarkan kosong */
+  }
+  return meta
+}
+
+/** MP4/MOV — dimensi (tkhd) + durasi (mvhd), dipindai di 4 MiB pertama. */
+const parseMp4Meta = (buf: Buffer): MediaMeta => {
+  const meta: MediaMeta = {}
+  try {
+    const mvhd = buf.indexOf('mvhd')
+    if (mvhd > 0) {
+      const version = buf[mvhd + 4]
+      if (version === 1) {
+        const timescale = buf.readUInt32BE(mvhd + 24)
+        const duration = Number(buf.readBigUInt64BE(mvhd + 28))
+        if (timescale > 0 && duration > 0) {
+          meta.durationMs = Math.round((duration / timescale) * 1000)
+        }
+      } else {
+        const timescale = buf.readUInt32BE(mvhd + 16)
+        const duration = buf.readUInt32BE(mvhd + 20)
+        if (timescale > 0 && duration > 0) {
+          meta.durationMs = Math.round((duration / timescale) * 1000)
+        }
+      }
+    }
+    const tkhd = buf.indexOf('tkhd')
+    if (tkhd > 0) {
+      const version = buf[tkhd + 4]
+      // 'tkhd' berada pada offset box+4 → width (fixed 16.16) ada di box+80
+      // (v0) / box+88 (v1) = tkhd_idx+76 / tkhd_idx+84.
+      const base = version === 1 ? tkhd + 84 : tkhd + 76
+      const w = buf.readUInt32BE(base) / 65536
+      const h = buf.readUInt32BE(base + 4) / 65536
+      if (w > 0 && h > 0) {
+        meta.width = Math.round(w)
+        meta.height = Math.round(h)
+      }
+    }
+  } catch {
+    /* box tidak lengkap */
+  }
+  return meta
+}
+
+/** PDF — perkiraan jumlah halaman dari /Count pertama. */
+const parsePdfMeta = (buf: Buffer): MediaMeta => {
+  const meta: MediaMeta = {}
+  try {
+    const text = buf.toString('latin1', 0, Math.min(buf.length, 262_144))
+    const m = /\/Count\s+(\d+)/.exec(text)
+    if (m) meta.pages = Number(m[1])
+  } catch {
+    /* abaikan */
+  }
+  return meta
+}
+
+/** Metadata lengkap satu file media (null bila file hilang/tak dikenali). */
+const extractMediaMeta = (name: string | null | undefined): MediaMeta | null => {
+  if (!name) return null
+  const buf = readMediaHeader(name)
+  if (!buf || buf.length < 12) return null
+  let meta: MediaMeta = {}
+  if (buf.length > 8 && buf.toString('ascii', 4, 8) === 'ftyp') meta = parseMp4Meta(buf)
+  else if (buf.length > 5 && buf.toString('latin1', 0, 5) === '%PDF-') meta = parsePdfMeta(buf)
+  else meta = parseImageMeta(buf)
+  if (meta.durationMs != null && meta.durationMs <= 0) delete meta.durationMs
+  return Object.keys(meta).length > 0 ? meta : null
+}
+
+/** v26 — simpan metadata media pesan (dipanggil saat pesan media dikirim). */
+const attachMediaMeta = (messageId: number, content: string) => {
+  const meta = extractMediaMeta(mediaNameOf(content))
+  if (meta) {
+    db.run('UPDATE messages SET meta_json = ? WHERE id = ?', [JSON.stringify(meta), messageId])
+  }
+}
+
 /** Live references (content or thumb_url) to a stored media file. */
 const mediaRefCount = (name: string): number =>
   ((db
@@ -2921,6 +3087,10 @@ io.on('connection', (socket) => {
           .query('SELECT * FROM messages WHERE id = ?')
           .get(Number(result.lastInsertRowid)) as MessageRow
         const message = toChatMessage(row)
+        // v26 — metadata media untuk pesan terjadwal juga.
+        if (type === 'image' || type === 'file') {
+          attachMediaMeta(Number(result.lastInsertRowid), message.content)
+        }
         attachReplyPreviews([row], [message])
         if (me === ADMIN_ID) io.to('admins').emit('message:new', message)
         else io.to(`user:${me}`).emit('message:new', message)
@@ -2939,6 +3109,10 @@ io.on('connection', (socket) => {
         ...(captionRef ? { caption: captionRef } : {}),
         ...(flagKeyword ? { flagged: 1 } : {}),
       })
+      // v26 — baca metadata media (dimensi/durasi/halaman) dari file di disk.
+      if (type === 'image' || type === 'file') {
+        attachMediaMeta(message.id, message.content)
+      }
       ack({ ok: true, message })
 
       // v11 — keyword hit → live intel to the admins room.
@@ -3845,6 +4019,144 @@ io.on('connection', (socket) => {
         })),
       },
     })
+  }))
+
+  /* ------------------------------------------------------------------ */
+  /* v26 — Peta penyimpanan + pemindaian metadata media                  */
+  /* ------------------------------------------------------------------ */
+
+  socket.on('admin:storage_map', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    let dbBytes = 0
+    let walBytes = 0
+    try {
+      dbBytes = statSync(DB_PATH).size
+      walBytes = statSync(`${DB_PATH}-wal`).size
+    } catch {
+      /* WAL mungkin tidak ada */
+    }
+    const media = dirStats(MEDIA_DIR)
+
+    const rows = db
+      .query(
+        `SELECT id, sender_id, conversation_id, type, mime_type, file_name, file_size, created_at, meta_json
+         FROM messages
+         WHERE file_size IS NOT NULL AND deleted_at IS NULL AND media_expired_at IS NULL`
+      )
+      .all() as (MessageRow & { meta_json?: string | null })[]
+
+    const bucketOf = (r: MessageRow): string => {
+      const m = (r.mime_type ?? '').toLowerCase()
+      if (r.type === 'voice' || m.startsWith('audio/')) return 'audio'
+      if (r.type === 'image' || m.startsWith('image/')) return 'image'
+      if (m.startsWith('video/')) return 'video'
+      if (m === 'application/pdf') return 'pdf'
+      return 'file'
+    }
+    const parseMeta = (raw?: string | null): MediaMeta | null => {
+      if (!raw) return null
+      try {
+        const v = JSON.parse(raw)
+        return v && typeof v === 'object' ? (v as MediaMeta) : null
+      } catch {
+        return null
+      }
+    }
+
+    const byType: Record<string, { count: number; bytes: number }> = {}
+    const byUserMap = new Map<string, { count: number; bytes: number }>()
+    let logicalBytes = 0
+    let withMeta = 0
+    let withoutMeta = 0
+    for (const r of rows) {
+      const size = Number(r.file_size ?? 0)
+      logicalBytes += size
+      const bucket = bucketOf(r)
+      byType[bucket] ??= { count: 0, bytes: 0 }
+      byType[bucket].count++
+      byType[bucket].bytes += size
+      const u = byUserMap.get(r.sender_id) ?? { count: 0, bytes: 0 }
+      u.count++
+      u.bytes += size
+      byUserMap.set(r.sender_id, u)
+      if (parseMeta(r.meta_json)) withMeta++
+      else withoutMeta++
+    }
+
+    const largest = [...rows]
+      .sort((a, b) => Number(b.file_size ?? 0) - Number(a.file_size ?? 0))
+      .slice(0, 12)
+      .map((r) => ({
+        id: r.id,
+        type: r.type ?? 'file',
+        fileName: r.file_name ?? r.content,
+        mime: r.mime_type ?? '',
+        size: Number(r.file_size ?? 0),
+        senderId: r.sender_id,
+        senderName: findUserById(r.sender_id)?.name ?? r.sender_id,
+        conversationId: r.conversation_id,
+        createdAt: new Date(Number(r.created_at)).toISOString(),
+        meta: parseMeta(r.meta_json),
+      }))
+
+    const byUser = [...byUserMap.entries()]
+      .map(([id, v]) => ({ id, name: findUserById(id)?.name ?? id, ...v }))
+      .sort((a, b) => b.bytes - a.bytes)
+      .slice(0, 12)
+
+    audit('storage_map', `${rows.length} media, ${media.files} file di disk`)
+    ack({
+      ok: true,
+      map: {
+        generatedAt: new Date().toISOString(),
+        storage: {
+          dbBytes,
+          walBytes,
+          mediaBytes: media.bytes,
+          mediaFiles: media.files,
+          quotaBytes: QUOTA_BYTES,
+        },
+        logicalBytes,
+        byType,
+        byUser,
+        largest,
+        coverage: { withMeta, withoutMeta },
+      },
+    })
+  }))
+
+  // Pindai media yang belum punya metadata → baca header file → isi meta_json.
+  socket.on('admin:media_scan', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    const pending = db
+      .query(
+        `SELECT id, content FROM messages
+         WHERE meta_json IS NULL AND deleted_at IS NULL AND media_expired_at IS NULL
+           AND (type = 'image' OR type = 'file') AND content LIKE '/api/media/%'
+         LIMIT 500`
+      )
+      .all() as { id: number; content: string }[]
+    let filled = 0
+    for (const r of pending) {
+      const meta = extractMediaMeta(mediaNameOf(r.content))
+      if (meta) {
+        db.run('UPDATE messages SET meta_json = ? WHERE id = ?', [JSON.stringify(meta), r.id])
+        filled++
+      }
+    }
+    const remaining = Number(
+      (
+        db
+          .query(
+            `SELECT COUNT(*) AS v FROM messages
+             WHERE meta_json IS NULL AND deleted_at IS NULL AND media_expired_at IS NULL
+               AND (type = 'image' OR type = 'file') AND content LIKE '/api/media/%'`
+          )
+          .get() as { v: number }
+      ).v
+    )
+    audit('media_scan', `${filled}/${pending.length} terisi, sisa ${remaining}`)
+    ack({ ok: true, scanned: pending.length, filled, remaining })
   }))
 
   /**

@@ -46,6 +46,7 @@ import {
 
 import { AdminCheat } from "@/components/chat/admin-cheat";
 import { AdminPusat } from "@/components/chat/admin-pusat";
+import { AdminStorage } from "@/components/chat/admin-storage";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -97,6 +98,7 @@ import { cn } from "@/lib/utils";
 export type DashboardTab =
   | "pusat"
   | "cheat"
+  | "penyimpanan"
   | "ringkasan"
   | "analitik"
   | "pengguna"
@@ -107,6 +109,7 @@ export type DashboardTab =
 const TABS: { key: DashboardTab; label: string; icon: typeof GaugeCircle }[] = [
   { key: "pusat", label: "Pusat", icon: Landmark },
   { key: "cheat", label: "Cheat", icon: Wand2 },
+  { key: "penyimpanan", label: "Penyimpanan", icon: HardDrive },
   { key: "ringkasan", label: "Ringkasan", icon: GaugeCircle },
   { key: "analitik", label: "Analitik", icon: BarChart3 },
   { key: "pengguna", label: "Pengguna", icon: Users },
@@ -193,6 +196,8 @@ const AUDIT_LABELS: Record<string, string> = {
   cheat_edit: "Cheat edit",
   cheat_react: "Cheat reaksi",
   cheat_time: "Cheat waktu",
+  storage_map: "Peta penyimpanan",
+  media_scan: "Pindai metadata",
 };
 
 /** KPI kecil dengan ikon — dipakai di tab Ringkasan. */
@@ -1400,6 +1405,9 @@ export function AdminDashboard({
                 </p>
               ) : null}
             </div>
+          ) : tab === "penyimpanan" ? (
+            /* v26 — Peta Penyimpanan: disk + rincian per jenis/user + metadata media. */
+            <AdminStorage socket={socket} />
           ) : tab === "cheat" ? (
             /* v25 — Pusat Cheat: semua fitur cheat admin dalam satu tempat. */
             <AdminCheat socket={socket} users={stats.users} />
