@@ -978,3 +978,21 @@ Work Log:
 
 Stage Summary:
 - Task 44 SELESAI: panah jump-to-bottom kini melayang tetap di pojok kanan bawah area chat (user & admin), tidak ikut ter-scroll; klik tetap melompat ke pesan terbaru. Murni perbaikan layout (2 file), server tak tersentuh.
+---
+Task ID: 45
+Agent: Z.ai Code (main)
+Task: "buat aplikasi pemetaan penyimpanan, pada dashboard aplikasi. buat aplikasi bisa baca metadata media / file yang dikirim user" — v26: tab Penyimpanan (peta disk + rincian per jenis/user + file terbesar) + pembacaan metadata media dari header file
+
+Work Log:
+- Server (index.ts): SERVICE_VERSION 'v25' → 'v26'; migrasi kolom `messages.meta_json` (addColumn idempotent); MessageRow += meta_json; seksi "v26 — Pembaca metadata media": readMediaHeader (baca maks 4 MiB pertama via openSync/readSync/closeSync), parseImageMeta (PNG IHDR, GIF LE, WebP VP8X/VP8/VP8L, JPEG SOFn scan), parseMp4Meta (indexOf 'mvhd' → timescale/duration v0+v1; 'tkhd' → width/height fixed 16.16 — v0 offset tkhd+76, v1 tkhd+84), parsePdfMeta (regex /Count → halaman), extractMediaMeta (deteksi via magic bytes: ftyp→mp4, %PDF→pdf, else image), attachMediaMeta (UPDATE meta_json). Dipanggil otomatis di messages:send (jalur normal + terjadwal) untuk type image/file.
+- Event baru: admin:storage_map (peta: disk dbBytes/walBytes/mediaBytes+files/quota; logicalBytes; byType bucket image/audio/video/pdf/file; byUser top-12 vs kuota; largest top-12 dgn meta; coverage withMeta/withoutMeta — audit storage_map) dan admin:media_scan (isi meta_json maks 500 file/run, ack scanned/filled/remaining — audit media_scan).
+- chat-types.ts: MediaMetaInfo, StorageLargestItem, AdminStorageMapAck, AdminMediaScanAck + komentar protokol "Kategori F".
+- admin-storage.tsx (BARU): header + Segarkan; peta disk (bar 3 segmen + 3 kartu + total + logical bytes); rincian per jenis (ikon+bar, BUCKET_META warna); per pengguna (bar emerald/amber/rose vs kuota 256 MiB, max-h-64 scroll); File terbesar (ikon mime, nama, #id · pengirim · tanggal + metadata emerald "W×H / m:ss / N hlm", size, max-h-96 scroll); badge cakupan metadata + tombol "Pindai metadata" (spinner + pesan hasil + auto refresh).
+- admin-dashboard.tsx: import AdminStorage; DashboardTab += "penyimpanan"; TABS +{Penyimpanan, HardDrive} setelah Cheat; render branch; AUDIT_LABELS += storage_map/media_scan.
+- ⚠️ BUG parser ditemukan lewat uji: offset tkhd awal (tkhd+84) meleset 8 byte — width/height sebenarnya di box+80 (v0) → tkhd_idx+76; v1 +8. Diperbaiki & terbukti uji MP4 sintetis 320×240/42s terbaca {"durationMs":42000,"width":320,"height":240}. (Skrip uji MP4 awal juga salah offset sendiri — keduanya dikoreksi.)
+- Uji protokol (.zscripts/t45-test.ts) 13/13 PASS: storage_map tanpa auth → UNAUTHORIZED; byType image/pdf/video; byUser; kolom meta; coverage; media_scan; PNG 3×4, PDF 7 hlm, MP4 320×240+0:42 terbaca dari file sintetis; cleanup.
+- Cold restart 2× (parser fix tidak aktif via --hot). verify-integrity 52 → 62 cek (seksi v26 12 cek; cek v25 "Versi service v25"/"Rescue tag v25" usang dihapus). FEATURES.md +seksi v26. instrumentation RESCUE_TAG → rescue-v26. lint 0/0.
+- E2E agent-browser (t45, :81, desktop 1440×900 + mobile 390×844): login admin → Dashboard Aplikasi v26 → tab Penyimpanan; data demo 5 media (PNG 4032×3024 586KB, PNG 1080×2400, PDF 24 hlm, MP4 1080p/95s, JPEG 800×600) → peta disk "Media (5 file)" ✓; Pindai metadata → "16 dipindai · 5 metadata baru · sisa 11", badge metadata 31% ✓; daftar file: "foto-liburan.png #98 · DemoMedia45 · 4032×3024 · 586 KB" ✓; per-user hanapi 181 MB 71% bar amber ✓; screenshot desktop+mobile. Console 0 error, page errors 0. Demo dihapus (5 users); metadata media asli yang terisi DIBIARKAN (fungsional).
+
+Stage Summary:
+- Task 45 SELESAI: aplikasi kini punya PETA PENYIMPANAN lengkap di dashboard (disk, per jenis, per pengguna, file terbesar) dan MAMPU MEMBACA METADATA media/file user langsung dari header file (dimensi gambar, dimensi+durasi video, halaman PDF) — otomatis untuk kiriman baru & tombol pindai untuk media lama. Protokol 13/13, verify-integrity 62/62, lint 0/0, E2E 0 error. rescue-v26 ditag & GitHub sinkron.
