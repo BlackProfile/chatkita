@@ -28,7 +28,7 @@ import type { MessageReaction, ReplyPreview } from "@/lib/chat-types";
 import { formatChatTime, formatFileSize, resolveFileKind } from "@/lib/chat-utils";
 import { cn } from "@/lib/utils";
 import { FileKindIcon } from "@/components/chat/media-viewer";
-import { firstUrlInText, LinkPreviewCard } from "@/components/chat/link-preview";
+import { firstUrlInText, LinkifiedText, LinkPreviewCard } from "@/components/chat/link-preview";
 import { VoicePlayer } from "@/components/chat/voice-player";
 
 /** Fixed reaction palette (mirrors the server). */
@@ -117,11 +117,12 @@ interface ChatBubbleProps {
 /* ------------------------------------------------------------------ */
 
 /**
- * A single chat message bubble. Message text is rendered as plain text
+ * A single chat message bubble. Message text is rendered as safe text
  * (never dangerouslySetInnerHTML) with `whitespace-pre-wrap break-words`
- * so multi-line messages and long unbroken strings behave. The text size
- * is INHERITED so the per-device font-size setting works.
- * Clicking a bubble toggles the action row (react/reply/edit/…).
+ * so multi-line messages and long unbroken strings behave — URL di dalam
+ * teks/caption otomatis jadi tautan yang bisa diklik langsung (v32,
+ * LinkifiedText). The text size is INHERITED so the per-device font-size
+ * setting works. Clicking a bubble toggles the action row.
  */
 export function ChatBubble({
   content,
@@ -472,24 +473,32 @@ export function ChatBubble({
               </div>
             </div>
           ) : (
-            <p className="whitespace-pre-wrap break-words">{content}</p>
+            /* v32 — teks pesan dirender via LinkifiedText: SEMUA URL di dalam
+             * teks jadi tautan yang bisa diklik langsung (tab baru). */
+            <LinkifiedText
+              text={content}
+              dark={isRight}
+              className="whitespace-pre-wrap break-words"
+            />
           )}
 
           {/* v20 — caption teks yang menyertai pesan media, tampil di bawah
-              media di dalam bubble (gaya WhatsApp). */}
+              media di dalam bubble (gaya WhatsApp). v32 — URL di caption
+              juga bisa diklik langsung. */}
           {!deleted && caption && (type === "image" || type === "file") ? (
-            <p
+            <LinkifiedText
+              text={caption}
+              dark={isRight}
               className={cn(
                 "mt-1.5 whitespace-pre-wrap break-words text-sm leading-relaxed",
                 isRight ? "text-white" : "text-foreground"
               )}
-            >
-              {caption}
-            </p>
+            />
           ) : null}
 
           {/* Task 19 — kartu pratinjau tautan (pesan teks ber-URL), di bawah
-              teks, selebar bubble. Klik kartu TIDAK men-toggle baris aksi. */}
+              teks, selebar bubble. v32 — kartu kini <a>: diklik LANGSUNG
+              membuka tautan di tab baru (tanpa dialog pratinjau). */}
           {!deleted && type === "text" && textLinkUrl && linkPreviewEnabled ? (
             <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
               {/* key: remount per URL agar state hook/skeleton selalu segar */}

@@ -1,16 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { ExternalLink } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 /**
@@ -23,9 +15,11 @@ import { cn } from "@/lib/utils";
  *   modul + fetch in-flight dideduplikasi, jadi re-render tidak refetch.
  * - Loading = skeleton pulse maksimal ~2 detik; gagal → TIDAK merender apa
  *   pun (diam) — pesan teks tetap normal.
- * - Klik kartu → Dialog pratinjau in-app: YouTube/TikTok pakai iframe embed,
- *   lainnya menampilkan gambar OG + judul + deskripsi + tombol "Buka di
- *   browser". Footer SELALU punya "Buka di browser" (semua provider) + Tutup.
+ * - v32 — SEMUA tautan kini BISA DIKLIK dan TERBUKA LANGSUNG di tab browser
+ *   baru (target _blank + rel noopener noreferrer) — TANPA popup:
+ *   1) teks pesan & caption dirender via LinkifiedText (semua URL jadi <a>),
+ *   2) kartu pratinjau kini <a> langsung (dulunya button pembuka Dialog
+ *      in-app yang harus diklik lagi lewat "Buka di browser").
  */
 
 export type PreviewProvider = "youtube" | "tiktok" | "instagram" | "facebook" | "generic";
@@ -74,6 +68,87 @@ export function firstUrlInText(text: string): string | null {
   if (!raw) return null;
   const trimmed = raw.replace(TRAILING_JUNK, "");
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/* ------------------------------------------------------------------ */
+/* LinkifiedText — teks pesan dengan SEMUA URL bisa diklik (v32)       */
+/* ------------------------------------------------------------------ */
+
+/** Satu segmen hasil pemecahan teks: potongan biasa atau URL. */
+export interface TextSegment {
+  kind: "text" | "url";
+  text: string;
+  url?: string;
+}
+
+/**
+ * Pecah teks pesan menjadi segmen teks/URL. Trailing punctuation (titik,
+ * koma, penutup kurung…) tidak ikut jadi bagian link — tetap teks biasa.
+ * Instance regex baru per panggilan agar lastIndex /g tidak bocor antar-render.
+ */
+export function segmentText(text: string): TextSegment[] {
+  const segments: TextSegment[] = [];
+  const regex = new RegExp(URL_PATTERN.source, "gi");
+  let last = 0;
+  for (const m of text.matchAll(regex)) {
+    const start = m.index ?? 0;
+    if (start > last) segments.push({ kind: "text", text: text.slice(last, start) });
+    const url = m[0].replace(TRAILING_JUNK, "");
+    if (url.length > 0) {
+      segments.push({ kind: "url", text: url, url });
+      const junk = m[0].slice(url.length);
+      if (junk.length > 0) segments.push({ kind: "text", text: junk });
+    } else {
+      segments.push({ kind: "text", text: m[0] });
+    }
+    last = start + m[0].length;
+  }
+  if (last < text.length) segments.push({ kind: "text", text: text.slice(last) });
+  return segments;
+}
+
+/**
+ * v32 — merender teks pesan/caption dengan SEMUA URL sebagai tautan yang
+ * bisa diklik dan langsung terbuka di tab baru (target _blank, rel noopener
+ * noreferrer) — tanpa popup apa pun. stopPropagation pada klik agar
+ * mengetuk tautan tidak ikut men-toggle baris aksi bubble.
+ */
+export function LinkifiedText({
+  text,
+  dark = false,
+  className,
+}: {
+  text: string;
+  dark?: boolean;
+  className?: string;
+}) {
+  const segments = segmentText(text);
+  if (segments.length === 0) return null;
+  return (
+    <p className={className}>
+      {segments.map((seg, i) =>
+        seg.kind === "url" ? (
+          <a
+            key={i}
+            href={seg.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className={cn(
+              "break-all font-medium underline underline-offset-2",
+              dark
+                ? "text-white decoration-white/60 hover:decoration-white"
+                : "text-emerald-700 decoration-emerald-500/50 hover:decoration-emerald-600"
+            )}
+          >
+            {seg.text}
+          </a>
+        ) : (
+          <span key={i}>{seg.text}</span>
+        )
+      )}
+    </p>
+  );
 }
 
 /** Cache level modul: URL → hasil (sukses/gagal) — hidup selama sesi halaman. */
@@ -183,10 +258,6 @@ function hostnameOf(url: string): string {
   }
 }
 
-function openInBrowser(url: string): void {
-  window.open(url, "_blank", "noopener,noreferrer");
-}
-
 /** Gambar dengan fallback: gagal muat / tidak ada → tile ikon provider. */
 function PreviewThumb({
   src,
@@ -261,13 +332,12 @@ function SkeletonCard({ dark }: { dark: boolean }) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Kartu + dialog                                                      */
+/* Kartu pratinjau — langsung buka tautan (v32)                        */
 /* ------------------------------------------------------------------ */
 
 export function LinkPreviewCard({ url, dark = false }: { url: string; dark?: boolean }) {
   const preview = useLinkPreview(url);
   const [skeletonGone, setSkeletonGone] = useState(false);
-  const [open, setOpen] = useState(false);
 
   // Skeleton hanya tampil maksimal ~2 detik; setelah itu loading = senyap.
   // (Komponen diremount per URL via key di ChatBubble — tak perlu reset manual.)
@@ -285,131 +355,50 @@ export function LinkPreviewCard({ url, dark = false }: { url: string; dark?: boo
   const meta = PROVIDER_META[data.provider];
   const site = data.siteName ?? hostnameOf(data.url);
 
+  // v32 — kartu kini <a> langsung: satu ketukan → tautan terbuka di tab
+  // baru (perilaku native browser, bukan window.open yang bisa diblokir).
+  // Tidak ada lagi Dialog pratinjau in-app di tengah jalan.
   return (
-    <>
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen(true);
-        }}
-        aria-label={`Buka pratinjau ${site}`}
-        className={cn(
-          "flex w-full min-w-48 items-center gap-2.5 rounded-xl border p-2 text-left transition-opacity hover:opacity-90",
-          dark ? "border-white/25 bg-white/10" : "border-border bg-muted/40"
-        )}
-      >
-        <PreviewThumb
-          key={data.image ?? "noimg"}
-          src={data.image}
-          provider={data.provider}
-          className="size-14 rounded-lg"
-        />
-        <span className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className={cn("truncate text-sm font-semibold", dark && "text-white")}>
-            {data.title ?? site}
-          </span>
+    <a
+      href={data.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label={`Buka ${site} di browser`}
+      className={cn(
+        "flex w-full min-w-48 items-center gap-2.5 rounded-xl border p-2 text-left transition-opacity hover:opacity-90",
+        dark ? "border-white/25 bg-white/10" : "border-border bg-muted/40"
+      )}
+    >
+      <PreviewThumb
+        key={data.image ?? "noimg"}
+        src={data.image}
+        provider={data.provider}
+        className="size-14 rounded-lg"
+      />
+      <span className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className={cn("truncate text-sm font-semibold", dark && "text-white")}>
+          {data.title ?? site}
+        </span>
+        <span
+          className={cn(
+            "flex min-w-0 items-center gap-1.5 text-xs",
+            dark ? "text-white/70" : "text-muted-foreground"
+          )}
+        >
           <span
             className={cn(
-              "flex min-w-0 items-center gap-1.5 text-xs",
-              dark ? "text-white/70" : "text-muted-foreground"
+              "flex h-5 shrink-0 items-center gap-1 rounded-full border px-1.5 text-[10px] font-medium",
+              dark ? "border-white/25 bg-white/15 text-white" : "border-border bg-background"
             )}
           >
-            <span
-              className={cn(
-                "flex h-5 shrink-0 items-center gap-1 rounded-full border px-1.5 text-[10px] font-medium",
-                dark ? "border-white/25 bg-white/15 text-white" : "border-border bg-background"
-              )}
-            >
-              <span aria-hidden="true">{meta.icon}</span>
-              {meta.label}
-            </span>
-            <span className="truncate">{site}</span>
+            <span aria-hidden="true">{meta.icon}</span>
+            {meta.label}
           </span>
+          <span className="truncate">{site}</span>
+          <ExternalLink className="size-3.5 shrink-0" aria-hidden="true" />
         </span>
-      </button>
-
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="flex max-h-[92vh] w-[calc(100vw-2rem)] max-w-lg flex-col gap-0 overflow-hidden rounded-2xl p-0">
-          <DialogHeader className="shrink-0 gap-1 border-b px-4 py-3 text-left">
-            <DialogTitle className="truncate text-base">
-              {data.title ?? site}
-            </DialogTitle>
-            <DialogDescription className="flex items-center gap-1.5 text-xs">
-              <span aria-hidden="true">{meta.icon}</span>
-              <span className="truncate">{data.url}</span>
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            {data.provider === "youtube" && data.videoId ? (
-              <iframe
-                src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(data.videoId)}`}
-                title={data.title ?? "Video YouTube"}
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                allowFullScreen
-                loading="lazy"
-                className="aspect-video w-full bg-black"
-              />
-            ) : data.provider === "tiktok" && data.tiktokId ? (
-              <iframe
-                src={`https://www.tiktok.com/embed/v2/${encodeURIComponent(data.tiktokId)}`}
-                title={data.title ?? "Video TikTok"}
-                allow="encrypted-media; picture-in-picture"
-                allowFullScreen
-                loading="lazy"
-                className="mx-auto aspect-[325/580] max-h-[72vh] w-full bg-black"
-              />
-            ) : (
-              <div className="flex flex-col">
-                {data.image ? (
-                  <div className="flex max-h-[40vh] items-center justify-center overflow-hidden bg-black/5 dark:bg-black/30">
-                    <PreviewThumb
-                      key={data.image}
-                      src={data.image}
-                      provider={data.provider}
-                      large
-                      className="max-h-[40vh] w-full rounded-none border-0 object-contain"
-                    />
-                  </div>
-                ) : null}
-                <div className="flex flex-col gap-2 p-4">
-                  {!data.image ? (
-                    <p className={cn("text-sm font-semibold", dark && "text-white")}>
-                      {data.title ?? site}
-                    </p>
-                  ) : null}
-                  {data.description ? (
-                    <p className="line-clamp-4 text-sm leading-relaxed text-muted-foreground">
-                      {data.description}
-                    </p>
-                  ) : null}
-                  <Button
-                    className="mt-1 h-10 bg-emerald-600 text-white hover:bg-emerald-600/90 sm:self-start"
-                    onClick={() => openInBrowser(data.url)}
-                  >
-                    Buka di browser
-                  </Button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <DialogFooter className="shrink-0 gap-2 border-t bg-muted/30 p-3">
-            <Button
-              variant="outline"
-              className="h-9"
-              onClick={() => openInBrowser(data.url)}
-            >
-              Buka di browser
-            </Button>
-            <Button className="h-9" onClick={() => setOpen(false)}>
-              Tutup
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+      </span>
+    </a>
   );
 }
 

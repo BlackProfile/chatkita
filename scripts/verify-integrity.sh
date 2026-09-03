@@ -158,7 +158,6 @@ chk_grep "Tombol Reset chat (panel admin)"    "src/components/chat/AdminPanel.ts
 chk_grep "Konfirmasi reset kedua sisi (admin)" "src/components/chat/AdminPanel.tsx" "kedua sisi"
 
 echo "[v31 — UX lampiran: preview inline + caption + jenis jelas (Task 50)]"
-chk_grep "Versi service v31"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v31'"
 chk_grep "Menu lampiran per jenis (user)"     "src/components/chat/Messenger.tsx" "openFilePicker(\"image"
 chk_grep "Menu lampiran per jenis (admin)"    "src/components/chat/AdminPanel.tsx" "openFilePicker(\"image"
 chk_grep "Chip lampiran inline (user)"        "src/components/chat/Messenger.tsx" "chip pratinjau lampiran inline"
@@ -166,7 +165,17 @@ chk_grep "Chip lampiran inline (admin)"       "src/components/chat/AdminPanel.ts
 chk_grep "Kirim lampiran via tombol (user)"   "src/components/chat/Messenger.tsx" "else if (pendingFile) void sendFile();"
 chk_grep "Kirim lampiran via tombol (admin)"  "src/components/chat/AdminPanel.tsx" "else if (pendingFile) void sendFile();"
 chk_grep "Audio file bukan voice note"        "src/components/chat/ChatBubble.tsx" "File audio"
-chk_grep "Rescue tag v31"                     "src/instrumentation.ts" "rescue-v31"
+
+echo "[v32 — Tautan dibuka langsung tanpa popup (Task 51)]"
+chk_grep "Versi service v32"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v32'"
+chk_grep "Rescue tag v32"                     "src/instrumentation.ts" "rescue-v32"
+chk_grep "Teks URL bisa diklik (LinkifiedText)" "src/components/chat/link-preview.tsx" "export function LinkifiedText"
+chk_grep "URL jadi tautan tab baru"           "src/components/chat/link-preview.tsx" 'target="_blank"'
+chk_grep "Tautan aman noopener"               "src/components/chat/link-preview.tsx" 'rel="noopener noreferrer"'
+chk_grep "Teks bubble via LinkifiedText"      "src/components/chat/ChatBubble.tsx" "<LinkifiedText"
+chk_grep "Caption juga bisa diklik"           "src/components/chat/ChatBubble.tsx" "text={caption}"
+chk_grep "Kartu pratinjau kini anchor buka"   "src/components/chat/link-preview.tsx" "href={data.url}"
+chk_grep "Label buka langsung di kartu"       "src/components/chat/link-preview.tsx" "di browser"
 
 echo ""
 echo "== Versi server terdaftar =="

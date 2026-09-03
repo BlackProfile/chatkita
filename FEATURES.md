@@ -138,6 +138,13 @@
 - **File audio ≠ voice note**: bubble untuk lampiran audio kini kartu berbeda — ikon musik + nama file + "File audio · ukuran" + **pemutar `<audio>` standar browser** (bisa di-seek) — sementara voice note yang direkam tetap memakai VoicePlayer gelombang + transkrip. (Server sudah benar sejak lama: transkripsi hanya `type='voice'`.)
 - Verifikasi: verify-integrity seksi "v31" (9 cek baru, total 121).
 
+### v32 — Tautan Bisa Diklik & Terbuka Langsung Tanpa Popup (Task 51)
+- **Keluhan**: link di pesan tidak bisa dibuka langsung — teks URL tidak bisa diklik, dan kartu pratinjau harus melewati Dialog popup dulu baru tombol "Buka di browser".
+- **Semua URL jadi tautan langsung**: teks pesan dan caption media dirender via komponen baru `LinkifiedText` (`link-preview.tsx`) — SEMUA URL http(s) di dalam teks otomatis menjadi `<a target="_blank" rel="noopener noreferrer">` bergaris bawah yang terbuka langsung di tab browser baru (bukan hanya URL pertama); tanda baca di akhir URL tidak ikut menjadi link.
+- **Kartu pratinjau tanpa popup**: `LinkPreviewCard` berubah dari tombol pembuka Dialog in-app menjadi **anchor `<a>` langsung** — satu ketukan membuka tautan (perilaku native browser, bukan `window.open` yang bisa diblokir), plus ikon external-link sebagai penanda. Dialog pratinjau + tombol "Buka di browser" dihapus total. Data OG (judul/deskripsi/gambar) tetap dipakai untuk isi kartu.
+- **Aman & rapi**: `rel="noopener noreferrer"` di semua tautan eksternal; ketukan tautan tidak men-toggle baris aksi bubble; berlaku simetris di chat user dan panel admin (sama-sama memakai ChatBubble).
+- Verifikasi: verify-integrity seksi "v32" (9 cek; 2 cek versi v31 dipindah, total 128).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 
