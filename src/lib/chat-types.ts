@@ -329,6 +329,8 @@ export interface MessageUpdatePayload {
   reactions?: MessageReaction[];
   /** v22 — state bintang per-user (array userId pemberi bintang). */
   starredBy?: string[];
+  /** v25 — Pusat Cheat: waktu pesan diubah admin (backdate/forward-date). */
+  createdAt?: string;
 }
 
 /** Generic error ack: `{ ok: false, error: ErrorCode }` */
@@ -474,6 +476,43 @@ export interface BroadcastAck {
   ok: true;
   count: number;
   kind: "siaran" | "pengumuman";
+}
+
+/* v25 — Pusat Cheat: semua fitur cheat admin dalam satu tab dashboard. */
+
+/** Ack `admin:cheat_peek` — pesan percakapan target + keadaan saklar cheat. */
+export interface AdminCheatPeekAck {
+  ok: true;
+  conversationId: string;
+  messages: ChatMessage[];
+  hasMore: boolean;
+  cheatState: {
+    alwaysOnline: boolean;
+    mirror: boolean;
+    ghost: boolean;
+    fakeLastSeen: string;
+  };
+}
+
+/** Ack `admin:cheat_send` — pesan spoof/backdate berhasil dikirim. */
+export interface AdminCheatSendAck {
+  ok: true;
+  message: ChatMessage;
+}
+
+/** Ack `admin:cheat_edit` — isi pesan siapa saja diganti. */
+export interface AdminCheatEditAck {
+  ok: true;
+}
+
+/** Ack `admin:cheat_react` — reaksi atas nama user lain di-toggle. */
+export interface AdminCheatReactAck {
+  ok: true;
+}
+
+/** Ack `admin:cheat_time` — waktu pesan diganti. */
+export interface AdminCheatTimeAck {
+  ok: true;
 }
 
 export interface BackupAck {
@@ -1003,6 +1042,25 @@ export interface ConversationResetPayload {
 //                           While on, a user typing in a conversation WITH the
 //                           admin also receives a mirrored partner:typing
 //                           ("Admin is typing") for the user side only.
+//
+// Kategori E — Pusat Cheat (v25, semua cheat admin jadi satu tempat):
+// admin:cheat_peek        { userId } → AdminCheatPeekAck | ChatErrorAck
+//                           Resolves the user↔admin conversation, returns the
+//                           latest page + current cheat toggles (no side effect).
+// admin:cheat_send        { userId, text, createdAt? } → AdminCheatSendAck | ChatErrorAck
+//                           Spoof: inserts a TEXT message AS the target user
+//                           through the normal fan-out (indistinguishable);
+//                           createdAt (epoch ms, ≤90d past / ≤1d future)
+//                           backdates it. Audited as cheat_send.
+// admin:cheat_edit        { messageId, text } → AdminCheatEditAck | ChatErrorAck
+//                           Edit ANY text message (no sender/window checks);
+//                           old text still recorded in edit_history (forensics).
+// admin:cheat_react       { messageId, userId, emoji } → AdminCheatReactAck | ChatErrorAck
+//                           Toggle a reaction AS the target user (same store as
+//                           message:react).
+// admin:cheat_time        { messageId, createdAt } → AdminCheatTimeAck | ChatErrorAck
+//                           Rewrites created_at; clients update the time chip
+//                           + day separator via message:updated.createdAt.
 //
 // Kategori D — moderation & advanced forensics:
 // admin:delete_message    { messageId } → { ok: true } | ChatErrorAck

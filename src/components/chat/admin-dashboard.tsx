@@ -41,8 +41,10 @@ import {
   TrendingUp,
   UserPlus,
   Users,
+  Wand2,
 } from "lucide-react";
 
+import { AdminCheat } from "@/components/chat/admin-cheat";
 import { AdminPusat } from "@/components/chat/admin-pusat";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -94,6 +96,7 @@ import { cn } from "@/lib/utils";
 
 export type DashboardTab =
   | "pusat"
+  | "cheat"
   | "ringkasan"
   | "analitik"
   | "pengguna"
@@ -103,6 +106,7 @@ export type DashboardTab =
 
 const TABS: { key: DashboardTab; label: string; icon: typeof GaugeCircle }[] = [
   { key: "pusat", label: "Pusat", icon: Landmark },
+  { key: "cheat", label: "Cheat", icon: Wand2 },
   { key: "ringkasan", label: "Ringkasan", icon: GaugeCircle },
   { key: "analitik", label: "Analitik", icon: BarChart3 },
   { key: "pengguna", label: "Pengguna", icon: Users },
@@ -185,6 +189,10 @@ const AUDIT_LABELS: Record<string, string> = {
   unpin: "Lepas pin",
   keywords: "Kata terlarang",
   quick_replies: "Balasan cepat",
+  cheat_send: "Cheat kirim",
+  cheat_edit: "Cheat edit",
+  cheat_react: "Cheat reaksi",
+  cheat_time: "Cheat waktu",
 };
 
 /** KPI kecil dengan ikon — dipakai di tab Ringkasan. */
@@ -1392,6 +1400,9 @@ export function AdminDashboard({
                 </p>
               ) : null}
             </div>
+          ) : tab === "cheat" ? (
+            /* v25 — Pusat Cheat: semua fitur cheat admin dalam satu tempat. */
+            <AdminCheat socket={socket} users={stats.users} />
           ) : tab === "pusat" ? (
             <AdminPusat socket={socket} version={stats.version} />
           ) : (

@@ -833,6 +833,8 @@ export function AdminPanel() {
                   translation: u.translation ?? m.translation,
                   reactions: u.reactions ?? m.reactions,
                   starredBy: u.starredBy ?? m.starredBy,
+                  /* v25 — Pusat Cheat: waktu pesan diubah admin. */
+                  createdAt: u.createdAt ?? m.createdAt,
                 }
               : m
           ),

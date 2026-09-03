@@ -87,7 +87,7 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
 /** v22 — paket pulihan: bintangi/teruskan/jadwalkan pesan + badge unread.
  *  v23 — custom login admin: password ter-hash di DB + ganti dari dashboard + rate limit.
  *  v24 — autologin admin: event admin:password_peek (cek password tanpa sesi) untuk UX login otomatis. */
-const SERVICE_VERSION = 'v24'
+const SERVICE_VERSION = 'v25'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -1607,9 +1607,11 @@ const insertAndFanOut = (
     caption?: string
     /* v22 — label "Diteruskan dari …" untuk pesan hasil forward admin. */
     forwardedFrom?: string
+    /* v25 — Pusat Cheat: timestamp custom untuk pesan spoof/backdate. */
+    ts?: number
   } = {}
 ): ChatMessageApi => {
-  const ts = now()
+  const ts = opts.ts ?? now()
   const hasMediaMeta = type === 'file' || type === 'image' || type === 'voice'
   const hasCaption = type === 'file' || type === 'image'
   const result = db.run(
@@ -4134,6 +4136,227 @@ io.on('connection', (socket) => {
     // Pure illusion: broadcast the receipt WITHOUT touching reads in the DB.
     if (target > 0) broadcastRead(conversation, ADMIN_ID, target)
     ack({ ok: true, count, lastReadMessageId: target })
+  }))
+
+  /* ------------------------------------------------------------------ */
+  /* v25 — PUSAT CHEAT: seluruh fitur cheat admin dikumpulkan satu tempat */
+  /* ------------------------------------------------------------------ */
+
+  /** Percakapan user↔admin milik sebuah user (null bila tidak ada). */
+  const cheatConvOf = (userId: string): ConversationRow | null => {
+    if (!userId || userId === ADMIN_ID) return null
+    const conv = db
+      .query('SELECT * FROM conversations WHERE user_a_id = ? OR user_b_id = ?')
+      .get(userId, userId) as ConversationRow | null
+    if (!conv || !isParticipant(conv, ADMIN_ID)) return null
+    return conv
+  }
+
+  /**
+   * Validasi epoch ms cheat (backdate/ubah waktu): maksimal 90 hari ke
+   * belakang dan 1 hari ke depan. `null` = tidak ada/invalid (ack terkirim).
+   */
+  const cheatTsOf = (raw: unknown, ack: AckFn): number | null => {
+    if (raw == null) return now()
+    const t = Number(raw)
+    if (!Number.isFinite(t) || t > now() + 86_400_000 || t < now() - 90 * 86_400_000) {
+      ack({ ok: false, error: 'INVALID_SCHEDULE' })
+      return null
+    }
+    return Math.round(t)
+  }
+
+  // Peek percakapan target untuk UI Pusat Cheat: daftar pesan + keadaan
+  // seluruh saklar cheat (tanpa efek samping — tidak menandai dibaca).
+  socket.on('admin:cheat_peek', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const userId = typeof data?.userId === 'string' ? data.userId : ''
+    const conv = cheatConvOf(userId)
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const page = getMessagesPage(conv.id)
+    ack({
+      ok: true,
+      conversationId: conv.id,
+      messages: page.messages,
+      hasMore: page.hasMore,
+      cheatState: {
+        alwaysOnline: getBoolSetting('always_online'),
+        mirror: getBoolSetting('mirror_mode'),
+        ghost: socket.data.ghost === true,
+        fakeLastSeen: getSetting('fake_last_seen') ?? '',
+      },
+    })
+  }))
+
+  // Kirim pesan TEKS atas nama user lain (spoof), dengan backdate opsional
+  // (maks 90 hari ke belakang). Persis pesan asli: insert DB + fan-out
+  // message:new + push notifikasi — penerima tidak bisa membedakannya.
+  socket.on('admin:cheat_send', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const userId = typeof data?.userId === 'string' ? data.userId : ''
+    const text = typeof data?.text === 'string' ? data.text.trim() : ''
+    if (!userId || text.length < 1 || text.length > MAX_MESSAGE_LENGTH) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const conv = cheatConvOf(userId)
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const ts = cheatTsOf(data?.createdAt, ack)
+    if (ts == null) return
+    const message = insertAndFanOut(conv, userId, text, 'text', { ts })
+    audit('cheat_send', `${findUserById(userId)?.name ?? userId}: "${text.slice(0, 40)}"`)
+    ack({ ok: true, message })
+    console.log(`[cheat] spoof as ${userId.slice(0, 8)} -> ${conv.id.slice(0, 8)}`)
+  }))
+
+  // Edit isi pesan TEKS siapa saja (tanpa jendela waktu, tanpa cek pengirim);
+  // teks lama tetap dicatat di edit_history agar ForensicsDialog melihatnya.
+  socket.on('admin:cheat_edit', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const content = typeof data?.text === 'string' ? data.text.trim() : ''
+    if (
+      !Number.isInteger(id) ||
+      id <= 0 ||
+      content.length < 1 ||
+      content.length > MAX_MESSAGE_LENGTH
+    ) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const row = db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null
+    if (!row || row.deleted_at || (row.type ?? 'text') !== 'text') {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const conversation = getConversation(row.conversation_id)
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    let history: { text: string; at: number }[] = []
+    try {
+      const parsed = row.edit_history ? JSON.parse(row.edit_history) : []
+      if (Array.isArray(parsed)) {
+        history = parsed.filter(
+          (e): e is { text: string; at: number } =>
+            !!e && typeof e === 'object' && typeof (e as any).text === 'string'
+        )
+      }
+    } catch {
+      /* riwayat korup — mulai baru */
+    }
+    history.push({ text: row.content, at: row.edited_at ?? row.created_at })
+    if (history.length > MAX_EDIT_HISTORY_ENTRIES) {
+      history = history.slice(-MAX_EDIT_HISTORY_ENTRIES)
+    }
+    const ts = now()
+    db.run('UPDATE messages SET content = ?, edited_at = ?, edit_history = ? WHERE id = ?', [
+      content,
+      ts,
+      JSON.stringify(history),
+      id,
+    ])
+    audit('cheat_edit', `#${id}: "${content.slice(0, 40)}"`)
+    ack({ ok: true })
+    const payload = {
+      id,
+      conversationId: conversation.id,
+      content,
+      editedAt: new Date(ts).toISOString(),
+    }
+    io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+    io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+    io.to('admins').emit('message:updated', payload)
+    pushConversationsTo(conversation.user_a_id)
+    pushConversationsTo(conversation.user_b_id)
+    console.log(`[cheat] edit message ${id}`)
+  }))
+
+  // Reaksi emoji atas nama user lain (toggle, mekanisme sama dgn message:react).
+  socket.on('admin:cheat_react', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const emoji = typeof data?.emoji === 'string' ? data.emoji : ''
+    const userId = typeof data?.userId === 'string' ? data.userId : ''
+    if (
+      !Number.isInteger(id) ||
+      id <= 0 ||
+      !(REACTION_EMOJIS as readonly string[]).includes(emoji)
+    ) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const row = db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null
+    if (!row || row.deleted_at) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const conversation = getConversation(row.conversation_id)
+    if (!conversation || !isParticipant(conversation, userId)) {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    const existing = db
+      .query('SELECT emoji FROM message_reactions WHERE message_id = ? AND user_id = ?')
+      .get(id, userId) as { emoji: string } | null
+    if (existing && existing.emoji === emoji) {
+      db.run('DELETE FROM message_reactions WHERE message_id = ? AND user_id = ?', [id, userId])
+    } else {
+      db.run(
+        'INSERT INTO message_reactions (message_id, user_id, emoji) VALUES (?, ?, ?) ON CONFLICT(message_id, user_id) DO UPDATE SET emoji = excluded.emoji',
+        [id, userId, emoji]
+      )
+    }
+    audit('cheat_react', `#${id} ${emoji} sebagai ${findUserById(userId)?.name ?? userId}`)
+    ack({ ok: true })
+    const payload = { id, conversationId: conversation.id, reactions: reactionsFor(id) }
+    io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+    io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+    io.to('admins').emit('message:updated', payload)
+  }))
+
+  // Ubah waktu (created_at) pesan siapa saja — backdate/forward-date; klien
+  // memperbarui chip waktu + pemisah hari lewat message:updated.createdAt.
+  socket.on('admin:cheat_time', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    if (!Number.isInteger(id) || id <= 0) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const ts = cheatTsOf(data?.createdAt, ack)
+    if (ts == null) return
+    const row = db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null
+    if (!row || row.deleted_at) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const conversation = getConversation(row.conversation_id)
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    db.run('UPDATE messages SET created_at = ? WHERE id = ?', [ts, id])
+    audit('cheat_time', `#${id} -> ${new Date(ts).toISOString()}`)
+    ack({ ok: true })
+    const payload = {
+      id,
+      conversationId: conversation.id,
+      createdAt: new Date(ts).toISOString(),
+    }
+    io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+    io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+    io.to('admins').emit('message:updated', payload)
+    pushConversationsTo(conversation.user_a_id)
+    pushConversationsTo(conversation.user_b_id)
+    console.log(`[cheat] time message ${id} -> ${new Date(ts).toISOString()}`)
   }))
 
   socket.on('admin:quick_replies:get', handler(socket, (_data, ack) => {

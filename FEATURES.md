@@ -81,6 +81,15 @@
 - **Login user ber-delay**: klik Masuk/Lanjut/PIN → tombol berubah "Menyinkronkan database…" (spinner) ±0,9 dtk → auth dikirim. Proteksi dobel-kirim; auto re-auth saat reconnect TIDAK ter-delay.
 - Logout admin mengosongkan form password (autologin tidak menyala ulang). Verifikasi: verify-integrity seksi "v24".
 
+### v25 — Pusat Cheat (Task 43)
+- **Semua fitur cheat admin jadi SATU tempat**: tab baru **"Cheat"** di Dashboard Aplikasi (`admin-dashboard.tsx` → `AdminCheat` di `admin-cheat.tsx`), tepat setelah tab Pusat.
+- **Event server baru (v25)**: `admin:cheat_peek` (muat pesan target + keadaan saklar cheat), `admin:cheat_send` (spoof kirim sebagai user + backdate opsional ≤90 hari), `admin:cheat_edit` (edit isi pesan teks siapa saja, edit_history tetap terekam), `admin:cheat_react` (reaksi emoji atas nama user), `admin:cheat_time` (ubah `created_at` pesan; klien memperbarui chip waktu via `message:updated.createdAt`).
+- **`insertAndFanOut` kini menerima `ts` opt** untuk timestamp custom (spoof/backdate) — fan-out/push/audit tetap sama seperti pesan asli.
+- **Fitur cheat lama ikut dikumpulkan di sini**: ilusi "sedang mengetik…" (admin:fake_typing), tandai dibaca palsu (admin:fake_receipts), selalu online (admin:always_online), mirror mengetik (admin:mirror), mode hantu (admin:ghost), terakhir dilihat palsu (admin:fake_last_seen), hapus pesan siapa saja (admin:delete_message).
+- **UI**: pilih target user (Select) → daftar pesan (klik = pilih, form ikut terisi), grid aksi (spoof/edit/reaksi/ubah waktu/hapus), seksi sinyal ilusi (3 Switch + last seen + 2 tombol), **log cheat sesi** (maks 40 entri). Semua aksi di-audit (`cheat_send/cheat_edit/cheat_react/cheat_time`) + toast.
+- Guard: tanpa auth → UNAUTHORIZED; target admin → NOT_FOUND; teks kosong/emoji di luar palet → INVALID_MESSAGE; waktu di luar −90 hari/+1 hari → INVALID_SCHEDULE.
+- Uji protokol 16/16 PASS. Verifikasi: verify-integrity seksi "v25" (13 cek baru).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 
