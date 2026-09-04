@@ -207,8 +207,6 @@ chk_grep "Dialog termount di AdminPanel"      "src/components/chat/AdminPanel.ts
 chk_grep "Tautan Google Maps utk GPS"         "src/components/chat/media-meta-dialog.tsx" "maps.google.com/?q="
 
 echo "[v36 — Media permanen: retensi otomatis nonaktif (Task 55)]"
-chk_grep "Versi service v36"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v36'"
-chk_grep "Rescue tag v36"                     "src/instrumentation.ts" "rescue-v36"
 chk_grep "Default retensi 0 (permanen)"       "mini-services/chat-service/index.ts" "const RETENTION_DAYS ="
 chk_grep "Sweeper dilewati saat permanen"     "mini-services/chat-service/index.ts" "if (RETENTION_MS === 0) return"
 chk_grep "Log boot 'media permanen'"          "mini-services/chat-service/index.ts" "tidak pernah (media permanen)"
@@ -217,6 +215,18 @@ chk_grep "Dashboard: media disimpan permanen" "src/components/chat/admin-dashboa
 chk_grep "Info aplikasi: tidak dihapus otomatis" "src/components/chat/admin-dashboard.tsx" "disimpan permanen — tidak dihapus otomatis"
 chk_grep "Tar media gagal = keras (tidak diam)" "scripts/make-backup.sh" "TAR MEDIA GAGAL"
 chk_grep "Tar media kosong = keras (tidak diam)" "scripts/make-backup.sh" "TAR MEDIA KOSONG"
+
+echo "[v37 — Insight per-pengguna untuk admin (Task 56)]"
+chk_grep "Versi service v37"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v37'"
+chk_grep "Rescue tag v37"                     "src/instrumentation.ts" "rescue-v37"
+chk_grep "Event admin:user_insight"           "mini-services/chat-service/index.ts" "'admin:user_insight'"
+chk_grep "Pembangun insight per-user"         "mini-services/chat-service/index.ts" "const buildUserInsight"
+chk_grep "Insight memakai zona WIB"           "mini-services/chat-service/index.ts" "WIB_OFFSET_MS"
+chk_grep "Butir ide otomatis Bahasa Indonesia" "mini-services/chat-service/index.ts" "Jam paling aktif"
+chk_grep "Tipe UserInsight + ack"             "src/lib/chat-types.ts" "AdminUserInsightAck"
+chk_grep "Komponen UserInsightDialog"         "src/components/chat/user-insight-dialog.tsx" "export function UserInsightDialog"
+chk_grep "Dialog termount di dashboard"       "src/components/chat/admin-dashboard.tsx" "<UserInsightDialog"
+chk_grep "Menu 'Insight pengguna'"            "src/components/chat/admin-dashboard.tsx" "Insight pengguna"
 
 echo ""
 echo "== Versi server terdaftar =="

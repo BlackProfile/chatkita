@@ -130,8 +130,14 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        file + pesan tetap utuh selamanya. Env MEDIA_RETENTION_DAYS masih
  *        bisa diisi 1–365 bila retensi diinginkan kembali; tombol admin
  *        "Bersihkan media lama" tetap ada (kini hanya VACUUM karena tidak
- *        ada media yang kedaluwarsa). */
-const SERVICE_VERSION = 'v36'
+ *        ada media yang kedaluwarsa).
+ *  v37 — INSIGHT PER-PENGGUNA UNTUK ADMIN: event baru admin:user_insight
+ *        mengembalikan agregat percakapan user↔admin (total pesan/media/
+ *        karakter, histogram jam & hari WIB, hari aktif, streak, jeda
+ *        terpanjang), kecepatan membalas berpasangan (cap 12 jam), % baca,
+ *        reaksi, tren 7 vs 7 hari, plus 4–8 butir "ide" otomatis Bahasa
+ *        Indonesia (jam paling aktif, media favorit, saran disapa, dll). */
+const SERVICE_VERSION = 'v37'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -2672,6 +2678,259 @@ const buildUserStats = (userId: string) => {
   }
 }
 
+/* ------------------- v37 — insight per-pengguna (admin) ------------------- */
+
+/** WIB (UTC+7): jam/hari insight mengikuti kebiasaan pengguna Indonesia. */
+const WIB_OFFSET_MS = 7 * 3_600_000
+const DAY_NAMES_ID = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu']
+const MONTH_NAMES_ID = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des']
+const MEDIA_TYPE_LABEL_ID: Record<string, string> = {
+  image: 'foto',
+  voice: 'catatan suara',
+  file: 'file',
+  video: 'video',
+}
+
+/** ms → teks durasi ringkas Indonesia (61_000 → "1 menit", 90d → "3 jam"). */
+const fmtDurId = (ms: number) => {
+  const s = Math.max(1, Math.round(ms / 1000))
+  if (s < 60) return `${s} dtk`
+  const m = Math.round(ms / 60_000)
+  if (m < 60) return `${m} menit`
+  const h = Math.round(ms / 3_600_000)
+  if (h < 24) return `${h} jam`
+  return `${Math.round(h / 24)} hari`
+}
+
+const fmtBytesId = (b: number) =>
+  b >= 1_048_576
+    ? `${(b / 1_048_576).toFixed(1)} MB`
+    : b >= 1024
+      ? `${Math.round(b / 1024)} KB`
+      : `${b} B`
+
+/** Tanggal Indonesia ringkas (WIB): 4 Sep 2026. */
+const fmtDayId = (ms: number) => {
+  const d = new Date(ms + WIB_OFFSET_MS)
+  return `${d.getUTCDate()} ${MONTH_NAMES_ID[d.getUTCMonth()]} ${d.getUTCFullYear()}`
+}
+
+/**
+ * v37 — bangun "insight" satu pengguna utk panel admin: agregat pesan
+ * percakapan user↔admin (totals, histogram jam/hari WIB, streak, jeda
+ * terpanjang), kecepatan membalas berpasangan (cap 12 jam), persentase
+ * baca, reaksi, tren 7 vs 7 hari, plus 4–8 butir "ide" otomatis berbahasa
+ * Indonesia. null bila user/percakapan tidak ada.
+ */
+const buildUserInsight = (userId: string) => {
+  const DAY = 86_400_000
+  const nowMs = now()
+  const user = db
+    .query('SELECT id, name, role, created_at, last_seen_at FROM users WHERE id = ?')
+    .get(userId) as
+    | { id: string; name: string; role: string; created_at: number; last_seen_at: number }
+    | undefined
+  if (!user) return null
+  const conv = db
+    .query(
+      `SELECT id FROM conversations
+       WHERE (user_a_id = ? AND user_b_id = 'admin') OR (user_b_id = ? AND user_a_id = 'admin')`
+    )
+    .get(userId, userId) as { id: string } | undefined
+  if (!conv) return null
+
+  const rows = db
+    .query(
+      `SELECT id, sender_id, type, content, file_size, created_at
+       FROM messages WHERE conversation_id = ? AND deleted_at IS NULL
+       ORDER BY created_at ASC, id ASC`
+    )
+    .all(conv.id) as Array<{
+    id: number
+    sender_id: string
+    type: string
+    content: string
+    file_size: number | null
+    created_at: number
+  }>
+
+  let userMsgs = 0
+  let adminMsgs = 0
+  let mediaCount = 0
+  let mediaBytes = 0
+  let textChars = 0
+  let firstAt: number | null = null
+  let lastAt: number | null = null
+  const byType: Record<string, number> = {}
+  const hours = Array.from({ length: 24 }, () => 0)
+  const weekdays = Array.from({ length: 7 }, () => 0)
+  const activeDays = new Set<number>()
+
+  for (const r of rows) {
+    if (firstAt === null) firstAt = r.created_at
+    lastAt = r.created_at
+    if (r.sender_id === userId) {
+      userMsgs += 1
+      const t = r.type || 'text'
+      byType[t] = (byType[t] ?? 0) + 1
+      if (t === 'text') textChars += r.content.length
+      if (t === 'image' || t === 'voice' || t === 'file') {
+        mediaCount += 1
+        mediaBytes += r.file_size ?? 0
+      }
+      const wib = new Date(r.created_at + WIB_OFFSET_MS)
+      hours[wib.getUTCHours()] += 1
+      weekdays[wib.getUTCDay()] += 1
+      activeDays.add(Math.floor((r.created_at + WIB_OFFSET_MS) / DAY))
+    } else {
+      adminMsgs += 1
+    }
+  }
+
+  // Kecepatan membalas: pasangan pesan bergantian (user→admin / admin→user),
+  // jeda ≤ 12 jam dihitung (jeda semalam tidak dianggap "membalas").
+  const RESP_CAP = 12 * 3_600_000
+  const userRes: number[] = []
+  const adminRes: number[] = []
+  let silenceMs = 0
+  for (let i = 1; i < rows.length; i += 1) {
+    const delta = rows[i].created_at - rows[i - 1].created_at
+    if (delta > silenceMs) silenceMs = delta
+    if (delta <= 0 || delta > RESP_CAP) continue
+    const fromUser = rows[i - 1].sender_id === userId
+    const toUser = rows[i].sender_id === userId
+    if (fromUser && !toUser) adminRes.push(delta)
+    else if (!fromUser && toUser) userRes.push(delta)
+  }
+  const avgOf = (a: number[]) =>
+    a.length ? Math.round(a.reduce((s, v) => s + v, 0) / a.length) : null
+
+  // Streak: hari WIB berturut-turut dengan pesan user (berakhir hari ini/kemarin).
+  const todayWib = Math.floor((nowMs + WIB_OFFSET_MS) / DAY)
+  let streakDays = 0
+  if (activeDays.size > 0) {
+    let cursor = activeDays.has(todayWib) ? todayWib : todayWib - 1
+    while (activeDays.has(cursor)) {
+      streakDays += 1
+      cursor -= 1
+    }
+  }
+
+  // Persentase pesan admin yang sudah dibaca user.
+  const readRow = db
+    .query('SELECT last_read_message_id FROM reads WHERE conversation_id = ? AND user_id = ?')
+    .get(conv.id, userId) as { last_read_message_id: number } | undefined
+  const lastRead = Number(readRow?.last_read_message_id ?? 0)
+  const readCount = rows.filter((r) => r.sender_id !== userId && r.id <= lastRead).length
+  const readPct = adminMsgs > 0 ? Math.round((readCount / adminMsgs) * 100) : 0
+
+  // Reaksi dalam percakapan ini: diberi user vs diterima user.
+  const rec = db
+    .query(
+      `SELECT
+        (SELECT COUNT(*) FROM message_reactions r
+          JOIN messages m ON m.id = r.message_id
+          WHERE m.conversation_id = ? AND r.user_id = ?) AS given,
+        (SELECT COUNT(*) FROM message_reactions r
+          JOIN messages m ON m.id = r.message_id
+          WHERE m.conversation_id = ? AND m.sender_id = ?) AS received`
+    )
+    .get(conv.id, userId, conv.id, userId) as { given: number; received: number }
+
+  // Tren 7 hari terakhir vs 7 hari sebelumnya (pesan user).
+  let last7 = 0
+  let prev7 = 0
+  for (const r of rows) {
+    if (r.sender_id !== userId) continue
+    if (r.created_at >= nowMs - 7 * DAY && r.created_at < nowMs) last7 += 1
+    else if (r.created_at >= nowMs - 14 * DAY && r.created_at < nowMs - 7 * DAY) prev7 += 1
+  }
+  const trendPct = prev7 > 0 ? Math.round(((last7 - prev7) / prev7) * 100) : last7 > 0 ? 100 : 0
+
+  const peakHour = hours.indexOf(Math.max(...hours))
+  const peakHourCount = hours[peakHour]
+  const peakDay = weekdays.indexOf(Math.max(...weekdays))
+  const favType = Object.entries(byType)
+    .filter(([t]) => MEDIA_TYPE_LABEL_ID[t])
+    .sort((a, b) => b[1] - a[1])[0]
+  const firstName = user.name.split(' ')[0]
+  const userAvg = avgOf(userRes)
+  const adminAvg = avgOf(adminRes)
+
+  /* Butir "ide"/observasi — terurut prioritas, maks 8. */
+  const insights: string[] = []
+  if (firstAt)
+    insights.push(
+      `Berteman sejak ${fmtDayId(firstAt)} (${Math.max(1, Math.floor((nowMs - firstAt) / DAY))} hari kenalan di aplikasi)`
+    )
+  if (peakHourCount > 0)
+    insights.push(
+      `Jam paling aktif: ${String(peakHour).padStart(2, '0')}:00–${String((peakHour + 1) % 24).padStart(2, '0')}:00 WIB (${peakHourCount} pesan)`
+    )
+  if (weekdays[peakDay] > 0)
+    insights.push(`Hari paling ramai: ${DAY_NAMES_ID[peakDay]} (${weekdays[peakDay]} pesan)`)
+  if (userAvg !== null && userRes.length >= 3)
+    insights.push(`Rata-rata membalas dalam ${fmtDurId(userAvg)} (${userRes.length} balasan terukur)`)
+  if (adminAvg !== null && adminRes.length >= 3)
+    insights.push(`Kamu biasanya membalas ${firstName} dalam ${fmtDurId(adminAvg)}`)
+  if (prev7 > 0 || last7 > 0) {
+    if (prev7 === 0) insights.push(`Minggu ini ${last7} pesan — mulai aktif minggu ini`)
+    else if (trendPct > 0) insights.push(`Minggu ini ${last7} pesan, naik ${trendPct}% dari minggu lalu — pelihara ritmenya`)
+    else if (trendPct < 0) insights.push(`Minggu ini ${last7} pesan, turun ${Math.abs(trendPct)}% dari minggu lalu — mungkin perlu disapa`)
+    else insights.push(`Minggu ini ${last7} pesan — stabil, sama seperti minggu lalu`)
+  }
+  if (favType)
+    insights.push(
+      `Media favorit: ${MEDIA_TYPE_LABEL_ID[favType[0]]} (${favType[1]}x${mediaBytes > 0 ? `, total ${fmtBytesId(mediaBytes)}` : ''})`
+    )
+  if (adminMsgs > 0)
+    insights.push(
+      `${readPct}% pesan kamu sudah dibaca${rec.given > 0 ? ` · ${firstName} memberi ${rec.given} reaksi` : ''}`
+    )
+  if (streakDays >= 2) insights.push(`Streak aktif ${streakDays} hari berturut-turut 🔥`)
+  if (textChars >= 1000) insights.push(`Total ${Math.round(textChars / 100) / 10} ribu karakter ditulis`)
+  if (lastAt !== null && nowMs - lastAt > 2 * DAY)
+    insights.push(`Terakhir chat ${Math.floor((nowMs - lastAt) / DAY)} hari lalu — coba sapa lagi 👋`)
+
+  return {
+    user: {
+      id: user.id,
+      name: user.name,
+      role: user.role,
+      createdAt: new Date(user.created_at).toISOString(),
+      lastSeenAt: new Date(user.last_seen_at).toISOString(),
+    },
+    conversationId: conv.id,
+    totals: {
+      userMessages: userMsgs,
+      adminMessages: adminMsgs,
+      mediaCount,
+      mediaBytes,
+      textChars,
+      firstMessageAt: firstAt !== null ? new Date(firstAt).toISOString() : null,
+      lastMessageAt: lastAt !== null ? new Date(lastAt).toISOString() : null,
+      byType,
+    },
+    activity: {
+      hours,
+      weekdays,
+      activeDays: activeDays.size,
+      streakDays,
+      longestSilenceMs: silenceMs,
+    },
+    responses: {
+      userAvgMs: userAvg,
+      adminAvgMs: adminAvg,
+      userSamples: userRes.length,
+      adminSamples: adminRes.length,
+    },
+    reads: { adminMessages: adminMsgs, readCount, readPct },
+    reactions: { given: Number(rec.given ?? 0), received: Number(rec.received ?? 0) },
+    trend: { last7, prev7, pct: trendPct },
+    insights: insights.slice(0, 8),
+  }
+}
+
 /** Latest tombstoned messages (admin:forensics) — newest deletions first. */
 const forensicsItems = (conversationId: string | null) => {
   const sql = `SELECT m.id, m.conversation_id, m.type, m.content, m.deleted_content, m.created_at, m.deleted_at, u.name AS sender_name
@@ -5022,6 +5281,23 @@ io.on('connection', (socket) => {
         expired: !!row.media_expired_at,
       },
     })
+  }))
+
+  /** v37 — insight per-pengguna: statistik + ide otomatis utk admin. */
+  socket.on('admin:user_insight', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const userId = String((data as { userId?: unknown })?.userId ?? '')
+    if (!userId || userId === ADMIN_ID) {
+      ack({ ok: false, error: 'invalid-id' })
+      return
+    }
+    const result = buildUserInsight(userId)
+    if (!result) {
+      ack({ ok: false, error: 'not-found' })
+      return
+    }
+    audit('user_insight', result.user.name)
+    ack({ ok: true, insight: result })
   }))
 
   /**

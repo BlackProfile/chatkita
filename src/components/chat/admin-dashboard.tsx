@@ -46,6 +46,7 @@ import {
   UserPlus,
   Users,
   Wand2,
+  Lightbulb,
 } from "lucide-react";
 
 import { AdminCheat } from "@/components/chat/admin-cheat";
@@ -105,6 +106,8 @@ import type {
 } from "@/lib/chat-types";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+
+import { UserInsightDialog } from "@/components/chat/user-insight-dialog";
 
 /**
  * v13 — Dashboard aplikasi khusus admin: analitik pemakaian mendalam
@@ -400,6 +403,8 @@ export function AdminDashboard({
   const [newUserMsg, setNewUserMsg] = useState<string | null>(null);
   const [userCreating, setUserCreating] = useState(false);
   const [resetTarget, setResetTarget] = useState<DashboardUserRow | null>(null);
+  /* v37 — target dialog "Insight pengguna". */
+  const [insightTarget, setInsightTarget] = useState<DashboardUserRow | null>(null);
   const [resetPw, setResetPw] = useState("");
   const [resetMsg, setResetMsg] = useState<string | null>(null);
   const [resetBusy, setResetBusy] = useState(false);
@@ -884,6 +889,11 @@ export function AdminDashboard({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">
+            {/* v37 — insight per-pengguna (statistik + ide otomatis). */}
+            <DropdownMenuItem onSelect={() => setInsightTarget(u)}>
+              <Lightbulb className="size-4" aria-hidden="true" />
+              Insight pengguna
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => {
               setResetTarget(u);
               setResetPw("");
@@ -2168,6 +2178,13 @@ export function AdminDashboard({
             </div>
           </DialogContent>
         </Dialog>
+
+        {/* v37 — dialog insight per-pengguna (statistik + ide otomatis). */}
+        <UserInsightDialog
+          target={insightTarget}
+          socket={socket}
+          onClose={() => setInsightTarget(null)}
+        />
 
         {/* v27 — dialog reset password user. */}
         <Dialog

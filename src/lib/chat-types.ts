@@ -927,6 +927,54 @@ export interface UserStatsAck {
   media: number;
 }
 
+/** v37 — hasil insight per-pengguna (admin:user_insight, khusus admin). */
+export interface UserInsight {
+  user: {
+    id: string;
+    name: string;
+    role: string;
+    createdAt: string;
+    lastSeenAt: string;
+  };
+  conversationId: string;
+  totals: {
+    userMessages: number;
+    adminMessages: number;
+    mediaCount: number;
+    mediaBytes: number;
+    textChars: number;
+    firstMessageAt: string | null;
+    lastMessageAt: string | null;
+    byType: Record<string, number>;
+  };
+  /** Histogram jam (24) & hari (0=Minggu) zona WIB + hari aktif/streak. */
+  activity: {
+    hours: number[];
+    weekdays: number[];
+    activeDays: number;
+    streakDays: number;
+    longestSilenceMs: number;
+  };
+  /** Kecepatan membalas berpasangan (null bila sampel < 1, cap 12 jam). */
+  responses: {
+    userAvgMs: number | null;
+    adminAvgMs: number | null;
+    userSamples: number;
+    adminSamples: number;
+  };
+  reads: { adminMessages: number; readCount: number; readPct: number };
+  reactions: { given: number; received: number };
+  /** Pesan user: 7 hari terakhir vs 7 hari sebelumnya. */
+  trend: { last7: number; prev7: number; pct: number };
+  /** Ide/observasi otomatis Bahasa Indonesia (maks 8 butir). */
+  insights: string[];
+}
+
+export interface AdminUserInsightAck {
+  ok: true;
+  insight: UserInsight;
+}
+
 /** Shared ack of `admin:export_conversation` / `admin:export_user`.
  *  The UI turns `content` into a Blob download named `fileName`. */
 export interface ExportAck {
@@ -1225,6 +1273,9 @@ export interface ConversationResetPayload {
 //                           conversations (2–100 chars, excludes deleted,
 //                           newest first, limit 100).
 // admin:user_stats        { userId } → UserStatsAck | ChatErrorAck
+// admin:user_insight (v37) { userId } → AdminUserInsightAck | ChatErrorAck
+//                          — agregat + ide otomatis per user (khusus admin,
+//                            ter-audit); dialog "Insight pengguna" dashboard.
 //                           perDay (14 UTC days, zero-filled), topHours (24
 //                           buckets over last 7 days), total, media — live
 //                           messages only.

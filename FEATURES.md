@@ -178,6 +178,13 @@
 - **Backup media diperkuat**: `make-backup.sh` tidak lagi menelan kegagalan tar (`|| true` dihapus) — tar media gagal/kosong = exit 1 dengan pesan "❌ TAR MEDIA GAGAL/KOSONG", dan ringkasan backup menyatakan status tar. (Insiden Task 55: file media lama sebagian sudah hilang sebelumnya tanpa jejak karena tar diam-diam tidak jalan.)
 - Verifikasi: verify-integrity seksi "v36" (10 cek; 2 cek versi v35 dipindah, total 161).
 
+### v37 — Insight Per-Pengguna untuk Admin (Task 56)
+- **Permintaan**: "berikan ide per user pada admin" — admin ingin melihat statistik + ide/saran otomatis untuk SETIAP pengguna.
+- **Event baru `admin:user_insight`** (khusus admin, ter-audit): `{ userId }` → agregat percakapan user↔admin dari messages/reads/message_reactions: total pesan & media & karakter, histogram **jam (24) & hari (7) zona WIB** (bukan UTC — sesuai kebiasaan pengguna), hari aktif + **streak** berturut-turut, jeda terpanjang, **kecepatan membalas berpasangan** (user & admin, cap 12 jam agar jeda semalam tidak dihitung), **% pesan admin yang dibaca**, reaksi diberi/diterima, **tren 7 vs 7 hari**.
+- **Ide otomatis (4–8 butir Bahasa Indonesia)** di server: "Berteman sejak…", "Jam paling aktif: 20:00–21:00 WIB", "Hari paling ramai: …", "Rata-rata membalas dalam …", "Kamu biasanya membalas X dalam …", tren mingguan naik/turun/stabil, "Media favorit: foto (Nx, total Y)", "% pesan kamu dibaca · N reaksi", "Streak aktif N hari 🔥", "Terakhir chat N hari lalu — coba sapa lagi 👋".
+- **UI** (`user-insight-dialog.tsx` baru): menu titik-tiga tiap akun di tab **Pengguna** → **"Insight pengguna"** → dialog: 4 KPI (pesan, media, balas rata-rata, hari aktif/streak), histogram batang CSS murni (jam + hari, puncak disorot), baris tren/baca/reaksi, dan panel **"Ide buat kamu"** (amber). State di-reset via `key` remount; setState hanya di callback socket (aturan React Compiler).
+- Verifikasi: verify-integrity seksi "v37" (10 cek; 2 cek versi v36 dipindah, total 169).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 
