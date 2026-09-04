@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 
 import { ConfirmDialog, downloadTextFile } from "@/components/chat/admin-tools";
+import { UserControlsV40 } from "@/components/chat/user-controls-v40";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -418,6 +419,11 @@ function ExtraControls({
           Hapus semua pesan user
         </Button>
       </div>
+
+      {/* v40 — pusat kendali per-user (catatan/tag, filter kata, persetujuan,
+       * blokir per jenis, kunci PIN, balasan cepat, terjadwal, nudge,
+       * auto-bersih, ZIP media, paksa logout, riwayat login). */}
+      <UserControlsV40 socket={socket} profile={profile} onNotice={onNotice} />
     </div>
   );
 }

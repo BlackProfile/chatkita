@@ -824,6 +824,24 @@ export function Messenger() {
       setRestricted(r);
     });
 
+    // v40 — paksa logout oleh admin: akhiri sesi di sisi klien (reload → login).
+    socket.on("session:revoked", () => {
+      try {
+        window.localStorage.removeItem(CHAT_SESSION_KEY);
+      } catch {
+        /* abaikan */
+      }
+      toast.error("Sesi diakhiri oleh admin.");
+      setTimeout(() => window.location.reload(), 1200);
+    });
+
+    // v40 — pesan yang menunggu moderasi ditolak admin.
+    socket.on("moderation:rejected", () => {
+      setSendError(true);
+      setSendErrorDetail("Pesanmu ditolak admin.");
+      toast.error("Pesanmu ditolak admin.");
+    });
+
     // v22 — Upsert: umumnya append; pesan terjadwal yang jatuh tempo di-emit
     // ulang server dengan ID yang SAMA (chip ⏰ → pesan final) → ganti, bukan skip.
     socket.on("message:new", (msg: ChatMessage) => {
@@ -1215,8 +1233,15 @@ export function Messenger() {
                       ? `Mode lambat: tunggu ${res.remainingSeconds ?? 0}s.`
                       : res.error === "MEDIA_BLOCKED"
                         ? "Media diblokir admin."
-                        : null
+                        : res.error === "WORD_BLOCKED"
+                          ? "Pesan memuat kata yang dilarang admin."
+                          : res.error === "MEDIA_TYPE_BLOCKED"
+                            ? "Jenis media ini diblokir admin."
+                            : null
           );
+        } else if (res.pending) {
+          // v40 — mode persetujuan: pesan tampil setelah admin menyetujui.
+          toast.info("⏳ Pesan menunggu persetujuan admin.");
         }
       }
     );

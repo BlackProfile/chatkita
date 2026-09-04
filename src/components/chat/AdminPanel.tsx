@@ -146,6 +146,9 @@ import {
   type AckOf,
   type AdminAuthAck,
   type AdminFlaggedPayload,
+  type AdminModerateAck,
+  type AdminQuotaWarnPayload,
+  type AdminUnlockAck,
   type AdminPeekAck,
   type AdminPinAck,
   type AdminUserMediaItem,
@@ -380,6 +383,10 @@ export function AdminPanel() {
   const [lockPin, setLockPin] = useState("");
   const [lockError, setLockError] = useState<string | null>(null);
   const [menuNotice, setMenuNotice] = useState<string | null>(null);
+  /* v40 — dialog buka kunci percakapan ber-PIN. */
+  const [pinPrompt, setPinPrompt] = useState<{ userId: string; conversationId: string } | null>(null);
+  const [pinValue, setPinValue] = useState("");
+  const [pinError, setPinError] = useState<string | null>(null);
 
   // v11 — intelijen & moderasi + sinyal palsu
   const [umOpen, setUmOpen] = useState(false);
@@ -857,6 +864,12 @@ export function AdminPanel() {
     socket.on("admin:flagged", (p: AdminFlaggedPayload) => {
       showMenuNotice(`🚩 "${p.keyword}" dari ${p.senderName}: ${p.snippet.slice(0, 60)}`);
     });
+    // v40 — peringatan kuota media per-user (ambang 80% / 95%).
+    socket.on("admin:quota_warn", (p: AdminQuotaWarnPayload) => {
+      showMenuNotice(
+        `⚠️ Kuota media ${p.userName}: ${p.pct}% terpakai (${formatFileSize(p.usedBytes)}/${formatFileSize(p.quotaBytes)})`
+      );
+    });
     socket.on("conversation:archive:update", (p: ArchiveUpdatePayload) => {
       setConversations((prev) =>
         prev.map((c) => (c.id === p.conversationId ? { ...c, archived: p.archived } : c))
@@ -913,6 +926,8 @@ export function AdminPanel() {
                   starredBy: u.starredBy ?? m.starredBy,
                   /* v25 — Pusat Cheat: waktu pesan diubah admin. */
                   createdAt: u.createdAt ?? m.createdAt,
+                  /* v40 — pesan pending disetujui → hilangkan badge antrean. */
+                  pending: u.pending ?? m.pending,
                 }
               : m
           ),
@@ -1226,6 +1241,16 @@ export function AdminPanel() {
         );
         setUnreadDividerId(res.lastReadBefore > 0 && firstUnread ? firstUnread.id : null);
         socketRef.current?.emit("messages:read", { conversationId: id });
+      } else if ((res as { error?: string }).error === "PIN_LOCKED") {
+        // v40 — percakapan dikunci PIN: kembali ke daftar + minta PIN.
+        setActiveId(null);
+        activeIdRef.current = null;
+        setPinPrompt({
+          userId: (res as { userId?: string }).userId ?? "",
+          conversationId: id,
+        });
+        setPinValue("");
+        setPinError(null);
       }
     });
   };
@@ -1237,6 +1262,39 @@ export function AdminPanel() {
     setSendError(false);
     setEditing(null);
     setUnreadDividerId(null);
+  };
+
+  /** v40 — setujui/tolak pesan yang menunggu persetujuan (moderasi pra-kirim). */
+  const handleModerate = (messageId: number, action: "approve" | "reject") => {
+    socketRef.current?.emit(
+      "admin:moderate",
+      { messageId, action },
+      (res: AckOf<AdminModerateAck>) => {
+        if (res.ok) {
+          showMenuNotice(action === "approve" ? "Pesan disetujui ✓" : "Pesan ditolak");
+        } else showMenuNotice("Gagal memproses moderasi");
+      }
+    );
+  };
+
+  /** v40 — buka kunci percakapan ber-PIN (sekali per sesi socket). */
+  const handleUnlock = () => {
+    if (!pinPrompt || !pinValue.trim()) return;
+    socketRef.current?.emit(
+      "admin:unlock",
+      { userId: pinPrompt.userId, pin: pinValue.trim() },
+      (res: AckOf<AdminUnlockAck>) => {
+        if (res.ok) {
+          const convId = pinPrompt.conversationId;
+          setPinPrompt(null);
+          setPinValue("");
+          setPinError(null);
+          openConversation(convId);
+        } else if ((res as { error?: string }).error === "INVALID_PIN") {
+          setPinError("PIN salah — coba lagi.");
+        } else setPinError("Gagal membuka kunci.");
+      }
+    );
   };
 
   const emitMessage = (
@@ -2745,6 +2803,29 @@ export function AdminPanel() {
                               : undefined
                           }
                           />
+                          {/* v40 — strip aksi moderasi utk pesan yang menunggu persetujuan. */}
+                          {m.pending && !m.deletedAt ? (
+                            <div className="mx-2 my-1 flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-1.5">
+                              <span className="text-[11px] font-semibold text-amber-600 dark:text-amber-400">
+                                ⏳ Menunggu persetujuan
+                              </span>
+                              <Button
+                                size="sm"
+                                className="h-6 rounded-full px-2.5 text-[11px]"
+                                onClick={() => handleModerate(m.id, "approve")}
+                              >
+                                Setujui
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-6 rounded-full px-2.5 text-[11px] text-destructive hover:text-destructive"
+                                onClick={() => handleModerate(m.id, "reject")}
+                              >
+                                Tolak
+                              </Button>
+                            </div>
+                          ) : null}
                         </div>
                       ))
                     )}
@@ -3365,6 +3446,54 @@ export function AdminPanel() {
         destructive
         onConfirm={confirmModerate}
       />
+
+      {/* v40 — dialog buka kunci percakapan ber-PIN */}
+      {pinPrompt ? (
+        <Dialog
+          open
+          onOpenChange={(v) => {
+            if (!v) {
+              setPinPrompt(null);
+              setPinValue("");
+              setPinError(null);
+            }
+          }}
+        >
+          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-xs">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Lock className="size-4" aria-hidden="true" />
+                Percakapan terkunci
+              </DialogTitle>
+              <DialogDescription>
+                Anda memasang PIN untuk percakapan ini. Masukkan PIN untuk membuka.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2">
+              <Input
+                type="password"
+                inputMode="numeric"
+                value={pinValue}
+                onChange={(e) => setPinValue(e.target.value)}
+                placeholder="PIN 4–8 digit"
+                maxLength={8}
+                aria-label="PIN percakapan"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleUnlock();
+                }}
+              />
+              {pinError ? <p className="text-xs text-destructive">{pinError}</p> : null}
+              <Button
+                className="w-full"
+                disabled={pinValue.trim().length < 4}
+                onClick={handleUnlock}
+              >
+                Buka kunci
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      ) : null}
 
       {/* v10 — notifikasi singkat aksi menu (backup / vacuum / ghost / dll) */}
       {menuNotice ? (

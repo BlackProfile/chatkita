@@ -173,6 +173,8 @@ export interface ChatMessage {
   scheduledAt?: string;
   /** v22 — label "Diteruskan dari <nama>" untuk pesan hasil forward. */
   forwardedFrom?: string;
+  /** v40 — true saat pesan menunggu persetujuan admin (moderasi pra-kirim). */
+  pending?: boolean;
 }
 
 /** A chat partner including live presence info. */
@@ -347,6 +349,8 @@ export interface HistoryAck {
 export interface MessageAck {
   ok: true;
   message: ChatMessage;
+  /** v40 — true saat pesan masuk antrean moderasi (approval mode). */
+  pending?: boolean;
 }
 
 /** Ack payload returned by `messages:older` (v8 pagination). */
@@ -392,6 +396,8 @@ export interface MessageUpdatePayload {
   starredBy?: string[];
   /** v25 — Pusat Cheat: waktu pesan diubah admin (backdate/forward-date). */
   createdAt?: string;
+  /** v40 — moderasi: false saat pesan pending disetujui admin. */
+  pending?: boolean;
 }
 
 /** Generic error ack: `{ ok: false, error: ErrorCode }` */
@@ -410,6 +416,13 @@ export type ChatErrorCode =
   // v11 — admin session control (enforced inside messages:send):
   | "FROZEN"
   | "MUTED"
+  // v40 — pusat kendali per-user:
+  | "WORD_BLOCKED"
+  | "MEDIA_TYPE_BLOCKED"
+  | "PIN_LOCKED"
+  | "NO_MEDIA"
+  | "TOO_LARGE"
+  | "NOT_LOCKED"
   | "SLOW_MODE"
   | "MEDIA_BLOCKED"
   // v23 — custom login admin (admin:password_change):
@@ -915,6 +928,29 @@ export interface XrayProfile {
   botReplyText?: string | null;
   /** v39 — bot reply delay in seconds (0–120). */
   botReplyDelaySec?: number;
+  /* v40 — pusat kendali per-user. */
+  /** v40 — catatan pribadi admin tentang user ini (null = kosong). */
+  adminNote?: string | null;
+  /** v40 — label: '' | 'vip' | 'attention' | 'problem'. */
+  tag?: string;
+  /** v40 — daftar kata terlarang (null = kosong). */
+  wordFilter?: string | null;
+  /** v40 — 'block' (tolak pesan) | 'censor' (sensor ***). */
+  wordFilterAction?: 'block' | 'censor';
+  /** v40 — semua pesan user menunggu persetujuan admin. */
+  approvalMode?: boolean;
+  /** v40 — jenis media yang diblokir (subset image/voice/file). */
+  blockedMediaTypes?: string[];
+  /** v40 — template balasan cepat milik user ini. */
+  quickReplies?: string[];
+  /** v40 — pengingat otomatis saat user diam ≥ X hari (0 = nonaktif). */
+  nudgeDays?: number;
+  /** v40 — teks pengingat otomatis. */
+  nudgeText?: string | null;
+  /** v40 — auto-bersih chat: pesan > X hari di-tombstone (0 = nonaktif). */
+  autoCleanDays?: number;
+  /** v40 — percakapan dikunci PIN oleh admin. */
+  pinLockSet?: boolean;
 }
 
 export interface XrayAck {
@@ -960,6 +996,177 @@ export interface AdminQuotaAck {
   quotaMb: number;
   quotaBytes: number;
   usedBytes: number;
+}
+
+/* ------------------------------------------------------------------ */
+/* v40 — pusat kendali per-user (moderasi / insight / otomasi / aman)   */
+/* ------------------------------------------------------------------ */
+
+/** v40 — ack `admin:word_filter` — daftar kata terlarang tersimpan. */
+export interface AdminWordFilterAck {
+  ok: true;
+  words: string;
+  action: 'block' | 'censor';
+}
+
+/** v40 — ack `admin:approval_mode` — mode persetujuan pra-kirim. */
+export interface AdminApprovalModeAck {
+  ok: true;
+  on: boolean;
+}
+
+/** v40 — ack `admin:media_types` — blokir media per jenis. */
+export interface AdminMediaTypesAck {
+  ok: true;
+  blocked: string[];
+}
+
+/** v40 — ack `admin:user_force_logout` — semua perangkat dilepas. */
+export interface AdminForceLogoutAck {
+  ok: true;
+  devices: number;
+  sockets: number;
+}
+
+/** v40 — ack `admin:user_note` — catatan + tag admin tersimpan. */
+export interface AdminNoteAck {
+  ok: true;
+  note: string;
+  tag: string;
+}
+
+/** v40 — satu baris leaderboard (admin:leaderboard). */
+export interface AdminLeaderRow {
+  userId: string;
+  name: string;
+  msgs: number;
+  media: number;
+  bytes: number;
+  lastSeenAt: string;
+  avgReplySec: number | null;
+}
+
+export interface AdminLeaderboardAck {
+  ok: true;
+  rows: AdminLeaderRow[];
+  rankings: { msgs: string[]; media: string[]; active: string[]; reply: string[] };
+}
+
+/** v40 — ack `admin:user_compare` — insight dua user berdampingan. */
+export interface AdminCompareAck {
+  ok: true;
+  a: AdminUserInsightAck['insight'];
+  b: AdminUserInsightAck['insight'];
+}
+
+/** v40 — satu entri riwayat login (admin:user_logins). */
+export interface AdminLoginEvent {
+  at: string;
+  ip: string | null;
+  userAgent: string | null;
+  kind: string;
+}
+
+export interface AdminLoginsAck {
+  ok: true;
+  events: AdminLoginEvent[];
+}
+
+/** v40 — ack `admin:schedule_message` — pesan terjadwal tersimpan. */
+export interface AdminScheduleAck {
+  ok: true;
+  id: number;
+  sendAtMs: number;
+}
+
+/** v40 — ack `admin:schedule_list` — antrean pesan terjadwal user. */
+export interface AdminScheduleListAck {
+  ok: true;
+  items: { id: number; text: string; sendAtMs: number }[];
+}
+
+/** v40 — ack `admin:schedule_cancel` — pesan terjadwal dibatalkan. */
+export interface AdminScheduleCancelAck {
+  ok: true;
+}
+
+/** v40 — ack `admin:quick_reply_list/set` — template balasan cepat user. */
+export interface AdminQuickReplyAck {
+  ok: true;
+  items: string[];
+}
+
+/** v40 — ack `admin:quick_send` — template terkirim sebagai Admin. */
+export interface AdminQuickSendAck {
+  ok: true;
+  message: ChatMessageApi;
+}
+
+/** v40 — ack `admin:user_nudge` — pengingat otomatis dikonfigurasi. */
+export interface AdminNudgeAck {
+  ok: true;
+  days: number;
+  text: string | null;
+}
+
+/** v40 — ack `admin:user_autoclean` — auto-bersih dikonfigurasi. */
+export interface AdminAutocleanAck {
+  ok: true;
+  days: number;
+}
+
+/** v40 — ack `admin:user_media_zip` — ZIP media siap diunduh (base64). */
+export interface AdminMediaZipAck {
+  ok: true;
+  b64: string;
+  count: number;
+  bytes: number;
+  skipped: number;
+  name: string;
+}
+
+/** v40 — ack `admin:user_pinlock` — kunci PIN dipasang/dilepas. */
+export interface AdminPinLockAck {
+  ok: true;
+  locked: boolean;
+}
+
+/** v40 — ack `admin:unlock` — kunci PIN dibuka untuk socket ini. */
+export interface AdminUnlockAck {
+  ok: true;
+}
+
+/** v40 — ack `admin:moderate` — pesan pending disetujui/ditolak. */
+export interface AdminModerateAck {
+  ok: true;
+  action: 'approve' | 'reject';
+}
+
+/** v40 — server → admin: pemakaian kuota media user menyentuh ambang. */
+export interface AdminQuotaWarnPayload {
+  userId: string;
+  userName: string;
+  pct: number;
+  usedBytes: number;
+  quotaBytes: number;
+}
+
+/** v40 — server → admin: aktivitas user live (feed). */
+export interface AdminActivityPayload {
+  userId: string;
+  kind: 'login' | 'message' | 'read';
+  detail: string;
+  at: string;
+}
+
+/** v40 — server → user: sesi diakhiri admin (paksa logout). */
+export interface SessionRevokedPayload {
+  by: string;
+}
+
+/** v40 — server → user: pesan yang menunggu moderasi ditolak admin. */
+export interface ModerationRejectedPayload {
+  messageId: number;
 }
 
 /** One deleted (tombstoned) message as returned by `admin:forensics`. */
@@ -1425,6 +1632,61 @@ export interface ConversationResetPayload {
 //                           Special per-user media quota in MiB (0 = global
 //                           default 250 MiB); enforced in messages:send via
 //                           effectiveQuotaBytes().
+//
+// Kategori B3 — pusat kendali per-user (v40):
+// admin:word_filter        { userId, words, action } → AdminWordFilterAck
+//                           Daftar kata terlarang (baris/koma); action
+//                           'block' = tolak pesan (WORD_BLOCKED), 'censor'
+//                           = kata diganti '***' otomatis di messages:send.
+// admin:approval_mode      { userId, on } → AdminApprovalModeAck
+//                           Semua pesan user disimpan pending=1 dan HANYA
+//                           dikirim ke room admin sampai disetujui.
+// admin:moderate           { messageId, action 'approve'|'reject' }
+//                          → AdminModerateAck
+//                           approve: pending=0 + fan-out message:new ke user
+//                           + message:updated ke admin; reject: tombstone
+//                           via pipeline resmi + moderation:rejected ke user.
+// admin:media_types        { userId, blocked: string[] } → AdminMediaTypesAck
+//                           Blokir jenis media tertentu (image/voice/file)
+//                           → error MEDIA_TYPE_BLOCKED di messages:send.
+// admin:user_force_logout  { userId } → AdminForceLogoutAck
+//                           Hapus semua devices + emit session:revoked ke
+//                           seluruh socket user + putuskan socket-nya.
+// admin:user_note          { userId, note, tag } → AdminNoteAck
+//                           Catatan pribadi admin + tag vip/attention/problem.
+// admin:leaderboard        {} → AdminLeaderboardAck
+//                           Peringkat: pesan terbanyak, media terbanyak,
+//                           paling aktif (last_seen), balas tercepat (rtp).
+// admin:user_compare       { userIdA, userIdB } → AdminCompareAck
+//                           buildUserInsight untuk dua user berdampingan.
+// admin:user_logins        { userId } → AdminLoginsAck
+//                           50 login terakhir dari tabel login_events.
+// admin:schedule_message   { userId, text, sendAtMs } → AdminScheduleAck
+//                           Pesan admin terjadwal (reuse kolom scheduled_at
+//                           v22; deliverDueScheduled mengirimkan otomatis).
+// admin:schedule_list      { userId } → AdminScheduleListAck
+// admin:schedule_cancel    { messageId } → AdminScheduleCancelAck
+// admin:quick_reply_list   { userId } → AdminQuickReplyAck
+// admin:quick_reply_set    { userId, items } → AdminQuickReplyAck
+// admin:quick_send         { userId, text } → AdminQuickSendAck
+//                           Kirim template ATAS NAMA ADMIN ke user (instan).
+// admin:user_nudge         { userId, days, text } → AdminNudgeAck
+//                           Pengingat otomatis saat user diam ≥ days hari
+//                           (sweeper 30 menit; sekali per periode diam).
+// admin:user_autoclean     { userId, days } → AdminAutocleanAck
+//                           Auto-bersih: tombstone pesan > days hari di
+//                           percakapan user (sweeper 6 jam, pipeline resmi).
+// admin:user_media_zip     { userId } → AdminMediaZipAck
+//                           ZIP semua media hidup user (base64, maks 40 MiB).
+// admin:user_pinlock       { userId, pin|null } → AdminPinLockAck
+//                           Kunci percakapan dengan PIN 4–8 digit.
+// admin:unlock             { userId, pin } → AdminUnlockAck
+//                           Buka kunci untuk socket admin ini (per login).
+// messages:history/older   → ack error PIN_LOCKED { userId } saat terkunci.
+// server → admin: admin:quota_warn (AdminQuotaWarnPayload, ambang 80/95%),
+//           admin:activity (AdminActivityPayload, feed live).
+// server → user: session:revoked (SessionRevokedPayload, paksa logout),
+//           moderation:rejected (ModerationRejectedPayload).
 //
 // Kategori C — fake signals (stored as settings rows):
 // admin:fake_typing       { conversationId, on: boolean } → FakeTypingAck

@@ -52,6 +52,7 @@ import {
 import { AdminCheat } from "@/components/chat/admin-cheat";
 import { AdminPusat } from "@/components/chat/admin-pusat";
 import { AdminStorage } from "@/components/chat/admin-storage";
+import { DashboardV40 } from "@/components/chat/dashboard-v40";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1214,6 +1215,12 @@ export function AdminDashboard({
             </div>
           ) : tab === "pengguna" ? (
             <div className="space-y-3">
+              {/* v40 — peringkat, banding user, feed aktivitas live. */}
+              <DashboardV40
+                socket={socket}
+                users={stats?.users.map((u) => ({ id: u.id, name: u.name })) ?? []}
+              />
+
               {/* Toolbar: cari + urut + filter online */}
               <div className="flex flex-col gap-2 rounded-xl border bg-card p-3 sm:flex-row sm:items-center">
                 <div className="relative min-w-0 flex-1">

@@ -79,6 +79,7 @@ import { Server, type Socket as IoSocket } from 'socket.io'
 import ZAI from 'z-ai-web-dev-sdk'
 import webpush from 'web-push'
 import exifr from 'exifr'
+import { zipSync } from 'fflate'
 
 /* ------------------------------------------------------------------ */
 /* Configuration                                                       */
@@ -154,8 +155,23 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        teks + jeda 0–120 dtk, tersimpan di DB, satu timer pending/user),
  *        admin:user_push (web push custom ke semua langganan user), dan
  *        admin:user_quota (kuota media khusus per-user MiB, 0 = default
- *        global 250 MiB — dicek di messages:send). Semua ter-audit. */
-const SERVICE_VERSION = 'v39'
+ *        global 250 MiB — dicek di messages:send). Semua ter-audit.
+ *  v40 — PUSAT KENDALI PER-USER level berikutnya (19 fitur permintaan user):
+ *        MODERASI — filter kata per-user (blok/sensor), mode persetujuan
+ *        pra-kirim (messages.pending + admin:moderate approve/reject),
+ *        blokir media PER JENIS (foto/video/voice/file), paksa logout semua
+ *        perangkat (hapus devices + session:revoked). INSIGHT — catatan &
+ *        tag admin per user (vip/perhatian/masalah), leaderboard (pesan,
+ *        media, aktifitas, balas tercepat), banding 2 user (insight A vs B),
+ *        riwayat login historis (tabel login_events), feed aktivitas live
+ *        (admin:activity). OTOMASI — pesan terjadwal admin ke user (reuse
+ *        kolom scheduled_at + deliverDueScheduled), balasan cepat per-user,
+ *        pengingat otomatis (nudge saat user diam X hari), auto-bersih chat
+ *        per-user (tombstone pesan > X hari). MEDIA & KEAMANAN — unduh ZIP
+ *        semua media user (fflate), peringatan kuota 80%/95% ke admin,
+ *        kunci percakapan dgn PIN per-user (admin harus buka kunci sekali
+ *        per socket). Semua event adminGuard + audit. */
+const SERVICE_VERSION = 'v40'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -320,6 +336,32 @@ addColumn('messages', 'meta_json', 'TEXT')
 addColumn('users', 'password_hash', 'TEXT')
 addColumn('users', 'password_set_at', 'INTEGER')
 addColumn('users', 'created_via', 'TEXT')
+/* v40 — pusat kendali per-user: moderasi, catatan, otomasi, keamanan. */
+addColumn('users', 'word_filter', 'TEXT')
+addColumn('users', 'word_filter_action', "TEXT DEFAULT 'block'")
+addColumn('users', 'approval_mode', 'INTEGER DEFAULT 0')
+addColumn('users', 'blocked_media_types', "TEXT DEFAULT ''")
+addColumn('users', 'admin_note', 'TEXT')
+addColumn('users', 'tag', "TEXT DEFAULT ''")
+addColumn('users', 'quick_replies', 'TEXT')
+addColumn('users', 'nudge_days', 'INTEGER DEFAULT 0')
+addColumn('users', 'nudge_text', 'TEXT')
+addColumn('users', 'nudge_last_at', 'INTEGER DEFAULT 0')
+addColumn('users', 'auto_clean_days', 'INTEGER DEFAULT 0')
+addColumn('users', 'pin_lock', 'TEXT')
+/* v40 — moderasi pra-kirim: pesan user menunggu persetujuan admin. */
+addColumn('messages', 'pending', 'INTEGER DEFAULT 0')
+db.run(`
+  CREATE TABLE IF NOT EXISTS login_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    ip TEXT,
+    user_agent TEXT,
+    kind TEXT NOT NULL DEFAULT 'login'
+  )
+`)
+db.run('CREATE INDEX IF NOT EXISTS idx_login_events_user ON login_events(user_id, at)')
 /* v27 — perangkat terikat (1 perangkat maks 1 akun, append-only;
  * admin bisa melepas lewat dashboard). */
 db.run(`
@@ -393,6 +435,19 @@ interface UserRow {
   bot_reply_on?: number | null
   bot_reply_text?: string | null
   bot_reply_delay_ms?: number | null
+  /* v40 — pusat kendali per-user. */
+  word_filter?: string | null
+  word_filter_action?: string | null
+  approval_mode?: number | null
+  blocked_media_types?: string | null
+  admin_note?: string | null
+  tag?: string | null
+  quick_replies?: string | null
+  nudge_days?: number | null
+  nudge_text?: string | null
+  nudge_last_at?: number | null
+  auto_clean_days?: number | null
+  pin_lock?: string | null
 }
 
 interface ConversationRow {
@@ -455,6 +510,8 @@ interface MessageRow {
   delivered_at?: number | null
   /* v26 — metadata media (JSON: width/height/durationMs/pages). */
   meta_json?: string | null
+  /* v40 — 1 = pesan menunggu persetujuan admin (moderasi pra-kirim). */
+  pending?: number | null
 }
 
 /* ------------------------------ API types ------------------------------ */
@@ -493,6 +550,8 @@ interface ChatMessageApi {
   scheduledAt?: string
   /** v22 — label "Diteruskan dari …" pada pesan hasil forward. */
   forwardedFrom?: string
+  /** v40 — true saat menunggu persetujuan admin (moderasi pra-kirim). */
+  pending?: boolean
 }
 
 interface PartnerInfoApi {
@@ -1198,6 +1257,8 @@ const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   // terkirim membawa scheduledAt; setelah delivered_at terisi field hilang).
   ...(row.starred_by ? { starredBy: starredByOf(row.starred_by) } : {}),
   ...(row.forwarded_from && !row.deleted_at ? { forwardedFrom: row.forwarded_from } : {}),
+  // v40 — badge antrean moderasi (hanya terlihat admin sampai disetujui).
+  ...((row.pending ?? 0) === 1 && !row.deleted_at ? { pending: true } : {}),
   ...(row.scheduled_at && !row.delivered_at && !row.deleted_at
     ? { scheduledAt: new Date(row.scheduled_at).toISOString() }
     : {}),
@@ -1383,8 +1444,11 @@ const getMessagesPage = (
   /* v22 — pesan terjadwal orang lain yang belum terkirim disembunyikan. */
   viewerId?: string
 ): { messages: ChatMessageApi[]; hasMore: boolean } => {
+  // v40 — pesan pending (moderasi pra-kirim) disembunyikan dari viewer user;
+  // admin tetap melihatnya agar bisa menyetujui/menolak.
+  const pendingHide = viewerId && viewerId !== ADMIN_ID ? ' AND (pending IS NULL OR pending = 0)' : ''
   const viewerFilter = viewerId
-    ? ' AND (scheduled_at IS NULL OR delivered_at IS NOT NULL OR sender_id = ?)'
+    ? ` AND (scheduled_at IS NULL OR delivered_at IS NOT NULL OR sender_id = ?)${pendingHide}`
     : ''
   const fetched = (
     beforeId
@@ -1502,6 +1566,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         ON lm.id = (SELECT m2.id FROM messages m2
                     WHERE m2.conversation_id = c.id
                       AND (m2.scheduled_at IS NULL OR m2.delivered_at IS NOT NULL)
+                      AND ($me = 'admin' OR m2.pending IS NULL OR m2.pending = 0)
                     ORDER BY m2.id DESC LIMIT 1)
       LEFT JOIN messages pm
         ON pm.id = c.pinned_message_id
@@ -1908,6 +1973,135 @@ const scheduleBotReply = (userRow: UserRow, conversation: ConversationRow) => {
     console.log(`[bot] balasan otomatis -> ${fresh.name} (jeda ${Math.round(delayMs / 1000)} dtk)`)
   }, delayMs)
   pendingBotTimers.set(userRow.id, timer)
+}
+
+/* ------------------------------------------------------------------ */
+/* v40 — pusat kendali per-user: shared helpers                        */
+/* ------------------------------------------------------------------ */
+
+/** Parse daftar kata terlarang user (dipisah baris baru / koma). */
+const wordFilterWords = (user: Pick<UserRow, 'word_filter'>): string[] =>
+  (user.word_filter ?? '')
+    .split(/[\n,]+/)
+    .map((w) => w.trim())
+    .filter((w) => w.length > 0 && w.length <= 60)
+    .slice(0, 100)
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * v40 — terapkan filter kata ke teks pesan. 'block' → return null (pesan
+ * ditolak); 'censor' → return teks dengan kata yang cocok jadi '***'.
+ */
+const applyWordFilter = (
+  user: Pick<UserRow, 'word_filter' | 'word_filter_action'>,
+  text: string
+): { blocked: boolean; text: string } => {
+  const words = wordFilterWords(user)
+  if (words.length === 0) return { blocked: false, text }
+  const action = user.word_filter_action === 'censor' ? 'censor' : 'block'
+  const lower = text.toLowerCase()
+  const hit = words.find((w) => lower.includes(w.toLowerCase()))
+  if (!hit) return { blocked: false, text }
+  if (action === 'block') return { blocked: true, text }
+  const pattern = new RegExp(words.map(escapeRegExp).join('|'), 'gi')
+  return { blocked: false, text: text.replace(pattern, '***') }
+}
+
+/** v40 — peringatan kuota 80% / 95%: sekali per ambang per user per boot. */
+const quotaWarnLevel = new Map<string, number>()
+const maybeEmitQuotaWarn = (sender: UserRow) => {
+  const quota = effectiveQuotaBytes(sender)
+  if (quota <= 0) return
+  const used = storedMediaBytes(sender.id)
+  const pct = (used / quota) * 100
+  const level = pct >= 95 ? 95 : pct >= 80 ? 80 : 0
+  const prev = quotaWarnLevel.get(sender.id) ?? 0
+  if (level > prev) {
+    quotaWarnLevel.set(sender.id, level)
+    io.to('admins').emit('admin:quota_warn', {
+      userId: sender.id,
+      userName: sender.name,
+      pct: level,
+      usedBytes: used,
+      quotaBytes: quota,
+    })
+    console.log(`[kuota] ${sender.name} mencapai ${level}% (${used}/${quota} B)`)
+  } else if (level === 0 && prev > 0) {
+    quotaWarnLevel.delete(sender.id) // longgar lagi → boleh memperingatkan lagi
+  }
+}
+
+/** v40 — feed aktivitas live: catatan singkat aksi user ke room admin. */
+const emitActivity = (userId: string, kind: 'login' | 'message' | 'read', detail: string) => {
+  try {
+    io.to('admins').emit('admin:activity', {
+      userId,
+      kind,
+      detail: detail.slice(0, 160),
+      at: new Date(now()).toISOString(),
+    })
+  } catch {
+    /* feed tidak boleh menggagalkan alur utama */
+  }
+}
+
+/** v40 — percakapan 1-on-1 admin↔user (dibuat bila belum ada). */
+const adminConversationWith = (userId: string): ConversationRow =>
+  ensureConversationWithAdmin(userId)
+
+/** v40 — kirim pesan teks ATAS NAMA ADMIN ke user tertentu (dipakai bot,
+ * balasan cepat, pesan terjadwal, dan pengingat otomatis). */
+const sendAsAdminToUser = (userId: string, text: string): ChatMessageApi | null => {
+  const clean = text.trim()
+  if (!clean) return null
+  const conv = adminConversationWith(userId)
+  return insertAndFanOut(conv, ADMIN_ID, clean, 'text')
+}
+
+/** v40 — cek kunci PIN percakapan utk admin: true bila percakapan ini
+ * dikunci oleh admin dan socket ini belum membuka kuncinya. */
+const isConvLockedForAdmin = (socket: IoSocket, conversation: ConversationRow): boolean => {
+  const partnerId =
+    conversation.user_a_id === ADMIN_ID ? conversation.user_b_id : conversation.user_a_id
+  if (partnerId === ADMIN_ID) return false
+  const partner = findUserById(partnerId)
+  if (!partner?.pin_lock) return false
+  const unlocked = socket.data?.unlockedPin as Set<string> | undefined
+  return !(unlocked?.has(partnerId) ?? false)
+}
+
+/** v40 — kumpulkan media HIDUP milik user (semua percakapan) untuk ZIP. */
+const collectUserMediaFiles = (
+  userId: string
+): { files: { name: string; bytes: Uint8Array }[]; totalBytes: number; skipped: number } => {
+  const rows = db
+    .query(
+      `SELECT DISTINCT m.content FROM messages m
+       JOIN conversations c ON c.id = m.conversation_id
+       WHERE m.deleted_at IS NULL AND m.media_expired_at IS NULL
+         AND m.type IN ('image','voice','file') AND m.file_name IS NOT NULL
+         AND (c.user_a_id = ? OR c.user_b_id = ?)`
+    )
+    .all(userId, userId) as Array<{ content: string }>
+  const files: { name: string; bytes: Uint8Array }[] = []
+  let totalBytes = 0
+  let skipped = 0
+  for (const r of rows) {
+    const name = r.content.split('/api/media/')[1]
+    if (!name || name.includes('..') || name.includes('/')) {
+      skipped += 1
+      continue
+    }
+    try {
+      const bytes = readFileSync(join(MEDIA_DIR, name))
+      files.push({ name, bytes })
+      totalBytes += bytes.byteLength
+    } catch {
+      skipped += 1
+    }
+  }
+  return { files, totalBytes, skipped }
 }
 
 /* ------------------------------------------------------------------ */
@@ -2703,6 +2897,28 @@ const buildXrayProfile = (userId: string) => {
       120,
       Math.max(0, Math.round((user.bot_reply_delay_ms ?? 3000) / 1000))
     ),
+    /* v40 — pusat kendali per-user. */
+    adminNote: (user.admin_note ?? '').trim() || null,
+    tag: ['vip', 'attention', 'problem'].includes(user.tag ?? '') ? (user.tag as string) : '',
+    wordFilter: (user.word_filter ?? '').trim() || null,
+    wordFilterAction: user.word_filter_action === 'censor' ? 'censor' : 'block',
+    approvalMode: (user.approval_mode ?? 0) === 1,
+    blockedMediaTypes: (user.blocked_media_types ?? '')
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean),
+    quickReplies: (() => {
+      try {
+        const arr = JSON.parse(user.quick_replies ?? '[]')
+        return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string').slice(0, 20) : []
+      } catch {
+        return []
+      }
+    })(),
+    nudgeDays: Math.max(0, Math.round(user.nudge_days ?? 0)),
+    nudgeText: (user.nudge_text ?? '').trim() || null,
+    autoCleanDays: Math.max(0, Math.round(user.auto_clean_days ?? 0)),
+    pinLockSet: !!user.pin_lock,
   }
 }
 
@@ -3428,6 +3644,24 @@ io.on('connection', (socket) => {
       }
 
       console.log(`User "${user.name}" authenticated (socket ${socket.id})`)
+
+      // v40 — riwayat login historis + feed aktivitas live.
+      try {
+        const uaHeader = socket.handshake.headers['user-agent']
+        db.run(
+          'INSERT INTO login_events (user_id, at, ip, user_agent, kind) VALUES (?, ?, ?, ?, ?)',
+          [
+            user.id,
+            now(),
+            firstForwardedIp(socket),
+            typeof uaHeader === 'string' ? uaHeader.slice(0, 300) : null,
+            sessionRestore ? 'restore' : 'login',
+          ]
+        )
+      } catch {
+        /* riwayat tidak boleh menggagalkan login */
+      }
+      emitActivity(user.id, 'login', sessionRestore ? 'sesi dipulihkan' : 'login baru')
       const admin = findUserById(ADMIN_ID) // seeded on boot — always exists
       const page = getMessagesPage(conversation.id)
       ack({
@@ -3583,6 +3817,13 @@ io.on('connection', (socket) => {
         ack({ ok: false, error: 'FORBIDDEN' })
         return
       }
+      // v40 — kunci PIN percakapan: admin wajib membuka kunci sekali per socket.
+      if (me === ADMIN_ID && isConvLockedForAdmin(socket, conversation)) {
+        const lockedUserId =
+          conversation.user_a_id === ADMIN_ID ? conversation.user_b_id : conversation.user_a_id
+        ack({ ok: false, error: 'PIN_LOCKED', userId: lockedUserId })
+        return
+      }
       const lastReadBefore = getReadUpTo(conversation.id, me)
       // v10 — admin ghost mode: reading leaves read receipts untouched
       // (users keep seeing ✓ instead of ✓✓ for their sent messages).
@@ -3628,6 +3869,13 @@ io.on('connection', (socket) => {
       }
       if (!isParticipant(conversation, me)) {
         ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      // v40 — kunci PIN percakapan juga berlaku untuk halaman lama.
+      if (me === ADMIN_ID && isConvLockedForAdmin(socket, conversation)) {
+        const lockedUserId =
+          conversation.user_a_id === ADMIN_ID ? conversation.user_b_id : conversation.user_a_id
+        ack({ ok: false, error: 'PIN_LOCKED', userId: lockedUserId })
         return
       }
       const beforeId = Number(data?.beforeId)
@@ -3700,6 +3948,15 @@ io.on('connection', (socket) => {
           ack({ ok: false, error: 'MEDIA_BLOCKED' })
           return
         }
+        // v40 — blokir media PER JENIS (foto/video/voice/file) per-user.
+        const blockedTypes = (senderRow.blocked_media_types ?? '')
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean)
+        if (type !== 'text' && blockedTypes.includes(type)) {
+          ack({ ok: false, error: 'MEDIA_TYPE_BLOCKED', mediaType: type })
+          return
+        }
       }
 
       let trimmed: string
@@ -3719,6 +3976,15 @@ io.on('connection', (socket) => {
         if (me !== ADMIN_ID && !appSet.allowLinks && /https?:\/\/|www\./i.test(trimmed)) {
           ack({ ok: false, error: 'FORBIDDEN' })
           return
+        }
+        // v40 — filter kata per-user: blokir total atau sensor otomatis '***'.
+        if (senderRow) {
+          const wf = applyWordFilter(senderRow, trimmed)
+          if (wf.blocked) {
+            ack({ ok: false, error: 'WORD_BLOCKED' })
+            return
+          }
+          trimmed = wf.text
         }
       } else if (type === 'image' || type === 'voice' || type === 'file') {
         trimmed = content
@@ -3913,6 +4179,40 @@ io.on('connection', (socket) => {
         return
       }
 
+      // v40 — mode persetujuan (moderasi pra-kirim): pesan user disimpan
+      // dengan pending=1, HANYA room admin yang menerima — user menerima ack
+      // pending:true dan pesan baru tampil setelah admin menyetujui.
+      if (senderRow && (senderRow.approval_mode ?? 0) === 1) {
+        const result = db.run(
+          'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged, caption, pending) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)',
+          [
+            conversation.id,
+            me,
+            trimmed,
+            now(),
+            type,
+            replyToId ?? null,
+            durationMs ?? null,
+            type === 'file' || type === 'image' || type === 'voice' ? (fileMeta?.fileName ?? null) : null,
+            (type === 'file' || type === 'image' || type === 'voice') && fileMeta ? fileMeta.fileSize : null,
+            type === 'file' || type === 'image' || type === 'voice' ? (fileMeta?.mimeType ?? null) : null,
+            thumbUrlRef ?? null,
+            flagKeyword ? 1 : 0,
+            captionRef ?? null,
+          ]
+        )
+        const row = db
+          .query('SELECT * FROM messages WHERE id = ?')
+          .get(Number(result.lastInsertRowid)) as MessageRow
+        const message = toChatMessage(row)
+        attachReplyPreviews([row], [message])
+        io.to('admins').emit('message:new', message)
+        ack({ ok: true, message, pending: true })
+        audit('moderation_pending', `${senderRow.name} → antre (#${message.id})`)
+        console.log(`[moderasi] pesan #${message.id} menunggu persetujuan (${senderRow.name})`)
+        return
+      }
+
       const message = insertAndFanOut(conversation, me, trimmed, type, {
         replyToId,
         durationMs,
@@ -3926,6 +4226,12 @@ io.on('connection', (socket) => {
         void attachMediaMeta(message.id, message.content)
       }
       ack({ ok: true, message })
+
+      // v40 — peringatan kuota 80%/95% + feed aktivitas live (user saja).
+      if (senderRow && fileMeta) maybeEmitQuotaWarn(senderRow)
+      if (me !== ADMIN_ID) {
+        emitActivity(me, 'message', type === 'text' ? trimmed : (fileMeta?.fileName ?? type))
+      }
 
       // v39 — bot balasan otomatis per-user (hanya percakapan yang memuat
       // Admin; konfigurasi via admin:user_bot).
@@ -4013,6 +4319,7 @@ io.on('connection', (socket) => {
       if (getBoolSettingDefaulted('readReceipts')) {
         broadcastRead(conversation, me, readUpTo)
       }
+      if (me !== ADMIN_ID) emitActivity(me, 'read', 'membaca pesan')
       pushConversationsTo(me)
     })
   )
@@ -6248,6 +6555,443 @@ io.on('connection', (socket) => {
     ack({ ok: true, items })
   }))
 
+  /* ------------------- v40 — pusat kendali per-user ------------------- */
+
+  // v40 — filter kata per-user: blokir total atau sensor otomatis.
+  socket.on('admin:word_filter', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const words = typeof data?.words === 'string' ? data.words.trim().slice(0, 2000) : ''
+    const action = data?.action === 'censor' ? 'censor' : 'block'
+    db.run('UPDATE users SET word_filter = ?, word_filter_action = ? WHERE id = ?', [
+      words || null,
+      action,
+      target.id,
+    ])
+    const count = wordFilterWords({ word_filter: words }).length
+    audit('word_filter', `${target.name}: ${action} (${count} kata)`)
+    ack({ ok: true, words, action })
+  }))
+
+  // v40 — mode persetujuan pra-kirim: semua pesan user masuk antrean admin.
+  socket.on('admin:approval_mode', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const on = data?.on !== false
+    db.run('UPDATE users SET approval_mode = ? WHERE id = ?', [on ? 1 : 0, target.id])
+    audit('approval_mode', `${target.name}: ${on ? 'ON' : 'OFF'}`)
+    ack({ ok: true, on })
+  }))
+
+  // v40 — blokir media per jenis (foto/voice/file) per-user.
+  socket.on('admin:media_types', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const ALLOWED = ['image', 'voice', 'file']
+    const raw = Array.isArray(data?.blocked) ? data.blocked : []
+    const blocked = raw.filter((t: unknown) => typeof t === 'string' && ALLOWED.includes(t as string))
+    db.run('UPDATE users SET blocked_media_types = ? WHERE id = ?', [blocked.join(','), target.id])
+    audit('media_types', `${target.name}: ${blocked.join(',') || '-'}`)
+    ack({ ok: true, blocked })
+  }))
+
+  // v40 — paksa logout: hapus semua perangkat + akhiri semua sesi socket.
+  socket.on('admin:user_force_logout', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const dev = db.query('SELECT COUNT(*) AS c FROM devices WHERE user_id = ?').get(target.id) as { c: number }
+    db.run('DELETE FROM devices WHERE user_id = ?', [target.id])
+    const sockets = onlineSockets.get(target.id)?.size ?? 0
+    io.in(`user:${target.id}`).emit('session:revoked', { by: 'admin' })
+    io.in(`user:${target.id}`).disconnectSockets(true)
+    audit('force_logout', `${target.name} (${dev.c} perangkat, ${sockets} socket)`)
+    console.log(`[force-logout] ${target.name}: ${dev.c} perangkat dilepas, ${sockets} socket diputus`)
+    ack({ ok: true, devices: dev.c, sockets })
+  }))
+
+  // v40 — catatan & tag admin per user (khusus admin, tak terlihat user).
+  socket.on('admin:user_note', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const note = typeof data?.note === 'string' ? data.note.trim().slice(0, 2000) : ''
+    const tagRaw = typeof data?.tag === 'string' ? data.tag : ''
+    const tag = ['vip', 'attention', 'problem'].includes(tagRaw) ? tagRaw : ''
+    db.run('UPDATE users SET admin_note = ?, tag = ? WHERE id = ?', [note || null, tag, target.id])
+    audit('user_note', `${target.name}: tag=${tag || '-'} catatan=${note.length} kar`)
+    ack({ ok: true, note, tag })
+  }))
+
+  // v40 — leaderboard: peringkat pesan/media/aktif/balas-tercepat.
+  socket.on('admin:leaderboard', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    const users = db
+      .query("SELECT id, name, last_seen_at FROM users WHERE role = 'user'")
+      .all() as Array<{ id: string; name: string; last_seen_at: number }>
+    const rows = users.map((u) => {
+      const counts = db
+        .query(
+          `SELECT COUNT(*) AS c,
+                  COALESCE(SUM(CASE WHEN type IN ('image','voice','file') THEN 1 ELSE 0 END), 0) AS media,
+                  COALESCE(SUM(CASE WHEN file_size IS NOT NULL AND deleted_at IS NULL THEN file_size ELSE 0 END), 0) AS bytes
+           FROM messages WHERE sender_id = ? AND deleted_at IS NULL`
+        )
+        .get(u.id) as { c: number; media: number; bytes: number }
+      const conv = db
+        .query(
+          "SELECT id FROM conversations WHERE (user_a_id = ? AND user_b_id = 'admin') OR (user_b_id = ? AND user_a_id = 'admin')"
+        )
+        .get(u.id, u.id) as { id: string } | undefined
+      let avgReplySec: number | null = null
+      if (conv) {
+        const mrows = db
+          .query(
+            'SELECT sender_id, created_at FROM messages WHERE conversation_id = ? AND deleted_at IS NULL AND (pending IS NULL OR pending = 0) ORDER BY created_at ASC, id ASC'
+          )
+          .all(conv.id) as Array<{ sender_id: string; created_at: number }>
+        let sum = 0
+        let n = 0
+        let lastAdminAt: number | null = null
+        for (const r of mrows) {
+          if (r.sender_id === ADMIN_ID) lastAdminAt = r.created_at
+          else if (lastAdminAt != null) {
+            const d = r.created_at - lastAdminAt
+            if (d >= 0 && d <= 12 * 3_600_000) {
+              sum += d
+              n += 1
+            }
+            lastAdminAt = null
+          }
+        }
+        if (n > 0) avgReplySec = Math.round(sum / n / 1000)
+      }
+      return {
+        userId: u.id,
+        name: u.name,
+        msgs: Number(counts.c ?? 0),
+        media: Number(counts.media ?? 0),
+        bytes: Number(counts.bytes ?? 0),
+        lastSeenAt: new Date(u.last_seen_at).toISOString(),
+        avgReplySec,
+      }
+    })
+    const top = (arr: typeof rows, cmp: (a: (typeof rows)[number], b: (typeof rows)[number]) => number) =>
+      [...arr].sort(cmp).slice(0, 5).map((r) => r.userId)
+    ack({
+      ok: true,
+      rows,
+      rankings: {
+        msgs: top(rows, (a, b) => b.msgs - a.msgs),
+        media: top(rows, (a, b) => b.media - a.media),
+        active: top(rows, (a, b) => (a.lastSeenAt < b.lastSeenAt ? 1 : -1)),
+        reply: top(
+          rows.filter((r) => r.avgReplySec != null),
+          (a, b) => (a.avgReplySec ?? 0) - (b.avgReplySec ?? 0)
+        ),
+      },
+    })
+  }))
+
+  // v40 — bandingkan dua user berdampingan (insight A vs B).
+  socket.on('admin:user_compare', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const a = buildUserInsight(typeof data?.userIdA === 'string' ? data.userIdA : '')
+    const b = buildUserInsight(typeof data?.userIdB === 'string' ? data.userIdB : '')
+    if (!a || !b) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    ack({ ok: true, a, b })
+  }))
+
+  // v40 — riwayat login historis (50 terakhir).
+  socket.on('admin:user_logins', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const rows = db
+      .query(
+        'SELECT at, ip, user_agent, kind FROM login_events WHERE user_id = ? ORDER BY at DESC LIMIT 50'
+      )
+      .all(target.id) as Array<{ at: number; ip: string | null; user_agent: string | null; kind: string }>
+    ack({
+      ok: true,
+      events: rows.map((r) => ({
+        at: new Date(r.at).toISOString(),
+        ip: r.ip,
+        userAgent: r.user_agent,
+        kind: r.kind,
+      })),
+    })
+  }))
+
+  // v40 — pesan terjadwal admin ke user (reuse kolom scheduled_at v22 —
+  // deliverDueScheduled yang sudah ada yang mengirimkannya tepat waktu).
+  socket.on('admin:schedule_message', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const text = typeof data?.text === 'string' ? data.text.trim() : ''
+    const sendAtMs = Number(data?.sendAtMs)
+    if (
+      text.length < 1 ||
+      text.length > 1000 ||
+      !Number.isFinite(sendAtMs) ||
+      sendAtMs < now() + 5_000 ||
+      sendAtMs > now() + 30 * 86_400_000
+    ) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const conv = adminConversationWith(target.id)
+    const result = db.run(
+      "INSERT INTO messages (conversation_id, sender_id, content, created_at, type, flagged, scheduled_at) VALUES (?, ?, ?, ?, 'text', 0, ?)",
+      [conv.id, ADMIN_ID, text, now(), Math.round(sendAtMs)]
+    )
+    audit('schedule_message', `${target.name} @ ${new Date(Math.round(sendAtMs)).toISOString()}`)
+    ack({ ok: true, id: Number(result.lastInsertRowid), sendAtMs: Math.round(sendAtMs) })
+  }))
+
+  // v40 — daftar pesan terjadwal yang belum terkirim untuk satu user.
+  socket.on('admin:schedule_list', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const conv = adminConversationWith(target.id)
+    const rows = db
+      .query(
+        'SELECT id, content, scheduled_at FROM messages WHERE conversation_id = ? AND scheduled_at IS NOT NULL AND delivered_at IS NULL AND deleted_at IS NULL ORDER BY scheduled_at ASC'
+      )
+      .all(conv.id) as Array<{ id: number; content: string; scheduled_at: number }>
+    ack({
+      ok: true,
+      items: rows.map((r) => ({ id: r.id, text: r.content, sendAtMs: r.scheduled_at })),
+    })
+  }))
+
+  // v40 — batalkan pesan terjadwal milik admin yang belum terkirim.
+  socket.on('admin:schedule_cancel', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row || row.scheduled_at == null || row.delivered_at != null || row.sender_id !== ADMIN_ID) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    db.run('DELETE FROM messages WHERE id = ?', [row.id])
+    audit('schedule_cancel', `#${row.id}`)
+    ack({ ok: true })
+  }))
+
+  // v40 — balasan cepat per-user: daftar template + kirim instan.
+  socket.on('admin:quick_reply_list', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    let items: string[] = []
+    try {
+      const arr = JSON.parse(target.quick_replies ?? '[]')
+      if (Array.isArray(arr)) items = arr.filter((x) => typeof x === 'string').slice(0, 20)
+    } catch {
+      items = []
+    }
+    ack({ ok: true, items })
+  }))
+
+  socket.on('admin:quick_reply_set', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const raw = Array.isArray(data?.items) ? data.items : null
+    if (!raw || raw.length > 20) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const items: string[] = []
+    for (const item of raw) {
+      if (typeof item !== 'string') {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const v = item.trim()
+      if (v.length < 1 || v.length > 500) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      items.push(v)
+    }
+    db.run('UPDATE users SET quick_replies = ? WHERE id = ?', [JSON.stringify(items), target.id])
+    audit('quick_reply_set', `${target.name}: ${items.length} template`)
+    ack({ ok: true, items })
+  }))
+
+  socket.on('admin:quick_send', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const text = typeof data?.text === 'string' ? data.text.trim() : ''
+    if (text.length < 1 || text.length > 1000) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const message = sendAsAdminToUser(target.id, text)
+    if (!message) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    audit('quick_send', `${target.name}: ${text.slice(0, 80)}`)
+    ack({ ok: true, message })
+  }))
+
+  // v40 — pengingat otomatis: user diam X hari → bot admin mengirim pesan.
+  socket.on('admin:user_nudge', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const days = Math.round(Number(data?.days))
+    const text = typeof data?.text === 'string' ? data.text.trim().slice(0, 500) : ''
+    if (!Number.isInteger(days) || days < 0 || days > 30 || (days > 0 && !text)) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    db.run('UPDATE users SET nudge_days = ?, nudge_text = ?, nudge_last_at = 0 WHERE id = ?', [
+      days,
+      days > 0 ? text : null,
+      target.id,
+    ])
+    audit('user_nudge', `${target.name}: ${days === 0 ? 'nonaktif' : `${days} hari`}`)
+    ack({ ok: true, days, text: days > 0 ? text : null })
+  }))
+
+  // v40 — auto-bersih chat per-user: pesan > X hari di-tombstone otomatis.
+  socket.on('admin:user_autoclean', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const days = Math.round(Number(data?.days))
+    if (!Number.isInteger(days) || days < 0 || days > 365) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    db.run('UPDATE users SET auto_clean_days = ? WHERE id = ?', [days, target.id])
+    audit('user_autoclean', `${target.name}: ${days === 0 ? 'nonaktif' : `${days} hari`}`)
+    ack({ ok: true, days })
+  }))
+
+  // v40 — unduh semua media hidup user sebagai ZIP (fflate, level store).
+  socket.on('admin:user_media_zip', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const { files, totalBytes, skipped } = collectUserMediaFiles(target.id)
+    if (files.length === 0) {
+      ack({ ok: false, error: 'NO_MEDIA' })
+      return
+    }
+    if (totalBytes > 40 * 1_048_576) {
+      ack({ ok: false, error: 'TOO_LARGE', bytes: totalBytes })
+      return
+    }
+    const map: Record<string, Uint8Array> = {}
+    for (const f of files) map[f.name] = f.bytes
+    const zipped = zipSync(map, { level: 0 })
+    const b64 = Buffer.from(zipped).toString('base64')
+    audit('media_zip', `${target.name}: ${files.length} berkas (${totalBytes} B)`)
+    console.log(`[zip] ${target.name}: ${files.length} berkas, ${totalBytes} B, lewat ${skipped}`)
+    ack({ ok: true, b64, count: files.length, bytes: totalBytes, skipped, name: `media-${target.name}.zip` })
+  }))
+
+  // v40 — kunci percakapan user dengan PIN (admin wajib membuka per socket).
+  socket.on('admin:user_pinlock', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const pin = typeof data?.pin === 'string' ? data.pin.trim() : ''
+    if (pin === '') {
+      db.run('UPDATE users SET pin_lock = NULL WHERE id = ?', [target.id])
+      audit('user_pinlock', `${target.name}: kunci dilepas`)
+      ack({ ok: true, locked: false })
+      return
+    }
+    if (!/^\d{4,8}$/.test(pin)) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    db.run('UPDATE users SET pin_lock = ? WHERE id = ?', [pinHash(pin, `lock:${target.id}`), target.id])
+    audit('user_pinlock', `${target.name}: kunci dipasang`)
+    ack({ ok: true, locked: true })
+  }))
+
+  // v40 — buka kunci percakapan untuk socket admin ini (sekali per login).
+  socket.on('admin:unlock', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const partner = findUserById(target.id)
+    if (!partner?.pin_lock) {
+      ack({ ok: false, error: 'NOT_LOCKED' })
+      return
+    }
+    const pin = typeof data?.pin === 'string' ? data.pin.trim() : ''
+    if (pinHash(pin, `lock:${target.id}`) !== partner.pin_lock) {
+      ack({ ok: false, error: 'INVALID_PIN' })
+      return
+    }
+    if (!socket.data.unlockedPin) socket.data.unlockedPin = new Set<string>()
+    ;(socket.data.unlockedPin as Set<string>).add(target.id)
+    audit('unlock', `${target.name}`)
+    ack({ ok: true })
+  }))
+
+  // v40 — persetujuan moderasi: setujui (fan-out) atau tolak (tombstone).
+  socket.on('admin:moderate', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const action = data?.action === 'reject' ? 'reject' : 'approve'
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row || (row.pending ?? 0) !== 1) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const conversation = getConversation(row.conversation_id)
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    if (action === 'approve') {
+      db.run('UPDATE messages SET pending = 0 WHERE id = ?', [row.id])
+      db.run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [now(), conversation.id])
+      const fresh = db.query('SELECT * FROM messages WHERE id = ?').get(row.id) as MessageRow
+      const message = toChatMessage(fresh)
+      attachReplyPreviews([fresh], [message])
+      io.to(`user:${conversation.user_a_id}`).emit('message:new', message)
+      io.to(`user:${conversation.user_b_id}`).emit('message:new', message)
+      // Admin menerima versi perbarui (bubble ⏳ berubah jadi pesan normal).
+      io.to('admins').emit('message:updated', message)
+      pushConversationsTo(conversation.user_a_id)
+      pushConversationsTo(conversation.user_b_id)
+      audit('moderation_approve', `#${row.id}`)
+      ack({ ok: true, action: 'approve' })
+    } else {
+      tombstoneMessage(row, conversation, now())
+      const partnerId =
+        conversation.user_a_id === ADMIN_ID ? conversation.user_b_id : conversation.user_a_id
+      io.to(`user:${partnerId}`).emit('moderation:rejected', { messageId: row.id })
+      audit('moderation_reject', `#${row.id}`)
+      ack({ ok: true, action: 'reject' })
+    }
+  }))
+
   socket.on('admin:mirror', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
     const on = data?.on !== false
@@ -6645,6 +7389,76 @@ const deliverDueScheduled = () => {
 }
 setTimeout(deliverDueScheduled, 3_000)
 setInterval(deliverDueScheduled, 10_000)
+
+/* v40 — pengingat otomatis (nudge): user diam >= X hari dan belum diingatkan
+ * pada periode diam ini → bot admin mengirim pesan pengingat. Cek tiap 30 menit. */
+const sweepNudges = () => {
+  try {
+    const users = db
+      .query(
+        "SELECT * FROM users WHERE role = 'user' AND nudge_days > 0 AND nudge_text IS NOT NULL"
+      )
+      .all() as UserRow[]
+    for (const u of users) {
+      const idleMs = now() - u.last_seen_at
+      if (idleMs < (u.nudge_days ?? 0) * 86_400_000) continue
+      if ((u.nudge_last_at ?? 0) >= u.last_seen_at) continue // sudah diingatkan periode ini
+      const text = (u.nudge_text ?? '').trim()
+      if (!text) continue
+      if (sendAsAdminToUser(u.id, text)) {
+        db.run('UPDATE users SET nudge_last_at = ? WHERE id = ?', [now(), u.id])
+        console.log(
+          `[nudge] pengingat terkirim ke ${u.name} (diam ${Math.floor(idleMs / 86_400_000)} hari)`
+        )
+      }
+    }
+  } catch (err) {
+    console.error('[nudge] error:', (err as Error)?.message ?? err)
+  }
+}
+setTimeout(sweepNudges, 25_000)
+setInterval(sweepNudges, 30 * 60_000)
+
+/* v40 — auto-bersih chat per-user: pesan lebih tua dari X hari di
+ * percakapan user tsb di-tombstone via pipeline resmi (isi asli tersimpan
+ * untuk forensik, file media dibebaskan bila tak lagi direferensikan). */
+const sweepAutoClean = () => {
+  try {
+    const users = db
+      .query(
+        "SELECT id, name, auto_clean_days FROM users WHERE role = 'user' AND auto_clean_days > 0"
+      )
+      .all() as Array<Pick<UserRow, 'id' | 'name' | 'auto_clean_days'>>
+    for (const u of users) {
+      const cutoff = now() - (u.auto_clean_days ?? 0) * 86_400_000
+      const conv = db
+        .query(
+          "SELECT id FROM conversations WHERE (user_a_id = ? AND user_b_id = 'admin') OR (user_b_id = ? AND user_a_id = 'admin')"
+        )
+        .get(u.id, u.id) as { id: string } | undefined
+      if (!conv) continue
+      const stale = db
+        .query(
+          "SELECT * FROM messages WHERE conversation_id = ? AND deleted_at IS NULL AND created_at < ? AND scheduled_at IS NULL AND (pending IS NULL OR pending = 0)"
+        )
+        .all(conv.id, cutoff) as MessageRow[]
+      if (stale.length === 0) continue
+      const conversation = getConversation(conv.id)
+      if (!conversation) continue
+      const ts = now()
+      for (const row of stale) tombstoneMessage(row, conversation, ts)
+      pushConversationsTo(u.id)
+      pushConversationsTo(ADMIN_ID)
+      console.log(
+        `[auto-bersih] ${u.name}: ${stale.length} pesan > ${u.auto_clean_days} hari dibersihkan`
+      )
+    }
+  } catch (err) {
+    console.error('[auto-bersih] error:', (err as Error)?.message ?? err)
+  }
+}
+setTimeout(sweepAutoClean, 40_000)
+setInterval(sweepAutoClean, 6 * 60 * 60_000)
 
 httpServer.listen(PORT, () => {
   console.log(
