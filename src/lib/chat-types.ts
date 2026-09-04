@@ -593,6 +593,58 @@ export interface AdminCheatTimeAck {
   ok: true;
 }
 
+/* v38 — Kontrol user lengkap: cheat center per-user + kontrol media per-user
+   langsung dari toolbar percakapan admin. */
+
+/** Satu item media hidup milik percakapan user↔admin (admin:user_media). */
+export interface AdminUserMediaItem {
+  messageId: number;
+  senderId: string;
+  /** true bila pengirim adalah user target (bukan Admin). */
+  fromUser: boolean;
+  type: "image" | "voice" | "file";
+  /** URL media (/api/media/<nama> atau data: untuk voice lama). */
+  url: string;
+  thumbUrl?: string;
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  caption?: string;
+  durationMs?: number;
+  createdAt: string;
+  /** v26 — dimensi/durasi/halaman dari meta_json (bila ada). */
+  width?: number;
+  height?: number;
+  pages?: number;
+}
+
+/** Ack `admin:user_media` — daftar media percakapan + total pemakaian. */
+export interface AdminUserMediaAck {
+  ok: true;
+  conversationId: string;
+  items: AdminUserMediaItem[];
+  totals: {
+    count: number;
+    bytes: number;
+    fromUserCount: number;
+    fromUserBytes: number;
+  };
+}
+
+/** Ack `admin:media_delete` — satu media di-tombstone + file dibebaskan. */
+export interface AdminMediaDeleteAck {
+  ok: true;
+  messageId: number;
+  freedBytes: number;
+}
+
+/** Ack `admin:media_delete_all` — semua media user dibersihkan. */
+export interface AdminMediaDeleteAllAck {
+  ok: true;
+  deleted: number;
+  freedBytes: number;
+}
+
 /* v26 — Peta Penyimpanan: metadata media file user dibaca dari header file. */
 
 /** v35 — bagian EXIF foto (dibaca server via exifr, khusus admin). */
@@ -1348,6 +1400,25 @@ export interface ConversationResetPayload {
 // admin:cheat_time        { messageId, createdAt } → AdminCheatTimeAck | ChatErrorAck
 //                           Rewrites created_at; clients update the time chip
 //                           + day separator via message:updated.createdAt.
+//
+// Kategori I — Kontrol user lengkap (v38, dari toolbar percakapan admin):
+// admin:user_media         { userId } → AdminUserMediaAck | ChatErrorAck
+//                           Lists LIVE media (image/voice/file, not deleted,
+//                           not expired) of the user↔admin conversation,
+//                           newest first, with per-side totals. Read-only.
+// admin:media_delete       { messageId } → AdminMediaDeleteAck | ChatErrorAck
+//                           Tombstones ONE media message through the shared
+//                           delete pipeline (forensics-safe), releases the
+//                           disk file when no live message references it
+//                           (SHA-256 dedup aware) and frees quota (quota is
+//                           computed live from file_size). Broadcasts the
+//                           usual message:updated tombstone to both sides.
+// admin:media_delete_all   { userId, scope: "user" | "all" } →
+//                           AdminMediaDeleteAllAck | ChatErrorAck
+//                           scope "user" = only media SENT BY the user;
+//                           "all" = every media in the conversation. Same
+//                           pipeline as admin:media_delete, then a single
+//                           conversations push. Audited as media_delete_all.
 //
 // Kategori F — Peta Penyimpanan (v26):
 // admin:storage_map       {} → AdminStorageMapAck | ChatErrorAck

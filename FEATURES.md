@@ -185,6 +185,15 @@
 - **UI** (`user-insight-dialog.tsx` baru): menu titik-tiga tiap akun di tab **Pengguna** → **"Insight pengguna"** → dialog: 4 KPI (pesan, media, balas rata-rata, hari aktif/streak), histogram batang CSS murni (jam + hari, puncak disorot), baris tren/baca/reaksi, dan panel **"Ide buat kamu"** (amber). State di-reset via `key` remount; setState hanya di callback socket (aturan React Compiler).
 - Verifikasi: verify-integrity seksi "v37" (10 cek; 2 cek versi v36 dipindah, total 169).
 
+### v38 — Kontrol User Lengkap dari Toolbar Percakapan (Task 57)
+- **Permintaan**: "tambahkan fitur disini, fitur cheating lengkap, media control, dll buat yang banyak untuk per user" (screenshot toolbar percakapan admin).
+- **Toolbar percakapan admin kini 8 pill**: ⌨ Typing palsu · ✓✓ Palsu · **🎭 Cheat** · **🖼 Media** · **💡 Insight** · Ekspor chat · Reset chat · Info user.
+- **🎭 Cheat** (`user-cheat-dialog.tsx` baru) — pusat cheat PER-USER tanpa pemilih target (otomatis partner percakapan aktif): daftar pesan terpilih + **kirim pesan spoof sebagai user** (bisa backdate ≤90 hari), **edit pesan teks siapa saja**, **reaksi 6 emoji atas nama user** (toggle), **ubah waktu pesan**, **hapus pesan** (pipeline resmi + forensik), serta sinyal ilusi: typing palsu (sinkron dgn pill toolbar lewat `fakeTypingMap` induk), ✓✓ dibaca palsu, selalu online, mirror mengetik, mode hantu, dan "terakhir dilihat" palsu. Semua memakai event cheat v25 yang sudah ada — ter-audit, plus log aksi lokal di dialog.
+- **🖼 Media** (`user-media-dialog.tsx` baru) — kontrol media per-user: grid semua media hidup percakapan (foto thumbnail, voice durasi, file ikon+nama) dengan badge pengirim (violet=user, emerald=Admin), **filter Semua/Dari user/Dari Admin**, tap → **MediaViewer galeri**, hapus per item (ikon trash overlay), ringkasan pemakaian per sisi (jumlah + bytes), dan **"Hapus semua (N)"** dgn ConfirmDialog — HANYA media milik user (media Admin aman).
+- **Event server baru (v38)**: `admin:user_media {userId}` (list read-only + totals), `admin:media_delete {messageId}` (tombstone pipeline resmi `deleted_content` utk forensik + `releaseMediaFile` SHA-256 dedup aware + kuota longgar otomatis), `admin:media_delete_all {userId, scope: "user"|"all"}` — semuanya adminGuard + audit (`media_delete`, `media_delete_all`) + broadcast `message:updated` ke kedua sisi.
+- **💡 Insight** — shortcut membuka dialog insight v37 langsung dari konteks percakapan (sama dengan menu tab Pengguna).
+- Verifikasi: verify-integrity seksi "v38" (12 cek; 2 cek versi v37 dipindah, total 179).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 

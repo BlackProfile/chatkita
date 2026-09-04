@@ -136,8 +136,16 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        karakter, histogram jam & hari WIB, hari aktif, streak, jeda
  *        terpanjang), kecepatan membalas berpasangan (cap 12 jam), % baca,
  *        reaksi, tren 7 vs 7 hari, plus 4–8 butir "ide" otomatis Bahasa
- *        Indonesia (jam paling aktif, media favorit, saran disapa, dll). */
-const SERVICE_VERSION = 'v37'
+ *        Indonesia (jam paling aktif, media favorit, saran disapa, dll).
+ *  v38 — KONTROL USER LENGKAP DARI TOOLBAR PERCAKAPAN: pill "🎭 Cheat"
+ *        (pusat cheat per-user — memakai event cheat v25 yang sudah ada),
+ *        pill "🖼 Media" + event baru admin:user_media (daftar media hidup
+ *        percakapan + total per sisi), admin:media_delete (tombstone satu
+ *        media via pipeline resmi + bebaskan file disk + kuota otomatis
+ *        longgar), dan admin:media_delete_all (scope "user" = semua media
+ *        milik user / "all" = seluruh percakapan); pill "💡 Insight"
+ *        membuka insight v37 langsung dari konteks percakapan. */
+const SERVICE_VERSION = 'v38'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -5810,6 +5818,191 @@ io.on('connection', (socket) => {
     pushConversationsTo(conversation.user_a_id)
     pushConversationsTo(conversation.user_b_id)
     console.log(`[cheat] time message ${id} -> ${new Date(ts).toISOString()}`)
+  }))
+
+  /* ------------------------------------------------------------------ */
+  /* v38 — KONTROL USER LENGKAP: media control per-user (toolbar admin)  */
+  /* ------------------------------------------------------------------ */
+
+  /** Parser meta_json ringan (dimensi/halaman) untuk daftar media. */
+  const mediaMetaDims = (
+    raw?: string | null
+  ): { width?: number; height?: number; pages?: number } => {
+    if (!raw) return {}
+    try {
+      const m = JSON.parse(raw) as { width?: unknown; height?: unknown; pages?: unknown }
+      const num = (v: unknown): number | undefined =>
+        typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.round(v) : undefined
+      return { width: num(m.width), height: num(m.height), pages: num(m.pages) }
+    } catch {
+      return {}
+    }
+  }
+
+  /**
+   * v38 — tombstone SATU pesan media memakai pipeline hapus resmi (isi asli
+   * disimpan ke deleted_content untuk forensik), lalu bebaskan file disk
+   * saat tak ada lagi pesan hidup yang mereferensikannya (SHA-256 dedup
+   * aware). Kuota longgar otomatis karena storedMediaBytes hanya menghitung
+   * baris hidup. Return file_size lama sebagai ukuran pembebasan.
+   */
+  const mediaTombstoneRow = (
+    row: MessageRow,
+    conversation: ConversationRow,
+    ts: number
+  ): number => {
+    const freed = row.file_size ?? 0
+    tombstoneMessage(row, conversation, ts)
+    releaseMediaFile(mediaNameOf(row.content))
+    releaseMediaFile(mediaNameOf(row.thumb_url))
+    return freed
+  }
+
+  // Daftar SEMUA media hidup di percakapan user↔admin (terbaru dulu) +
+  // total per sisi — read-only, untuk pill "🖼 Media" di toolbar admin.
+  socket.on('admin:user_media', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const userId = typeof data?.userId === 'string' ? data.userId : ''
+    const conv = cheatConvOf(userId)
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const rows = db
+      .query(
+        `SELECT id, sender_id, type, content, file_name, file_size, mime_type,
+                thumb_url, caption, duration_ms, created_at, meta_json
+         FROM messages
+         WHERE conversation_id = ? AND deleted_at IS NULL AND media_expired_at IS NULL
+           AND type IN ('image', 'voice', 'file')
+         ORDER BY created_at DESC, id DESC`
+      )
+      .all(conv.id) as Array<
+        Pick<
+          MessageRow,
+          | 'id'
+          | 'sender_id'
+          | 'type'
+          | 'content'
+          | 'file_name'
+          | 'file_size'
+          | 'mime_type'
+          | 'thumb_url'
+          | 'caption'
+          | 'duration_ms'
+          | 'created_at'
+          | 'meta_json'
+        >
+      >
+    let bytes = 0
+    let fromUserBytes = 0
+    let fromUserCount = 0
+    const items = rows.map((r) => {
+      const size = r.file_size ?? 0
+      bytes += size
+      if (r.sender_id === userId) {
+        fromUserBytes += size
+        fromUserCount += 1
+      }
+      return {
+        messageId: r.id,
+        senderId: r.sender_id,
+        fromUser: r.sender_id === userId,
+        type: (r.type ?? 'file') as 'image' | 'voice' | 'file',
+        url: r.content,
+        thumbUrl: r.thumb_url ?? undefined,
+        fileName: r.file_name ?? undefined,
+        fileSize: r.file_size ?? undefined,
+        mimeType: r.mime_type ?? undefined,
+        caption: r.caption ?? undefined,
+        durationMs: r.duration_ms ?? undefined,
+        createdAt: new Date(r.created_at).toISOString(),
+        ...mediaMetaDims(r.meta_json),
+      }
+    })
+    ack({
+      ok: true,
+      conversationId: conv.id,
+      items,
+      totals: { count: rows.length, bytes, fromUserCount, fromUserBytes },
+    })
+  }))
+
+  // Hapus SATU media (pipeline hapus resmi: tombstone + bebaskan file disk;
+  // isi asli tetap tersimpan di deleted_content untuk forensik).
+  socket.on('admin:media_delete', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row || row.deleted_at || row.media_expired_at) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const type = row.type ?? 'text'
+    if (type !== 'image' && type !== 'voice' && type !== 'file') {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const conversation = getConversation(row.conversation_id)
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const freed = mediaTombstoneRow(row, conversation, now())
+    const senderName = findUserById(row.sender_id)?.name ?? row.sender_id
+    audit('media_delete', `${senderName}: ${type} #${id} (${freed} B)`)
+    console.log(`[media-control] #${id} (${type}) deleted by ADMIN, freed ${freed} B`)
+    ack({ ok: true, messageId: id, freedBytes: freed })
+  }))
+
+  // Hapus SEMUA media percakapan (scope "user" = hanya yang dikirim user
+  // target; scope "all" = seluruh media percakapan dua sisi).
+  socket.on('admin:media_delete_all', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const userId = typeof data?.userId === 'string' ? data.userId : ''
+    const conv = cheatConvOf(userId)
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const scope = data?.scope === 'all' ? 'all' : 'user'
+    const rows = (
+      scope === 'user'
+        ? db
+            .query(
+              `SELECT * FROM messages
+               WHERE conversation_id = ? AND sender_id = ?
+                 AND deleted_at IS NULL AND media_expired_at IS NULL
+                 AND type IN ('image', 'voice', 'file')`
+            )
+            .all(conv.id, userId)
+        : db
+            .query(
+              `SELECT * FROM messages
+               WHERE conversation_id = ?
+                 AND deleted_at IS NULL AND media_expired_at IS NULL
+                 AND type IN ('image', 'voice', 'file')`
+            )
+            .all(conv.id)
+    ) as MessageRow[]
+    const ts = now()
+    let freed = 0
+    for (const row of rows) {
+      freed += mediaTombstoneRow(row, conv, ts)
+    }
+    if (rows.length > 0) {
+      pushConversationsTo(conv.user_a_id)
+      pushConversationsTo(conv.user_b_id)
+    }
+    audit(
+      'media_delete_all',
+      `${findUserById(userId)?.name ?? userId}: ${rows.length} media (scope ${scope}, ${freed} B)`
+    )
+    console.log(`[media-control] ${rows.length} media cleared (scope ${scope}), freed ${freed} B`)
+    ack({ ok: true, deleted: rows.length, freedBytes: freed })
   }))
 
   socket.on('admin:quick_replies:get', handler(socket, (_data, ack) => {

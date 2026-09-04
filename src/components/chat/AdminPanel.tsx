@@ -85,6 +85,15 @@ import {
 import { TypingDots } from "@/components/chat/TypingDots";
 import { UserManager } from "@/components/chat/user-manager";
 import {
+  UserCheatDialog,
+  type UserCheatTarget,
+} from "@/components/chat/user-cheat-dialog";
+import {
+  UserMediaDialog,
+  type UserMediaTarget,
+} from "@/components/chat/user-media-dialog";
+import { UserInsightDialog } from "@/components/chat/user-insight-dialog";
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -139,6 +148,7 @@ import {
   type AdminFlaggedPayload,
   type AdminPeekAck,
   type AdminPinAck,
+  type AdminUserMediaItem,
   type AlwaysOnlineAck,
   type AppSettings,
   type AppSettingsAck,
@@ -151,6 +161,7 @@ import {
   type ConversationOverview,
   type ConversationPinnedPayload,
   type ConversationResetPayload,
+  type DashboardUserRow,
   type ExportAck,
   type FakeReceiptsAck,
   type FakeTypingAck,
@@ -320,6 +331,33 @@ export function AdminPanel() {
     [messagesMap, activeId]
   );
 
+  /* v38 — buka MediaViewer dari dialog kontrol media per-user (galeri = item dialog). */
+  const openUserMediaViewer = useCallback(
+    (items: AdminUserMediaItem[], messageId: number) => {
+      const item = items.find((i) => i.messageId === messageId);
+      if (!item) return;
+      const gallery = items.map((i) => ({
+        id: i.messageId,
+        type: i.type,
+        content: i.url,
+        fileName: i.fileName,
+        fileSize: i.fileSize,
+        mimeType: i.mimeType,
+      }));
+      setViewer(
+        viewerStateForMessage(gallery, {
+          id: item.messageId,
+          type: item.type,
+          content: item.url,
+          fileName: item.fileName,
+          fileSize: item.fileSize,
+          mimeType: item.mimeType,
+        })
+      );
+    },
+    []
+  );
+
   // v5 — font / pinned / edit / translate / archive / QR
   const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
   const [pinnedMap, setPinnedMap] = useState<
@@ -362,6 +400,10 @@ export function AdminPanel() {
   const [editHistId, setEditHistId] = useState<number | null>(null);
   /* v35 — target dialog metadata media (EXIF/GPS) khusus admin. */
   const [metaTarget, setMetaTarget] = useState<MediaMetaTarget | null>(null);
+  /* v38 — kontrol user lengkap: cheat per-user, media per-user, insight. */
+  const [cheatTarget, setCheatTarget] = useState<UserCheatTarget | null>(null);
+  const [mediaTarget, setMediaTarget] = useState<UserMediaTarget | null>(null);
+  const [insightTarget, setInsightTarget] = useState<DashboardUserRow | null>(null);
 
   // v22 — bintang, teruskan, kirim terjadwal
   const [starredOpen, setStarredOpen] = useState(false);
@@ -1124,6 +1166,9 @@ export function AdminPanel() {
     setMirror(false);
     setUmOpen(false);
     setUmTarget(null);
+    setCheatTarget(null);
+    setMediaTarget(null);
+    setInsightTarget(null);
     setForensicsOpen(false);
     setMsgSearchOpen(false);
     setAuditOpen(false);
@@ -2425,6 +2470,47 @@ export function AdminPanel() {
                   >
                     ✓✓ Palsu
                   </button>
+                  {/* v38 — kontrol user lengkap: cheat, media, insight (per user) */}
+                  <button
+                    type="button"
+                    className="flex h-7 shrink-0 items-center gap-1 rounded-full border bg-background px-2.5 text-[11px] font-medium text-violet-700 transition-colors hover:bg-violet-600 hover:text-white dark:text-violet-300"
+                    onClick={() =>
+                      setCheatTarget({
+                        id: activeConversation.partner.id,
+                        name: activeConversation.partner.name,
+                      })
+                    }
+                  >
+                    🎭 Cheat
+                  </button>
+                  <button
+                    type="button"
+                    className="flex h-7 shrink-0 items-center gap-1 rounded-full border bg-background px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    onClick={() =>
+                      setMediaTarget({
+                        id: activeConversation.partner.id,
+                        name: activeConversation.partner.name,
+                      })
+                    }
+                  >
+                    🖼 Media
+                  </button>
+                  <button
+                    type="button"
+                    className="flex h-7 shrink-0 items-center gap-1 rounded-full border bg-background px-2.5 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-500 hover:text-white dark:text-amber-300"
+                    onClick={() =>
+                      setInsightTarget({
+                        id: activeConversation.partner.id,
+                        name: activeConversation.partner.name,
+                        messages: 0,
+                        lastSeenAt:
+                          activeConversation.partner.lastSeenAt ?? new Date().toISOString(),
+                        online: activeConversation.partner.online,
+                      })
+                    }
+                  >
+                    💡 Insight
+                  </button>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <button
@@ -3143,6 +3229,32 @@ export function AdminPanel() {
         socket={socketRef.current}
         initialUserId={umTarget}
         onNotice={showMenuNotice}
+      />
+
+      {/* v38 — pusat cheat PER-USER dari toolbar percakapan */}
+      <UserCheatDialog
+        target={cheatTarget}
+        onClose={() => setCheatTarget(null)}
+        socket={socketRef.current}
+        typingOn={!!(activeId && fakeTypingMap[activeId])}
+        onToggleTyping={() => {
+          if (activeId) toggleFakeTyping(activeId);
+        }}
+      />
+
+      {/* v38 — kontrol media PER-USER dari toolbar percakapan */}
+      <UserMediaDialog
+        target={mediaTarget}
+        onClose={() => setMediaTarget(null)}
+        socket={socketRef.current}
+        onOpenViewer={openUserMediaViewer}
+      />
+
+      {/* v38 — shortcut insight per-user dari toolbar */}
+      <UserInsightDialog
+        target={insightTarget}
+        socket={socketRef.current}
+        onClose={() => setInsightTarget(null)}
       />
 
       {/* v11 — Forensik (terhapus / ditandai / riwayat edit) */}
