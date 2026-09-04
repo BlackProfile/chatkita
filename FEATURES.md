@@ -194,6 +194,18 @@
 - **💡 Insight** — shortcut membuka dialog insight v37 langsung dari konteks percakapan (sama dengan menu tab Pengguna).
 - Verifikasi: verify-integrity seksi "v38" (12 cek; 2 cek versi v37 dipindah, total 179).
 
+### v39 — Kendali Per-User Tambahan: Rename, Hapus Massal, Bot Balasan, Push, Kuota (Task 58)
+- **Permintaan**: lanjutan "fitur cheating lengkap, media control, dll buat yang banyak untuk per user" — paket akun level berikutnya di panel X-Ray (Manajemen pengguna → ketuk user).
+- **5 event server baru (semua adminGuard + `restrictionTarget` + audit)**:
+  - `admin:user_rename {userId, name}` — ganti nama tampilan/login user; validasi sama dgn pembuatan akun (1–40 char, bukan nama Admin, unik antar-user); broadcast conversations agar semua daftar menyegarkan nama.
+  - `admin:bulk_delete_user {userId}` — tombstone SEMUA pesan hidup milik user di SEMUA percakapan (semua jenis) via pipeline hapus resmi (`deleted_content` tersimpan utk forensik); file disk media ikut dibebaskan (SHA-256 dedup aware) → kuota longgar otomatis; percakapan terdampak di-push ulang.
+  - `admin:user_bot {userId, on, text, delaySec}` — **bot balasan otomatis** per-user: saat user mengirim pesan ke percakapan yang memuat Admin, server membalas ATAS NAMA ADMIN dgn teks tersimpan setelah jeda 0–120 dtk. Konfigurasi persist di kolom `users.bot_reply_*`; satu timer pending per user (pesan beruntun tidak menumpuk); ubah konfigurasi membatalkan balasan pending.
+  - `admin:user_push {userId, title, body}` — web push custom (judul ≤60, isi ≤200) ke SEMUA langganan push user; ack memuat jumlah langganan.
+  - `admin:user_quota {userId, mb}` — **kuota media khusus per-user** (MiB, 0 = default global 250 MiB); dicek di `messages:send` via `effectiveQuotaBytes()` (ganti `QUOTA_BYTES` langsung).
+- **UI (`user-manager.tsx`)**: seksi **"Kendali tambahan"** di panel X-Ray — ganti nama (input + Ganti), bot balasan (Switch + teks + pilihan jeda 0/3/10/30/60 dtk + Simpan), kuota media (pilihan Default/5/10/25/50/100/200/500 MiB + Terapkan, catatan terpakai), kirim push (judul + isi + Kirim), dan **"Hapus semua pesan user"** (destructive + ConfirmDialog). Konten detail kini scrollable (`max-h-[65vh]`). State diinisialisasi dari profil X-Ray (`botReplyOn/botReplyText/botReplyDelaySec/mediaQuotaMb` baru di `XrayProfile`) dan di-remount per user via `key`.
+- **Tipe baru** (`chat-types.ts`): `AdminRenameAck`, `AdminBulkDeleteUserAck`, `AdminBotState/Ack`, `AdminPushAck`, `AdminQuotaAck` + protokol Kategori B2.
+- Verifikasi: verify-integrity seksi "v39" (16 cek; 2 cek versi v38 dipindah, total 193).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 

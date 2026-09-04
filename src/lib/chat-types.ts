@@ -907,11 +907,59 @@ export interface XrayProfile {
   userAgent: string | null;
   /** Coarse platform guess derived from the user-agent. */
   platform: string;
+  /** v39 — special per-user media quota (MiB); 0 = global default 250 MiB. */
+  mediaQuotaMb?: number;
+  /** v39 — auto-reply bot ON for this user. */
+  botReplyOn?: boolean;
+  /** v39 — bot reply text (null when unset/off). */
+  botReplyText?: string | null;
+  /** v39 — bot reply delay in seconds (0–120). */
+  botReplyDelaySec?: number;
 }
 
 export interface XrayAck {
   ok: true;
   profile: XrayProfile;
+}
+
+/** v39 — ack `admin:user_rename` — display/login name changed. */
+export interface AdminRenameAck {
+  ok: true;
+  name: string;
+}
+
+/** v39 — ack `admin:bulk_delete_user` — tombstoned ALL live messages of the
+ * user across every conversation (official delete pipeline + disk cleanup). */
+export interface AdminBulkDeleteUserAck {
+  ok: true;
+  deleted: number;
+  freedBytes: number;
+}
+
+/** v39 — per-user auto-reply bot configuration (admin:user_bot). */
+export interface AdminBotState {
+  on: boolean;
+  text: string | null;
+  delaySec: number;
+}
+
+export interface AdminBotAck {
+  ok: true;
+  bot: AdminBotState;
+}
+
+/** v39 — ack `admin:user_push` — custom web push sent to user's devices. */
+export interface AdminPushAck {
+  ok: true;
+  subscriptions: number;
+}
+
+/** v39 — ack `admin:user_quota` — special media quota saved (0 = default). */
+export interface AdminQuotaAck {
+  ok: true;
+  quotaMb: number;
+  quotaBytes: number;
+  usedBytes: number;
 }
 
 /** One deleted (tombstoned) message as returned by `admin:forensics`. */
@@ -1357,6 +1405,26 @@ export interface ConversationResetPayload {
 //                           Every restriction change emits `user:restricted`
 //                           to that user's sockets; users also receive it on
 //                           login when any restriction is active.
+//
+// Kategori B2 — kendali per-user tambahan (v39, panel X-Ray):
+// admin:user_rename       { userId, name } → AdminRenameAck | ChatErrorAck
+//                           Display/login name change; same validation as
+//                           account creation (unique, not admin's name).
+// admin:bulk_delete_user  { userId } → AdminBulkDeleteUserAck | ChatErrorAck
+//                           Tombstones EVERY live message of the user in all
+//                           conversations (official pipeline: deleted_content
+//                           preserved) + releases disk media (dedup aware).
+// admin:user_bot          { userId, on, text, delaySec } → AdminBotAck
+//                           Per-user auto-reply bot answering AS ADMIN in the
+//                           user↔admin conversation after delaySec (0–120).
+//                           Stored in DB; one pending timer per user.
+// admin:user_push         { userId, title, body } → AdminPushAck
+//                           Custom web push to ALL push subscriptions of the
+//                           user (title ≤60, body ≤200).
+// admin:user_quota        { userId, mb } → AdminQuotaAck
+//                           Special per-user media quota in MiB (0 = global
+//                           default 250 MiB); enforced in messages:send via
+//                           effectiveQuotaBytes().
 //
 // Kategori C — fake signals (stored as settings rows):
 // admin:fake_typing       { conversationId, on: boolean } → FakeTypingAck

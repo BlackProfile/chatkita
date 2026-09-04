@@ -25,7 +25,7 @@ export async function register() {
    * file lewat "commit UUID" (contoh df40cd2 menghapus /api/upload/route.ts).
    * Saat boot, jika file kritis hilang tapi git tag rescue masih ada,
    * pulihkan otomatis dan catat di dev.log. */
-  const RESCUE_TAG = "rescue-v38";
+  const RESCUE_TAG = "rescue-v39";
   const CRITICAL_FILES = ["src/app/api/upload/route.ts"];
   try {
     const { execFileSync } = await import(/* turbopackIgnore: true */ "node:child_process");

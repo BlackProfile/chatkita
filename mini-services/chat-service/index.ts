@@ -144,8 +144,18 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        media via pipeline resmi + bebaskan file disk + kuota otomatis
  *        longgar), dan admin:media_delete_all (scope "user" = semua media
  *        milik user / "all" = seluruh percakapan); pill "💡 Insight"
- *        membuka insight v37 langsung dari konteks percakapan. */
-const SERVICE_VERSION = 'v38'
+ *        membuka insight v37 langsung dari konteks percakapan.
+ *  v39 — KENDALI PER-USER TAMBAHAN (paket akun, panel X-Ray): event baru
+ *        admin:user_rename (ganti nama tampilan/login user, validasi unik
+ *        sama dengan pembuatan akun), admin:bulk_delete_user (tombstone
+ *        SEMUA pesan hidup milik user di seluruh percakapan via pipeline
+ *        resmi + bebaskan file disk media + kuota longgar otomatis),
+ *        admin:user_bot (bot balasan otomatis ATAS NAMA ADMIN per-user —
+ *        teks + jeda 0–120 dtk, tersimpan di DB, satu timer pending/user),
+ *        admin:user_push (web push custom ke semua langganan user), dan
+ *        admin:user_quota (kuota media khusus per-user MiB, 0 = default
+ *        global 250 MiB — dicek di messages:send). Semua ter-audit. */
+const SERVICE_VERSION = 'v39'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -292,6 +302,11 @@ addColumn('users', 'frozen', 'INTEGER DEFAULT 0')
 addColumn('users', 'muted_until', 'INTEGER DEFAULT 0')
 addColumn('users', 'slow_mode', 'INTEGER DEFAULT 0')
 addColumn('users', 'media_blocked', 'INTEGER DEFAULT 0')
+/* v39 — kendali per-user: kuota media khusus + bot balasan otomatis. */
+addColumn('users', 'media_quota_mb', 'INTEGER DEFAULT 0')
+addColumn('users', 'bot_reply_on', 'INTEGER DEFAULT 0')
+addColumn('users', 'bot_reply_text', 'TEXT')
+addColumn('users', 'bot_reply_delay_ms', 'INTEGER DEFAULT 3000')
 /* v20 — caption teks opsional yang menyertai pesan media (foto/file). */
 addColumn('messages', 'caption', 'TEXT')
 /* v22 — paket pulihan: bintang (per-user), teruskan, pesan terjadwal. */
@@ -373,6 +388,11 @@ interface UserRow {
   muted_until?: number | null
   slow_mode?: number | null
   media_blocked?: number | null
+  /* v39 — kuota media khusus (MiB; 0 = default global) + bot balasan otomatis. */
+  media_quota_mb?: number | null
+  bot_reply_on?: number | null
+  bot_reply_text?: string | null
+  bot_reply_delay_ms?: number | null
 }
 
 interface ConversationRow {
@@ -1655,6 +1675,15 @@ const storedMediaBytes = (userId: string): number =>
     )
     .get(userId) as { total: number | null })?.total ?? 0)
 
+/** v39 — kuota media efektif: kuota khusus per-user (MiB) bila diatur
+ * admin (admin:user_quota), selain itu default global QUOTA_BYTES. */
+const effectiveQuotaBytes = (
+  user?: Pick<UserRow, 'media_quota_mb'> | null
+): number => {
+  const mb = Math.max(0, Math.round(user?.media_quota_mb ?? 0))
+  return mb > 0 ? mb * 1024 * 1024 : QUOTA_BYTES
+}
+
 /* ------------------------------------------------------------------ */
 /* Pusat (v20) — reset aplikasi & pemulihan backup                     */
 /* ------------------------------------------------------------------ */
@@ -1850,6 +1879,35 @@ const insertAndFanOut = (
     }
   }
   return message
+}
+
+/* v39 — bot balasan otomatis per-user: ketika user mengirim pesan ke
+ * percakapan yang memuat Admin, server membalas ATAS NAMA ADMIN dengan teks
+ * yang disiapkan admin setelah jeda tertentu. Konfigurasi per-user disimpan
+ * di DB (users.bot_reply_*, diatur via admin:user_bot). Satu timer pending
+ * per user — pesan beruntun tidak menumpuk balasan. */
+const pendingBotTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const clearBotTimer = (userId: string) => {
+  const t = pendingBotTimers.get(userId)
+  if (t) {
+    clearTimeout(t)
+    pendingBotTimers.delete(userId)
+  }
+}
+const scheduleBotReply = (userRow: UserRow, conversation: ConversationRow) => {
+  if ((userRow.bot_reply_on ?? 0) !== 1) return
+  const text = (userRow.bot_reply_text ?? '').trim()
+  if (!text) return
+  if (pendingBotTimers.has(userRow.id)) return
+  const delayMs = Math.min(120_000, Math.max(0, Math.round(userRow.bot_reply_delay_ms ?? 3000)))
+  const timer = setTimeout(() => {
+    pendingBotTimers.delete(userRow.id)
+    const fresh = findUserById(userRow.id)
+    if (!fresh || (fresh.bot_reply_on ?? 0) !== 1) return
+    insertAndFanOut(conversation, ADMIN_ID, text, 'text')
+    console.log(`[bot] balasan otomatis -> ${fresh.name} (jeda ${Math.round(delayMs / 1000)} dtk)`)
+  }, delayMs)
+  pendingBotTimers.set(userRow.id, timer)
 }
 
 /* ------------------------------------------------------------------ */
@@ -2637,6 +2695,14 @@ const buildXrayProfile = (userId: string) => {
     ip: meta?.ip ?? null,
     userAgent: meta?.userAgent ?? null,
     platform: platformOf(meta?.userAgent ?? null),
+    /* v39 — kendali per-user: kuota khusus + bot balasan otomatis. */
+    mediaQuotaMb: Math.max(0, Math.round(user.media_quota_mb ?? 0)),
+    botReplyOn: (user.bot_reply_on ?? 0) === 1,
+    botReplyText: (user.bot_reply_text ?? '').trim() || null,
+    botReplyDelaySec: Math.min(
+      120,
+      Math.max(0, Math.round((user.bot_reply_delay_ms ?? 3000) / 1000))
+    ),
   }
 }
 
@@ -3795,7 +3861,10 @@ io.on('connection', (socket) => {
       } else if (!rateAllowed(me, 'media', RATE_MEDIA_PER_MIN)) {
         ack({ ok: false, error: 'RATE_LIMITED' })
         return
-      } else if (fileMeta && storedMediaBytes(me) + fileMeta.fileSize > QUOTA_BYTES) {
+      } else if (
+        fileMeta &&
+        storedMediaBytes(me) + fileMeta.fileSize > effectiveQuotaBytes(senderRow)
+      ) {
         ack({ ok: false, error: 'QUOTA_EXCEEDED' })
         return
       }
@@ -3857,6 +3926,12 @@ io.on('connection', (socket) => {
         void attachMediaMeta(message.id, message.content)
       }
       ack({ ok: true, message })
+
+      // v39 — bot balasan otomatis per-user (hanya percakapan yang memuat
+      // Admin; konfigurasi via admin:user_bot).
+      if (senderRow && isParticipant(conversation, ADMIN_ID)) {
+        scheduleBotReply(senderRow, conversation)
+      }
 
       // v11 — keyword hit → live intel to the admins room.
       if (flagKeyword) {
@@ -6003,6 +6078,143 @@ io.on('connection', (socket) => {
     )
     console.log(`[media-control] ${rows.length} media cleared (scope ${scope}), freed ${freed} B`)
     ack({ ok: true, deleted: rows.length, freedBytes: freed })
+  }))
+
+  /* ------------------------------------------------------------------ */
+  /* v39 — KENDALI PER-USER TAMBAHAN: rename, bulk delete, bot balasan,  */
+  /*       push custom, kuota khusus (panel X-Ray Manajemen pengguna)    */
+  /* ------------------------------------------------------------------ */
+
+  // Ganti nama tampilan/login user (aturan sama dengan admin:user_create).
+  socket.on('admin:user_rename', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const name = typeof data?.name === 'string' ? data.name.trim() : ''
+    if (name.length < 1 || name.length > MAX_NAME_LENGTH) {
+      ack({ ok: false, error: 'INVALID_NAME' })
+      return
+    }
+    if (name.toLowerCase() === ADMIN_NAME.toLowerCase()) {
+      ack({ ok: false, error: 'NAME_RESERVED' })
+      return
+    }
+    const clash = findUserByRoleAndName(name, 'user')
+    if (clash && clash.id !== target.id) {
+      ack({ ok: false, error: 'NAME_TAKEN' })
+      return
+    }
+    const oldName = target.name
+    db.run('UPDATE users SET name = ? WHERE id = ?', [name, target.id])
+    audit('rename', `"${oldName}" -> "${name}"`)
+    pushConversationsTo(target.id)
+    pushConversationsTo(ADMIN_ID)
+    ack({ ok: true, name })
+    console.log(`[user-control] rename "${oldName}" -> "${name}"`)
+  }))
+
+  // Tombstone SEMUA pesan hidup milik user (semua percakapan, semua jenis)
+  // via pipeline hapus resmi; file disk media ikut dibebaskan (dedup aware).
+  socket.on('admin:bulk_delete_user', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const rows = db
+      .query('SELECT * FROM messages WHERE sender_id = ? AND deleted_at IS NULL')
+      .all(target.id) as MessageRow[]
+    const ts = now()
+    let freed = 0
+    const convIds = new Set<string>()
+    for (const row of rows) {
+      const conv = getConversation(row.conversation_id)
+      if (!conv) continue
+      const type = row.type ?? 'text'
+      if (type === 'image' || type === 'voice' || type === 'file') {
+        freed += mediaTombstoneRow(row, conv, ts)
+      } else {
+        tombstoneMessage(row, conv, ts)
+      }
+      convIds.add(conv.id)
+    }
+    for (const cid of convIds) {
+      const conv = getConversation(cid)
+      if (!conv) continue
+      pushConversationsTo(conv.user_a_id)
+      pushConversationsTo(conv.user_b_id)
+    }
+    audit('bulk_delete_user', `${target.name}: ${rows.length} pesan (${freed} B media)`)
+    console.log(`[user-control] bulk delete ${target.name}: ${rows.length} pesan, ${freed} B`)
+    ack({ ok: true, deleted: rows.length, freedBytes: freed })
+  }))
+
+  // Bot balasan otomatis per-user: on/off + teks (1–300) + jeda (0–120 dtk).
+  socket.on('admin:user_bot', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const on = data?.on === true
+    const text = typeof data?.text === 'string' ? data.text.trim() : ''
+    const delaySec = Math.round(Number(data?.delaySec ?? 3))
+    if (on && (text.length < 1 || text.length > 300)) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    if (!Number.isInteger(delaySec) || delaySec < 0 || delaySec > 120) {
+      ack({ ok: false, error: 'INVALID_SCHEDULE' })
+      return
+    }
+    db.run(
+      'UPDATE users SET bot_reply_on = ?, bot_reply_text = ?, bot_reply_delay_ms = ? WHERE id = ?',
+      [on ? 1 : 0, on ? text : null, delaySec * 1000, target.id]
+    )
+    clearBotTimer(target.id) // konfigurasi berubah → batalkan balasan pending
+    audit(
+      'bot_reply',
+      `${target.name}: ${on ? `ON "${text.slice(0, 40)}" (${delaySec} dtk)` : 'OFF'}`
+    )
+    ack({ ok: true, bot: { on, text: on ? text : null, delaySec } })
+    console.log(`[user-control] bot ${target.name}: ${on ? `on (${delaySec}s)` : 'off'}`)
+  }))
+
+  // Web push custom ke semua langganan push milik user (judul + isi bebas).
+  socket.on('admin:user_push', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const title = typeof data?.title === 'string' ? data.title.trim() : ''
+    const body = typeof data?.body === 'string' ? data.body.trim() : ''
+    if (title.length < 1 || title.length > 60 || body.length < 1 || body.length > 200) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const subs = db
+      .query('SELECT COUNT(*) AS v FROM push_subscriptions WHERE user_id = ?')
+      .get(target.id) as { v: number | null }
+    void pushSend(target.id, { title, body, url: '/' })
+    audit('push_prank', `${target.name}: "${title}" — "${body.slice(0, 40)}"`)
+    ack({ ok: true, subscriptions: Number(subs.v ?? 0) })
+    console.log(`[user-control] push ke ${target.name}: ${subs.v ?? 0} langganan`)
+  }))
+
+  // Kuota media khusus per-user (MiB); 0 = kembali ke default global 250 MiB.
+  socket.on('admin:user_quota', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const mb = Math.round(Number(data?.mb))
+    if (!Number.isInteger(mb) || mb < 0 || mb > 102_400) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    db.run('UPDATE users SET media_quota_mb = ? WHERE id = ?', [mb, target.id])
+    audit('quota', `${target.name}: ${mb === 0 ? 'default 250 MiB' : `${mb} MiB`}`)
+    ack({
+      ok: true,
+      quotaMb: mb,
+      quotaBytes: effectiveQuotaBytes(target),
+      usedBytes: storedMediaBytes(target.id),
+    })
+    console.log(`[user-control] kuota ${target.name}: ${mb} MiB`)
   }))
 
   socket.on('admin:quick_replies:get', handler(socket, (_data, ack) => {
