@@ -1912,7 +1912,10 @@ export function AdminDashboard({
                   </div>
                 ))}
                 <p className="text-[11px] text-muted-foreground">
-                  Kuota media 250 MiB · retensi otomatis {stats.storage.retentionDays} hari
+                  Kuota media 250 MiB ·{" "}
+                  {stats.storage.retentionDays === 0
+                    ? "retensi otomatis nonaktif — media disimpan permanen"
+                    : `retensi otomatis ${stats.storage.retentionDays} hari`}
                 </p>
               </div>
 
@@ -2096,8 +2099,10 @@ export function AdminDashboard({
                   </span>{" "}
                   — messenger pribadi 1-on-1 dengan Admin (gaya WhatsApp/Telegram).
                   Semua pesan terenkripsi transport (WSS), media disimpan di server
-                  dengan deduplikasi SHA-256, dan dibersihkan otomatis setelah{" "}
-                  {stats.storage.retentionDays} hari.
+                  dengan deduplikasi SHA-256, dan{" "}
+                  {stats.storage.retentionDays === 0
+                    ? "disimpan permanen — tidak dihapus otomatis."
+                    : `dibersihkan otomatis setelah ${stats.storage.retentionDays} hari.`}
                 </p>
               </div>
             </div>

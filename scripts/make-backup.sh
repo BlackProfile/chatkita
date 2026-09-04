@@ -17,9 +17,21 @@ cd "$ROOT"
 # 1) Bundle seluruh repo (semua ref: riwayat penuh + file ter-commit incl. chat.db)
 git bundle create "$DEST/chatkita-$STAMP.bundle" --all >/dev/null 2>&1
 
-# 2) Media (foto/video/voice/pdf) — biasanya kecil, ikutkan bila ada
+# 2) Media (foto/video/voice/pdf) — IKUTKAN bila ada. v36 (Task 55): media
+#    kini PERMANEN di server, jadi tar ini adalah satu-satunya salinan
+#    kedua — kegagalan tar TIDAK BOLEH diam lagi (dulu "|| true" menelan
+#    error, backup media bisa kosong tanpa jejak).
+MEDIA_TAR=""
 if [ -d db/media ] && [ -n "$(ls -A db/media 2>/dev/null)" ]; then
-  tar -czf "$DEST/chatkita-media-$STAMP.tar.gz" -C "$ROOT" db/media >/dev/null 2>&1 || true
+  MEDIA_TAR="$DEST/chatkita-media-$STAMP.tar.gz"
+  if ! tar -czf "$MEDIA_TAR" -C "$ROOT" db/media; then
+    echo "[backup] ❌ TAR MEDIA GAGAL — media tidak ter-backup!" >&2
+    exit 1
+  fi
+  if [ ! -s "$MEDIA_TAR" ]; then
+    echo "[backup] ❌ TAR MEDIA KOSONG — media tidak ter-backup!" >&2
+    exit 1
+  fi
 fi
 
 # 3) Pruning: sisakan KEEP terakhir per jenis
@@ -27,4 +39,8 @@ ls -1t "$DEST"/chatkita-*.bundle 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r
 ls -1t "$DEST"/chatkita-media-*.tar.gz 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f
 
 SIZE="$(du -sh "$DEST" 2>/dev/null | cut -f1)"
-echo "[backup] OK → $DEST (total $SIZE, simpan $KEEP terakhir)"
+if [ -n "$MEDIA_TAR" ]; then
+  echo "[backup] OK → $DEST (total $SIZE, simpan $KEEP terakhir) — bundle + media tar ✓"
+else
+  echo "[backup] OK → $DEST (total $SIZE, simpan $KEEP terakhir) — bundle ✓ (db/media kosong, tar dilewati)"
+fi

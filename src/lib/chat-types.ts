@@ -78,8 +78,10 @@ export const MAX_NAME_LENGTH = 40;
 /** Messages per history page (auth/history/older). Older pages load on demand. */
 export const HISTORY_PAGE_SIZE = 50;
 
-/** Per-account media retention (server-side sweep; env MEDIA_RETENTION_DAYS). */
-export const MEDIA_RETENTION_DAYS = 30;
+/** Per-account media retention (server-side sweep; env MEDIA_RETENTION_DAYS).
+ *  v36 — 0 = media disimpan PERMANEN (sweeper nonaktif — tidak ada penghapusan
+ *  otomatis); server mengirim retentionDays: 0 dan UI menampilkan "permanen". */
+export const MEDIA_RETENTION_DAYS = 0;
 
 /** Per-account storage quota for disk media (sum of fileSize). */
 export const MEDIA_QUOTA_BYTES = 250 * 1024 * 1024; // 250 MiB

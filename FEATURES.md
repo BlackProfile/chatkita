@@ -169,6 +169,15 @@
 - **UI admin** (`media-meta-dialog.tsx` baru): aksi **"Metadata"** pada bubble media (foto/file/voice, bukan dihapus/kedaluwarsa) → dialog: seksi File, Media (dimensi/durasi/halaman/video dibuat), dan **EXIF** — lokasi GPS tampil menonjol dengan koordinat + tombol **Google Maps** & **OpenStreetMap** (target _blank, noopener). Tanpa EXIF → pesan tenang, bukan error. State reset via `key` remount; setState hanya di callback socket (aturan React Compiler).
 - Verifikasi: verify-integrity seksi "v35" (13 cek; 2 cek versi v34 dipindah, total 153).
 
+### v36 — Media Permanen: Retensi Otomatis Dinonaktifkan (Task 55)
+- **Permintaan**: "bagusnya media disimpan dimana ya, biar ga hilang otomatis oleh aplikasi?" — foto/video/voice/file yang dikirim user tidak boleh dihapus otomatis lagi.
+- **Perilaku lama**: sweeper retensi (tiap 6 jam) menghapus media berumur > 30 hari (`MEDIA_RETENTION_DAYS`, maks 365) → pesan jadi tombstone "media kedaluwarsa" + file disk dibuang.
+- **Perilaku baru**: default retensi = **0 hari = TIDAK PERNAH** — `sweepExpiredMedia` langsung return (tidak ada media yang dibersihkan otomatis); media + pesan + metadata tetap utuh selamanya. Env `MEDIA_RETENTION_DAYS=1..365` masih bisa dipakai bila suatu saat retensi diinginkan kembali.
+- **Lokasi penyimpanan** (tidak berubah): `db/media/<sha256>.<ext>` (dedup SHA-256), dilayani `/api/media/<nama>` (ETag + Range + cache immutable), dibackup otomatis ke `/home/z/backups/chatkita-media-*.tar.gz` oleh hook post-commit; kuota 250 MiB/akun tetap berlaku saat mengirim.
+- **UI**: dashboard admin kini menampilkan "retensi otomatis nonaktif — media disimpan permanen" (tab Sistem) dan "disimpan permanen — tidak dihapus otomatis" (Info aplikasi); log boot service: `retensi: tidak pernah (media permanen)`. Tombol "Bersihkan media lama" tetap ada (kini hanya VACUUM — tidak ada media kedaluwarsa).
+- **Backup media diperkuat**: `make-backup.sh` tidak lagi menelan kegagalan tar (`|| true` dihapus) — tar media gagal/kosong = exit 1 dengan pesan "❌ TAR MEDIA GAGAL/KOSONG", dan ringkasan backup menyatakan status tar. (Insiden Task 55: file media lama sebagian sudah hilang sebelumnya tanpa jejak karena tar diam-diam tidak jalan.)
+- Verifikasi: verify-integrity seksi "v36" (10 cek; 2 cek versi v35 dipindah, total 161).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 

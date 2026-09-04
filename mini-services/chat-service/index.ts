@@ -124,8 +124,14 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        server via exifr saat pesan media dikirim (meta_json), event baru
  *        admin:message_meta mengembalikan metadata lengkap + info file
  *        (enrichment live untuk media lama + persist); video MP4 kini juga
- *        dapat videoCreated (mvhd creation time). */
-const SERVICE_VERSION = 'v35'
+ *        dapat videoCreated (mvhd creation time).
+ *  v36 — MEDIA PERMANEN: retensi otomatis DINONAKTIFKAN (0 hari) — foto/
+ *        video/voice/file tidak lagi dihapus otomatis oleh sweeper; disk
+ *        file + pesan tetap utuh selamanya. Env MEDIA_RETENTION_DAYS masih
+ *        bisa diisi 1–365 bila retensi diinginkan kembali; tombol admin
+ *        "Bersihkan media lama" tetap ada (kini hanya VACUUM karena tidak
+ *        ada media yang kedaluwarsa). */
+const SERVICE_VERSION = 'v36'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -141,9 +147,16 @@ const MAX_MEDIA_LENGTH = 2_500_000
  * /api/upload route enforces the same cap; this is the message-side check. */
 const MAX_FILE_BYTES = 26_214_400
 /** v8 — per-account media retention: disk media older than this is swept
- *  (payload redacted → "media kedaluwarsa" tombstone). Days, env-overridable. */
-const RETENTION_MS =
-  Math.min(365, Math.max(1, Number(process.env.MEDIA_RETENTION_DAYS) || 30)) * 86_400_000
+ *  (payload redacted → "media kedaluwarsa" tombstone). Days, env-overridable.
+ *  v36 — 0 = TIDAK PERNAH (media disimpan PERMANEN — tidak ada penghapusan
+ *  otomatis). Default kini 0; env MEDIA_RETENTION_DAYS=1..365 mengaktifkan
+ *  retensi lagi bila suatu saat dibutuhkan. */
+const rawRetentionDays = Number(process.env.MEDIA_RETENTION_DAYS)
+const RETENTION_DAYS =
+  Number.isFinite(rawRetentionDays) && rawRetentionDays >= 0
+    ? Math.min(365, Math.floor(rawRetentionDays))
+    : 0
+const RETENTION_MS = RETENTION_DAYS * 86_400_000
 /** v8 — per-account storage quota for disk media (sum of messages.file_size). */
 const QUOTA_BYTES = 268_435_456 // 250 MiB
 /** v8 — per-account send rate limits (sliding 1-minute window). */
@@ -2240,6 +2253,8 @@ const releaseMediaFile = (name: string | null) => {
  * tombstone, free disk space, and notify both sides live.
  */
 const sweepExpiredMedia = () => {
+  // v36 — retensi 0 = media PERMANEN: tidak ada media yang dibersihkan.
+  if (RETENTION_MS === 0) return
   const cutoff = now() - RETENTION_MS
   const rows = db
     .query(
@@ -5951,7 +5966,7 @@ setInterval(deliverDueScheduled, 10_000)
 
 httpServer.listen(PORT, () => {
   console.log(
-    `ChatKita chat-service ${SERVICE_VERSION} listening on port ${PORT} (path: '/', push: ${VAPID_PUBLIC ? 'on' : 'off'}, retensi: ${RETENTION_MS / 86_400_000} hari)`
+    `ChatKita chat-service ${SERVICE_VERSION} listening on port ${PORT} (path: '/', push: ${VAPID_PUBLIC ? 'on' : 'off'}, retensi: ${RETENTION_MS === 0 ? 'tidak pernah (media permanen)' : `${RETENTION_DAYS} hari`})`
   )
 })
 

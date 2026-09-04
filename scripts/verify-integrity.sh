@@ -194,8 +194,6 @@ chk_grep "Viewer termount sisi admin"         "src/components/chat/AdminPanel.ts
 chk_grep "Jalan keluar buka di browser"       "src/components/chat/link-viewer.tsx" "Buka di browser"
 
 echo "[v35 — Metadata media utk admin: EXIF GPS/kamera (Task 54)]"
-chk_grep "Versi service v35"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v35'"
-chk_grep "Rescue tag v35"                     "src/instrumentation.ts" "rescue-v35"
 chk_grep "Pustaka exifr terpasang"            "mini-services/chat-service/index.ts" "import exifr"
 chk_grep "Pembaca EXIF server"                "mini-services/chat-service/index.ts" "const extractExifMeta"
 chk_grep "Deteksi gambar ber-EXIF"            "mini-services/chat-service/index.ts" "const isExifCapableImage"
@@ -207,6 +205,18 @@ chk_grep "Aksi Metadata di bubble"            "src/components/chat/ChatBubble.ts
 chk_grep "Dialog metadata admin"              "src/components/chat/media-meta-dialog.tsx" "export function MediaMetaDialog"
 chk_grep "Dialog termount di AdminPanel"      "src/components/chat/AdminPanel.tsx" "<MediaMetaDialog"
 chk_grep "Tautan Google Maps utk GPS"         "src/components/chat/media-meta-dialog.tsx" "maps.google.com/?q="
+
+echo "[v36 — Media permanen: retensi otomatis nonaktif (Task 55)]"
+chk_grep "Versi service v36"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v36'"
+chk_grep "Rescue tag v36"                     "src/instrumentation.ts" "rescue-v36"
+chk_grep "Default retensi 0 (permanen)"       "mini-services/chat-service/index.ts" "const RETENTION_DAYS ="
+chk_grep "Sweeper dilewati saat permanen"     "mini-services/chat-service/index.ts" "if (RETENTION_MS === 0) return"
+chk_grep "Log boot 'media permanen'"          "mini-services/chat-service/index.ts" "tidak pernah (media permanen)"
+chk_grep "Konstanta klien retensi 0"          "src/lib/chat-types.ts" "export const MEDIA_RETENTION_DAYS = 0;"
+chk_grep "Dashboard: media disimpan permanen" "src/components/chat/admin-dashboard.tsx" "media disimpan permanen"
+chk_grep "Info aplikasi: tidak dihapus otomatis" "src/components/chat/admin-dashboard.tsx" "disimpan permanen — tidak dihapus otomatis"
+chk_grep "Tar media gagal = keras (tidak diam)" "scripts/make-backup.sh" "TAR MEDIA GAGAL"
+chk_grep "Tar media kosong = keras (tidak diam)" "scripts/make-backup.sh" "TAR MEDIA KOSONG"
 
 echo ""
 echo "== Versi server terdaftar =="
