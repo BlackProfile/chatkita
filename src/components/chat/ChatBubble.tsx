@@ -473,8 +473,8 @@ export function ChatBubble({
               </div>
             </div>
           ) : (
-            /* v32 — teks pesan dirender via LinkifiedText: SEMUA URL di dalam
-             * teks jadi tautan yang bisa diklik langsung (tab baru). */
+            /* v32/v34 — teks pesan dirender via LinkifiedText: SEMUA URL di
+             * dalam teks bisa diklik → membuka LinkViewer in-app (v34). */
             <LinkifiedText
               text={content}
               dark={isRight}
@@ -483,8 +483,8 @@ export function ChatBubble({
           )}
 
           {/* v20 — caption teks yang menyertai pesan media, tampil di bawah
-              media di dalam bubble (gaya WhatsApp). v32 — URL di caption
-              juga bisa diklik langsung. */}
+              media di dalam bubble (gaya WhatsApp). v32/v34 — URL di caption
+              bisa diklik → pembuka LinkViewer in-app. */}
           {!deleted && caption && (type === "image" || type === "file") ? (
             <LinkifiedText
               text={caption}
@@ -497,8 +497,8 @@ export function ChatBubble({
           ) : null}
 
           {/* Task 19 — kartu pratinjau tautan (pesan teks ber-URL), di bawah
-              teks, selebar bubble. v32 — kartu kini <a>: diklik LANGSUNG
-              membuka tautan di tab baru (tanpa dialog pratinjau). */}
+              teks, selebar bubble. v34 — diklik membuka LinkViewerDialog
+              in-app (embed YouTube/TikTok diputar di dalam aplikasi). */}
           {!deleted && type === "text" && textLinkUrl && linkPreviewEnabled ? (
             <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
               {/* key: remount per URL agar state hook/skeleton selalu segar */}

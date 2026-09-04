@@ -153,6 +153,14 @@
 - **TikTok ikut di-enrich**: judul + thumbnail via oEmbed TikTok (best-effort, gagal = diam).
 - Verifikasi: verify-integrity seksi "v33" (7 cek; 2 cek versi v32 dipindah, total 133).
 
+### v34 — Penampil Tautan In-App / Popup Embed (Task 53)
+- **Permintaan**: "linknya ga bisa dibuka di aplikasi langsung? kayak popup tanpa buka aplikasi streamnya?" — ketukan tautan tidak lagi melompat ke browser/aplikasi stream, tapi membuka **popup di dalam aplikasi**.
+- **LinkViewerDialog** (`src/components/chat/link-viewer.tsx`, baru): dialog in-app yang di-mount sekali di tiap root (Messenger + AdminPanel); dibuka dari komponen mana pun via store zustand `openLinkViewer()` — kartu pratinjau maupun tautan di teks/caption memanggilnya.
+- **YouTube diputar in-app**: iframe embed resmi `youtube-nocookie.com/embed/<id>` rasio 16:9, autoplay (ketukan = gesture), fullscreen; TikTok via `tiktok.com/embed/v2/<id>` (potret). Dialog ditutup → iframe di-unmount, pemutaran benar-benar berhenti.
+- **Situs lain**: tampilan info — thumbnail besar + judul + deskripsi + situs; bila data pratinjau gagal/sedang dimuat ada skeleton dan pesan "Pratinjau tidak tersedia".
+- **Jalan keluar selalu ada**: tombol **"Buka di browser"** (target _blank + rel noopener noreferrer) dan **"Salin"** (clipboard + toast). `href` pada tautan tetap dipertahankan untuk middle-click / menu long-press / tanpa-JS.
+- Verifikasi: verify-integrity seksi "v34" (11 cek; 2 cek versi v33 dipindah).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 

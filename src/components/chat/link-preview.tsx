@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { ExternalLink } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { openLinkViewer } from "@/components/chat/link-viewer";
 
 /**
  * Task 19 — kartu pratinjau tautan (link preview) untuk pesan teks ChatKita.
@@ -15,11 +16,13 @@ import { cn } from "@/lib/utils";
  *   modul + fetch in-flight dideduplikasi, jadi re-render tidak refetch.
  * - Loading = skeleton pulse maksimal ~2 detik; gagal → TIDAK merender apa
  *   pun (diam) — pesan teks tetap normal.
- * - v32 — SEMUA tautan kini BISA DIKLIK dan TERBUKA LANGSUNG di tab browser
- *   baru (target _blank + rel noopener noreferrer) — TANPA popup:
- *   1) teks pesan & caption dirender via LinkifiedText (semua URL jadi <a>),
- *   2) kartu pratinjau kini <a> langsung (dulunya button pembuka Dialog
- *      in-app yang harus diklik lagi lewat "Buka di browser").
+ * - v32 — SEMUA tautan bisa diklik (LinkifiedText) dan kartu pratinjau
+ *   menjadi <a> semantik (href utk buka-di-tab / middle-click).
+ * - v34 — ketukan pada tautan/kartu TIDAK lagi langsung melompat ke browser:
+ *   ia membuka LinkViewerDialog (popup in-app, lihat link-viewer.tsx) —
+ *   YouTube/TikTok diputar embed DI DALAM aplikasi; "Buka di browser" tetap
+ *   tersedia di dialog. href/target _blank dipertahankan sebagai fallback
+ *   tanpa-JS & untuk middle-click/long-press menu browser.
  */
 
 export type PreviewProvider = "youtube" | "tiktok" | "instagram" | "facebook" | "generic";
@@ -46,7 +49,7 @@ const PROVIDERS = new Set<PreviewProvider>([
   "generic",
 ]);
 
-const PROVIDER_META: Record<PreviewProvider, { icon: string; label: string }> = {
+export const PROVIDER_META: Record<PreviewProvider, { icon: string; label: string }> = {
   youtube: { icon: "▶", label: "YouTube" },
   tiktok: { icon: "♪", label: "TikTok" },
   instagram: { icon: "📷", label: "Instagram" },
@@ -109,17 +112,21 @@ export function segmentText(text: string): TextSegment[] {
 
 /**
  * v32 — merender teks pesan/caption dengan SEMUA URL sebagai tautan yang
- * bisa diklik dan langsung terbuka di tab baru (target _blank, rel noopener
- * noreferrer) — tanpa popup apa pun. stopPropagation pada klik agar
- * mengetuk tautan tidak ikut men-toggle baris aksi bubble.
+ * bisa diklik. stopPropagation pada klik agar mengetuk tautan tidak ikut
+ * men-toggle baris aksi bubble.
+ * v34 — inApp (default true): ketukan membuka LinkViewerDialog di dalam
+ * aplikasi (preventDefault); href tetap ada utk middle-click/no-JS. Set
+ * inApp=false untuk perilaku lama buka tab browser langsung.
  */
 export function LinkifiedText({
   text,
   dark = false,
+  inApp = true,
   className,
 }: {
   text: string;
   dark?: boolean;
+  inApp?: boolean;
   className?: string;
 }) {
   const segments = segmentText(text);
@@ -133,7 +140,13 @@ export function LinkifiedText({
             href={seg.url}
             target="_blank"
             rel="noopener noreferrer"
-            onClick={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (inApp) {
+                e.preventDefault();
+                openLinkViewer(seg.url);
+              }
+            }}
             className={cn(
               "break-all font-medium underline underline-offset-2",
               dark
@@ -250,7 +263,8 @@ export function useLinkPreview(url: string): LinkPreviewState {
 /* Util tampilan                                                       */
 /* ------------------------------------------------------------------ */
 
-function hostnameOf(url: string): string {
+/** Hostname URL tanpa "www." — dipakai kartu & LinkViewer (v34). */
+export function hostnameOf(url: string): string {
   try {
     return new URL(url).hostname.replace(/^www\./, "");
   } catch {
@@ -355,15 +369,20 @@ export function LinkPreviewCard({ url, dark = false }: { url: string; dark?: boo
   const meta = PROVIDER_META[data.provider];
   const site = data.siteName ?? hostnameOf(data.url);
 
-  // v32 — kartu kini <a> langsung: satu ketukan → tautan terbuka di tab
-  // baru (perilaku native browser, bukan window.open yang bisa diblokir).
-  // Tidak ada lagi Dialog pratinjau in-app di tengah jalan.
+  // v34 — satu ketukan pada kartu → LinkViewerDialog in-app (embed YouTube/
+  // TikTok diputar di dalam aplikasi). preventDefault mencegah lompat browser;
+  // href tetap utk middle-click/no-JS; stopPropagation menjaga baris aksi.
   return (
     <a
       href={data.url}
       target="_blank"
       rel="noopener noreferrer"
       aria-label={`Buka ${site} di browser`}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openLinkViewer(data.url, data);
+      }}
       className={cn(
         "flex w-full min-w-48 items-center gap-2.5 rounded-xl border p-2 text-left transition-opacity hover:opacity-90",
         dark ? "border-white/25 bg-white/10" : "border-border bg-muted/40"

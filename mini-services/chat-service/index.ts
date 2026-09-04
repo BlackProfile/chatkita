@@ -111,8 +111,14 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        thumbnail dari CDN statis i.ytimg.com + judul asli via oEmbed;
  *        kartu minimal tetap muncul meski fetch halaman diblokir bot
  *        (providerFallback); TikTok di-enrich via oEmbed. (Perubahan di
- *        API Next /api/link-preview; versi hanya label rilis.) */
-const SERVICE_VERSION = 'v33'
+ *        API Next /api/link-preview; versi hanya label rilis.)
+ *  v34 — penampil tautan IN-APP: ketukan pada kartu pratinjau maupun
+ *        tautan di teks membuka popup di dalam aplikasi — YouTube diputar
+ *        via embed youtube-nocookie (16:9, autoplay), TikTok via embed v2;
+ *        situs lain tampil sebagai info (thumbnail+judul+deskripsi);
+ *        tombol "Buka di browser" & "Salin" selalu tersedia. (Perubahan
+ *        sisi klien; versi hanya label rilis.) */
+const SERVICE_VERSION = 'v34'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'

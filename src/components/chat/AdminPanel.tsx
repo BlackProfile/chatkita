@@ -77,6 +77,7 @@ import {
   viewerStateForMessage,
   type ViewerState,
 } from "@/components/chat/media-viewer";
+import { LinkViewerDialog } from "@/components/chat/link-viewer";
 import { TypingDots } from "@/components/chat/TypingDots";
 import { UserManager } from "@/components/chat/user-manager";
 import {
@@ -3096,6 +3097,9 @@ export function AdminPanel() {
 
       {/* Viewer media full-screen (foto/video/audio/PDF/dokumen) */}
       <MediaViewer state={viewer} onClose={() => setViewer(null)} />
+
+      {/* v34 — popup pratinjau/pemutar tautan in-app (YouTube/TikTok embed) */}
+      <LinkViewerDialog />
 
       {/* v10 — Dashboard aplikasi (analitik, pengaturan, siaran, sistem) */}
       <AdminDashboard

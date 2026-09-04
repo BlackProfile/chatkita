@@ -44,6 +44,7 @@ import {
   viewerStateForMessage,
   type ViewerState,
 } from "@/components/chat/media-viewer";
+import { LinkViewerDialog } from "@/components/chat/link-viewer";
 import { TypingDots } from "@/components/chat/TypingDots";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
@@ -2947,6 +2948,9 @@ export function Messenger() {
 
       {/* Viewer media full-screen + galeri geser (Task 19) */}
       <MediaViewer state={viewer} onClose={() => setViewer(null)} />
+
+      {/* v34 — popup pratinjau/pemutar tautan in-app (YouTube/TikTok embed) */}
+      <LinkViewerDialog />
     </div>
   );
 }
