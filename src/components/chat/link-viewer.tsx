@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { create } from "zustand";
 import { Copy, ExternalLink, Link2 } from "lucide-react";
 import { toast } from "sonner";
@@ -182,7 +182,7 @@ function ViewerContent({ data }: { data: LinkPreviewData }) {
           !embed && "border-t-0"
         )}
       >
-        <span className="flex h-7 min-w-0 items-center gap-1.5 rounded-full border bg-background px-2 text-xs text-muted-foreground">
+        <span className="hidden h-7 min-w-0 items-center gap-1.5 rounded-full border bg-background px-2 text-xs text-muted-foreground sm:flex">
           <span aria-hidden="true">{meta.icon}</span>
           <span className="truncate">{site}</span>
         </span>
@@ -211,6 +211,13 @@ function ViewerContent({ data }: { data: LinkPreviewData }) {
 /** Body dengan fetch via hook (dipakai saat kartu tidak menyertakan data). */
 function ViewerFetch({ url }: { url: string }) {
   const preview = useLinkPreview(url);
+  // v34 — sinkronkan hasil fetch ke store agar judul/sitename di header
+  // dialog ikut terisi (jalur tautan teks tidak membawa data awal).
+  useEffect(() => {
+    if (typeof preview === "object") {
+      useLinkViewerStore.setState({ data: preview });
+    }
+  }, [preview]);
   if (preview === "loading") return <ViewerSkeleton />;
   if (preview === "failed") {
     return (
