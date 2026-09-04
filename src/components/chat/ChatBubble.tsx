@@ -11,6 +11,7 @@ import {
   History,
   Hourglass,
   Image as ImageIcon,
+  Info,
   Languages,
   Music,
   Pause,
@@ -98,6 +99,8 @@ interface ChatBubbleProps {
   onModerate?: () => void;
   /** v11 — admin: lihat riwayat revisi pesan yang pernah diedit. */
   onEditHistory?: () => void;
+  /** v35 — admin: buka dialog metadata media (EXIF/GPS/dll). */
+  onShowMeta?: () => void;
   onReply?: () => void;
   onDelete?: () => void;
   /** Buka media (foto/PDF) di viewer full-screen; jenis lain unduh langsung. */
@@ -157,6 +160,7 @@ export function ChatBubble({
   linkPreviewEnabled = true,
   onModerate,
   onEditHistory,
+  onShowMeta,
   onReply,
   onDelete,
   onMediaOpen,
@@ -740,6 +744,19 @@ export function ChatBubble({
             >
               <History className="size-3.5" aria-hidden="true" />
               Riwayat edit
+            </button>
+          ) : null}
+          {onShowMeta ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
+              onClick={() => {
+                closeActions();
+                onShowMeta();
+              }}
+            >
+              <Info className="size-3.5" aria-hidden="true" />
+              Metadata
             </button>
           ) : null}
           {onModerate ? (

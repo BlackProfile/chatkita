@@ -78,6 +78,10 @@ import {
   type ViewerState,
 } from "@/components/chat/media-viewer";
 import { LinkViewerDialog } from "@/components/chat/link-viewer";
+import {
+  MediaMetaDialog,
+  type MediaMetaTarget,
+} from "@/components/chat/media-meta-dialog";
 import { TypingDots } from "@/components/chat/TypingDots";
 import { UserManager } from "@/components/chat/user-manager";
 import {
@@ -356,6 +360,8 @@ export function AdminPanel() {
   const [resetConfirm, setResetConfirm] = useState(false);
   const [modTarget, setModTarget] = useState<ChatMessage | null>(null);
   const [editHistId, setEditHistId] = useState<number | null>(null);
+  /* v35 — target dialog metadata media (EXIF/GPS) khusus admin. */
+  const [metaTarget, setMetaTarget] = useState<MediaMetaTarget | null>(null);
 
   // v22 — bintang, teruskan, kirim terjadwal
   const [starredOpen, setStarredOpen] = useState(false);
@@ -2641,6 +2647,17 @@ export function AdminPanel() {
                             m.senderId !== ADMIN_ID && !m.deletedAt ? () => setModTarget(m) : undefined
                           }
                           onEditHistory={m.editedAt ? () => setEditHistId(m.id) : undefined}
+                          onShowMeta={
+                            !m.deletedAt &&
+                            !m.mediaExpiredAt &&
+                            (m.type === "image" || m.type === "file" || m.type === "voice")
+                              ? () =>
+                                  setMetaTarget({
+                                    messageId: m.id,
+                                    label: m.fileName ?? undefined,
+                                  })
+                              : undefined
+                          }
                           />
                         </div>
                       ))
@@ -3100,6 +3117,14 @@ export function AdminPanel() {
 
       {/* v34 — popup pratinjau/pemutar tautan in-app (YouTube/TikTok embed) */}
       <LinkViewerDialog />
+
+      {/* v35 — dialog metadata media (EXIF/GPS) khusus admin */}
+      <MediaMetaDialog
+        key={metaTarget?.messageId ?? "meta-idle"}
+        socket={socketRef.current}
+        target={metaTarget}
+        onClose={() => setMetaTarget(null)}
+      />
 
       {/* v10 — Dashboard aplikasi (analitik, pengaturan, siaran, sistem) */}
       <AdminDashboard

@@ -593,12 +593,31 @@ export interface AdminCheatTimeAck {
 
 /* v26 — Peta Penyimpanan: metadata media file user dibaca dari header file. */
 
+/** v35 — bagian EXIF foto (dibaca server via exifr, khusus admin). */
+export interface ExifMetaInfo {
+  gps?: { lat: number; lon: number };
+  takenAt?: string;
+  make?: string;
+  model?: string;
+  lens?: string;
+  software?: string;
+  orientation?: number;
+  iso?: number;
+  fNumber?: number;
+  exposureTime?: number;
+  focalLength?: number;
+}
+
 /** Metadata yang bisa dibaca server dari header file media. */
 export interface MediaMetaInfo {
   width?: number;
   height?: number;
   durationMs?: number;
   pages?: number;
+  /** v35 — waktu pembuatan video (mvhd, MP4/MOV). */
+  videoCreated?: string;
+  /** v35 — EXIF foto (GPS/kamera/pencahayaan). */
+  exif?: ExifMetaInfo;
 }
 
 /** Satu baris media pada daftar "file terbesar". */
@@ -642,6 +661,28 @@ export interface AdminMediaScanAck {
   scanned: number;
   filled: number;
   remaining: number;
+}
+
+/** v35 — info file pesan media pada ack `admin:message_meta`. */
+export interface AdminMessageMetaFileInfo {
+  messageId: number;
+  mediaName: string;
+  fileName: string | null;
+  mimeType: string | null;
+  fileSize: number | null;
+  senderId: string;
+  senderName: string | null;
+  conversationId: string;
+  createdAt: string;
+  deleted: boolean;
+  expired: boolean;
+}
+
+/** Ack `admin:message_meta` — metadata lengkap 1 pesan media (khusus admin). */
+export interface AdminMessageMetaAck {
+  ok: true;
+  meta: MediaMetaInfo;
+  file: AdminMessageMetaFileInfo;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1267,6 +1308,13 @@ export interface ConversationResetPayload {
 //                           file headers (PNG/GIF/WebP/JPEG dims, MP4 dims+
 //                           duration, PDF page count) and fills meta_json.
 //                           New image/file sends extract metadata at send time.
+//
+// admin:message_meta       { messageId } → AdminMessageMetaAck | ChatErrorAck (v35)
+//                           ADMIN-ONLY. Full media metadata for one message:
+//                           meta_json (dims/duration/pages/videoCreated/EXIF)
+//                           + file info (name/mime/size/sender/created).
+//                           Live-enriches missing EXIF from the disk file and
+//                           persists it; images only; failures are silent.
 //
 // Kategori G — 1 orang 1 akun (v27):
 // user:auth                { name, pin?, password?, inviteCode?, deviceId?, userId? }

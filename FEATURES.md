@@ -161,6 +161,14 @@
 - **Jalan keluar selalu ada**: tombol **"Buka di browser"** (target _blank + rel noopener noreferrer) dan **"Salin"** (clipboard + toast). `href` pada tautan tetap dipertahankan untuk middle-click / menu long-press / tanpa-JS.
 - Verifikasi: verify-integrity seksi "v34" (11 cek; 2 cek versi v33 dipindah).
 
+### v35 — Metadata Media untuk Admin: EXIF GPS/Kamera (Task 54)
+- **Permintaan**: "buat admin bisa baca metadata dari foto/video/dll yang dikirim user, jadi bisa baca lokasinya dll yang ada di metadatanya".
+- **Ekstraksi server-side** (`mini-services/chat-service` + pustaka **exifr**): saat pesan media dikirim, server membaca file di disk dan menyimpan `meta_json` — kini termasuk **EXIF foto**: GPS (lat/lon desimal, 0,0 diabaikan), kamera (Make/Model), lensa, waktu jepret (DateTimeOriginal/CreateDate → ISO), software, orientasi, ISO, bukaan f, waktu eksposur, focal length. Semua string dibatasi 80 char, best-effort (gagal = diam, pengiriman tak pernah terganggu).
+- **Event baru `admin:message_meta`** (KHUSUS admin, ter-audit): `{messageId}` → metadata lengkap + info file (nama asli, MIME, ukuran, pengirim, waktu kirim, status hapus/kedaluwarsa). **Enrichment live**: pesan lama tanpa EXIF dibaca saat pertama dibuka admin lalu di-persist.
+- **Video MP4/MOV** kini juga mendapat `videoCreated` (waktu rekaman dari mvhd box, epoch 1904 → ISO, divalidasi rentang wajar).
+- **UI admin** (`media-meta-dialog.tsx` baru): aksi **"Metadata"** pada bubble media (foto/file/voice, bukan dihapus/kedaluwarsa) → dialog: seksi File, Media (dimensi/durasi/halaman/video dibuat), dan **EXIF** — lokasi GPS tampil menonjol dengan koordinat + tombol **Google Maps** & **OpenStreetMap** (target _blank, noopener). Tanpa EXIF → pesan tenang, bukan error. State reset via `key` remount; setState hanya di callback socket (aturan React Compiler).
+- Verifikasi: verify-integrity seksi "v35" (13 cek; 2 cek versi v34 dipindah, total 153).
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 

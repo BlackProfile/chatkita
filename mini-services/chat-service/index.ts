@@ -78,6 +78,7 @@ import { Database } from 'bun:sqlite'
 import { Server, type Socket as IoSocket } from 'socket.io'
 import ZAI from 'z-ai-web-dev-sdk'
 import webpush from 'web-push'
+import exifr from 'exifr'
 
 /* ------------------------------------------------------------------ */
 /* Configuration                                                       */
@@ -117,8 +118,14 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        via embed youtube-nocookie (16:9, autoplay), TikTok via embed v2;
  *        situs lain tampil sebagai info (thumbnail+judul+deskripsi);
  *        tombol "Buka di browser" & "Salin" selalu tersedia. (Perubahan
- *        sisi klien; versi hanya label rilis.) */
-const SERVICE_VERSION = 'v34'
+ *        sisi klien; versi hanya label rilis.)
+ *  v35 — METADATA MEDIA UNTUK ADMIN: EXIF foto (GPS/lokasi, kamera, lensa,
+ *        tanggal jepret, ISO/f/eksposur/fokal, software, orientasi) dibaca
+ *        server via exifr saat pesan media dikirim (meta_json), event baru
+ *        admin:message_meta mengembalikan metadata lengkap + info file
+ *        (enrichment live untuk media lama + persist); video MP4 kini juga
+ *        dapat videoCreated (mvhd creation time). */
+const SERVICE_VERSION = 'v35'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -1925,6 +1932,25 @@ interface MediaMeta {
   height?: number
   durationMs?: number
   pages?: number
+  /* v35 — waktu pembuatan video (mvhd creation time, MP4/MOV). */
+  videoCreated?: string
+  /* v35 — EXIF foto (GPS/kamera/lensa/tanggal/pencahayaan) via exifr. */
+  exif?: ExifMeta
+}
+
+/** v35 — bagian EXIF yang disimpan (field opsional, semuanya best-effort). */
+interface ExifMeta {
+  gps?: { lat: number; lon: number }
+  takenAt?: string
+  make?: string
+  model?: string
+  lens?: string
+  software?: string
+  orientation?: number
+  iso?: number
+  fNumber?: number
+  exposureTime?: number
+  focalLength?: number
 }
 
 /** Baca header file media (maks 4 MiB) tanpa memuat seluruh file. */
@@ -2003,6 +2029,16 @@ const parseImageMeta = (buf: Buffer): MediaMeta => {
   return meta
 }
 
+/** v35 — detik sejak 1904 (epoch MP4) → ISO 8601; undefined bila tak wajar. */
+const MP4_EPOCH_OFFSET_S = 2_082_844_800 // 1904-01-01 → 1970-01-01
+const mp4TimeToIso = (secs: number): string | undefined => {
+  const ms = (secs + MP4_EPOCH_OFFSET_S) * 1000
+  if (!Number.isFinite(ms) || ms < 946_684_800_000 || ms > Date.now() + 86_400_000) {
+    return undefined
+  }
+  return new Date(ms).toISOString()
+}
+
 /** MP4/MOV — dimensi (tkhd) + durasi (mvhd), dipindai di 4 MiB pertama. */
 const parseMp4Meta = (buf: Buffer): MediaMeta => {
   const meta: MediaMeta = {}
@@ -2011,12 +2047,20 @@ const parseMp4Meta = (buf: Buffer): MediaMeta => {
     if (mvhd > 0) {
       const version = buf[mvhd + 4]
       if (version === 1) {
+        // v35 — creation time (detik sejak 1904) → ISO.
+        const created = Number(buf.readBigUInt64BE(mvhd + 12))
+        const createdIso = created > 0 ? mp4TimeToIso(created) : undefined
+        if (createdIso) meta.videoCreated = createdIso
         const timescale = buf.readUInt32BE(mvhd + 24)
         const duration = Number(buf.readBigUInt64BE(mvhd + 28))
         if (timescale > 0 && duration > 0) {
           meta.durationMs = Math.round((duration / timescale) * 1000)
         }
       } else {
+        // v35 — creation time versi 0 (32-bit).
+        const created = buf.readUInt32BE(mvhd + 12)
+        const createdIso = created > 0 ? mp4TimeToIso(created) : undefined
+        if (createdIso) meta.videoCreated = createdIso
         const timescale = buf.readUInt32BE(mvhd + 16)
         const duration = buf.readUInt32BE(mvhd + 20)
         if (timescale > 0 && duration > 0) {
@@ -2069,11 +2113,97 @@ const extractMediaMeta = (name: string | null | undefined): MediaMeta | null => 
   return Object.keys(meta).length > 0 ? meta : null
 }
 
-/** v26 — simpan metadata media pesan (dipanggil saat pesan media dikirim). */
-const attachMediaMeta = (messageId: number, content: string) => {
-  const meta = extractMediaMeta(mediaNameOf(content))
-  if (meta) {
-    db.run('UPDATE messages SET meta_json = ? WHERE id = ?', [JSON.stringify(meta), messageId])
+/* v35 — EXIF foto (GPS/kamera/dst.) via exifr — best-effort, gagal = diam. */
+
+/** True bila buffer tampak seperti gambar ber-EXIF (JPEG/HEIC/TIFF). */
+const isExifCapableImage = (buf: Buffer): boolean => {
+  if (buf.length < 12) return false
+  // JPEG (FFD8), TIFF (II*/MM*), HEIC/HEIF/AVIF (ftyp + brand heic/heif/avif/mif1)
+  if (buf[0] === 0xff && buf[1] === 0xd8) return true
+  if ((buf[0] === 0x49 && buf[1] === 0x49) || (buf[0] === 0x4d && buf[1] === 0x4d)) return true
+  if (buf.toString('ascii', 4, 8) === 'ftyp') {
+    const brand = buf.toString('ascii', 8, 12).toLowerCase()
+    return /^(heic|heix|heif|mif1|msf1|avif)/.test(brand)
+  }
+  return false
+}
+
+/**
+ * v35 — baca EXIF terpilih dari buffer gambar. Hanya tag yang relevan untuk
+ * moderasi (lokasi, perangkat, waktu, pencahayaan) — hasil dibatasi ukurannya
+ * (string ≤80 char) agar meta_json tetap ramping. Semua gagal → undefined.
+ */
+const extractExifMeta = async (buf: Buffer): Promise<ExifMeta | undefined> => {
+  try {
+    const parsed = (await exifr.parse(buf, {
+      tiff: true,
+      ifd0: true,
+      exif: true,
+      gps: true,
+      reviveValues: true,
+      translateValues: false,
+    })) as Record<string, unknown> | undefined
+    if (!parsed || typeof parsed !== 'object') return undefined
+    const out: ExifMeta = {}
+    const lat = typeof parsed.latitude === 'number' && Number.isFinite(parsed.latitude)
+      ? Number(parsed.latitude.toFixed(7))
+      : undefined
+    const lon = typeof parsed.longitude === 'number' && Number.isFinite(parsed.longitude)
+      ? Number(parsed.longitude.toFixed(7))
+      : undefined
+    // GPS 0,0 persis hampir selalu artinya "tidak ada sinyal" — abaikan.
+    if (lat !== undefined && lon !== undefined && !(lat === 0 && lon === 0)) {
+      out.gps = { lat, lon }
+    }
+    const str = (v: unknown): string | undefined => {
+      const s = typeof v === 'string' ? v.trim().slice(0, 80) : ''
+      return s.length > 0 ? s : undefined
+    }
+    out.make = str(parsed.Make)
+    out.model = str(parsed.Model)
+    out.lens = str(parsed.LensModel)
+    out.software = str(parsed.Software)
+    if (typeof parsed.Orientation === 'number') out.orientation = parsed.Orientation
+    if (typeof parsed.ISO === 'number' && Number.isFinite(parsed.ISO)) out.iso = parsed.ISO
+    if (typeof parsed.FNumber === 'number' && Number.isFinite(parsed.FNumber)) {
+      out.fNumber = Number(parsed.FNumber.toFixed(2))
+    }
+    if (typeof parsed.ExposureTime === 'number' && Number.isFinite(parsed.ExposureTime)) {
+      out.exposureTime = parsed.ExposureTime
+    }
+    if (typeof parsed.FocalLength === 'number' && Number.isFinite(parsed.FocalLength)) {
+      out.focalLength = Number(parsed.FocalLength.toFixed(1))
+    }
+    const takenRaw = parsed.DateTimeOriginal ?? parsed.CreateDate
+    if (takenRaw instanceof Date && !Number.isNaN(takenRaw.getTime())) {
+      out.takenAt = takenRaw.toISOString()
+    }
+    return Object.keys(out).length > 0 ? out : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * v35 — simpan metadata media pesan (dimensi/durasi/halaman + videoCreated
+ * + EXIF foto). Async karena exifr; dipanggil fire-and-forget saat pesan
+ * media dikirim. Gagal = diam (meta dasar tetap tersimpan bila terbaca).
+ */
+const attachMediaMeta = async (messageId: number, content: string): Promise<void> => {
+  try {
+    const name = mediaNameOf(content)
+    if (!name) return
+    const meta = extractMediaMeta(name)
+    const buf = readMediaHeader(name)
+    if (meta && buf && isExifCapableImage(buf)) {
+      const exif = await extractExifMeta(buf)
+      if (exif) meta.exif = exif
+    }
+    if (meta && Object.keys(meta).length > 0) {
+      db.run('UPDATE messages SET meta_json = ? WHERE id = ?', [JSON.stringify(meta), messageId])
+    }
+  } catch {
+    /* metadata bersifat pelengkap — jangan pernah gagalkan pengiriman */
   }
 }
 
@@ -3420,7 +3550,7 @@ io.on('connection', (socket) => {
         const message = toChatMessage(row)
         // v26 — metadata media untuk pesan terjadwal juga.
         if (type === 'image' || type === 'file') {
-          attachMediaMeta(Number(result.lastInsertRowid), message.content)
+          void attachMediaMeta(Number(result.lastInsertRowid), message.content)
         }
         attachReplyPreviews([row], [message])
         if (me === ADMIN_ID) io.to('admins').emit('message:new', message)
@@ -3442,7 +3572,7 @@ io.on('connection', (socket) => {
       })
       // v26 — baca metadata media (dimensi/durasi/halaman) dari file di disk.
       if (type === 'image' || type === 'file') {
-        attachMediaMeta(message.id, message.content)
+        void attachMediaMeta(message.id, message.content)
       }
       ack({ ok: true, message })
 
@@ -4785,6 +4915,98 @@ io.on('connection', (socket) => {
     )
     audit('media_scan', `${filled}/${pending.length} terisi, sisa ${remaining}`)
     ack({ ok: true, scanned: pending.length, filled, remaining })
+  }))
+
+  /**
+   * v35 — metadata lengkap satu pesan media untuk panel admin: isi meta_json
+   * + info file (nama/jenis/ukuran/pengirim/waktu). Bila EXIF belum ada tapi
+   * file masih di disk (pesan lama), baca SEKARANG dan persist (enrichment).
+   * Khusus admin — user tidak pernah bisa memanggil ini.
+   */
+  socket.on('admin:message_meta', handler(socket, async (data, ack) => {
+    if (!adminGuard(ack)) return
+    const messageId = Number((data as { messageId?: unknown })?.messageId)
+    if (!Number.isInteger(messageId) || messageId <= 0) {
+      ack({ ok: false, error: 'invalid-id' })
+      return
+    }
+    const row = db
+      .query(
+        `SELECT m.id, m.conversation_id, m.type, m.content, m.file_name,
+                m.file_size, m.mime_type, m.created_at, m.meta_json,
+                m.deleted_at, m.media_expired_at, m.sender_id,
+                u.name AS sender_name
+         FROM messages m LEFT JOIN users u ON u.id = m.sender_id
+         WHERE m.id = ?`
+      )
+      .get(messageId) as
+      | (Pick<MessageRow, 'id' | 'conversation_id' | 'type' | 'content' | 'file_name' |
+           'file_size' | 'mime_type' | 'created_at' | 'deleted_at' | 'media_expired_at' | 'sender_id'>
+        & { meta_json: string | null; sender_name: string | null })
+      | undefined
+    if (!row) {
+      ack({ ok: false, error: 'not-found' })
+      return
+    }
+    const mediaName = mediaNameOf(row.content)
+    const isMedia =
+      ['image', 'file', 'voice'].includes(row.type) && mediaName != null
+    if (!isMedia || mediaName == null) {
+      ack({ ok: false, error: 'not-media' })
+      return
+    }
+    let meta: MediaMeta = {}
+    try {
+      meta = row.meta_json ? (JSON.parse(row.meta_json) as MediaMeta) : {}
+    } catch {
+      meta = {}
+    }
+    // Enrichment live: EXIF gambar belum tersimpan & file masih ada → baca +
+    // simpan supaya pemanggilan berikutnya instan. Semua best-effort.
+    try {
+      const buf = readMediaHeader(mediaName)
+      let enriched = false
+      if (buf && buf.length >= 12 && isExifCapableImage(buf) && !meta.exif) {
+        const exif = await extractExifMeta(buf)
+        if (exif) {
+          meta.exif = exif
+          enriched = true
+        }
+      }
+      if (!meta.width && buf) {
+        const base = extractMediaMeta(mediaName)
+        if (base) {
+          meta = { ...base, ...meta, exif: meta.exif ?? base.exif }
+          enriched = true
+        }
+      }
+      if (enriched && !row.deleted_at && !row.media_expired_at) {
+        db.run('UPDATE messages SET meta_json = ? WHERE id = ?', [
+          JSON.stringify(meta),
+          messageId,
+        ])
+      }
+    } catch {
+      /* enrichment pelengkap — respons tetap dikirim dengan meta yang ada */
+    }
+    audit('message_meta', `#${messageId} (${row.type})`)
+    ack({
+      ok: true,
+      meta,
+      file: {
+        messageId: row.id,
+        mediaName,
+        fileName: row.file_name ?? null,
+        mimeType: row.mime_type ?? null,
+        fileSize: row.file_size ?? null,
+        senderId: row.sender_id,
+        senderName: row.sender_name ?? (row.sender_id === ADMIN_ID ? ADMIN_NAME : null),
+        conversationId: row.conversation_id,
+        createdAt: new Date(row.created_at).toISOString(),
+        deleted: !!row.deleted_at,
+        expired: !!row.media_expired_at,
+      },
+    })
   }))
 
   /**
