@@ -6208,10 +6208,11 @@ io.on('connection', (socket) => {
     }
     db.run('UPDATE users SET media_quota_mb = ? WHERE id = ?', [mb, target.id])
     audit('quota', `${target.name}: ${mb === 0 ? 'default 250 MiB' : `${mb} MiB`}`)
+    const fresh = findUserById(target.id) as UserRow // hindari ack dari row lama
     ack({
       ok: true,
       quotaMb: mb,
-      quotaBytes: effectiveQuotaBytes(target),
+      quotaBytes: effectiveQuotaBytes(fresh),
       usedBytes: storedMediaBytes(target.id),
     })
     console.log(`[user-control] kuota ${target.name}: ${mb} MiB`)
