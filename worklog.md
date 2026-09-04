@@ -1128,3 +1128,20 @@ Work Log:
 
 Stage Summary:
 - Task 52 SELESAI: kartu pratinjau tautan YouTube kini menampilkan THUMBNAIL ASLI video (dari CDN statis i.ytimg.com) + judul video + nama kanal — kotak hitam kosong tidak ada lagi; kartu tetap muncul bahkan saat halaman YouTube diblokir bot (providerFallback); TikTok ikut di-enrich. Perilaku buka-langsung-tanpa-popup dari v32 dipertahankan. Verify 133/133, lint 0/0, E2E 0 error, data uji bersih. GitHub sinkron (5493a4d + rescue-v33).
+---
+Task ID: 53
+Agent: Z.ai Code (main)
+Task: "linknya ga bisa dibuka di aplikasi langsung? kayak popup tanpa buka aplikasi streamnya?" — v34: LinkViewer in-app (popup embed YouTube/TikTok)
+
+Work Log:
+- (Sesi terputus sebelum laporan Task 52 terkirim; permulaan sesi: pulihkan 31 file yang mode-nya berubah 644→755 via git restore — konten 0 diff; cold restart → chat-service v33 hidup; verifikasi ulang Task 52: API i.ytimg 200 image/jpeg, E2E browser thumbnail 480x360, mobile ok, 0 console error; laporan Task 52 dikirim.)
+- Permintaan baru (Task 53): ketukan tautan jangan lompat ke browser/aplikasi stream — buka POPUP di dalam aplikasi. Desain: store zustand `useLinkViewerStore` (open/url/data + openLinkViewer()) + `LinkViewerDialog` di file baru `src/components/chat/link-viewer.tsx`; dialog di-mount SEKALI per root (Messenger.tsx & AdminPanel.tsx, samping MediaViewer).
+- Perilaku: kartu pratinjau <a> onClick → preventDefault + openLinkViewer(data.url, data); LinkifiedText dapat prop `inApp` (default true) → tautan teks/caption ikut buka viewer; href/target _blank dipertahankan utk middle-click/no-JS.
+- Isi dialog: YouTube → iframe `youtube-nocookie.com/embed/<id>?autoplay=1&rel=0` 16:9 allowFullScreen; TikTok → `tiktok.com/embed/v2/<id>` potret (max 350px); provider lain → tampilan info (BigThumb + judul + deskripsi line-clamp-4); loading = skeleton; gagal = "Pratinjau tidak tersedia" + hostname. Footer: pil provider+site (hidden <sm agar tombol muat di ponsel) + tombol "Salin" (clipboard + toast sonner) + "Buka di browser" (target _blank rel noopener). Dialog tutup/Escape → `open=false` → iframe di-UNMOUNT (pemutaran berhenti); key={url} reset per URL.
+- v34: SERVICE_VERSION v33→v34 + changelog (klien-saja, label rilis); RESCUE_TAG rescue-v34; verify-integrity: 2 cek versi v33 dipindah, seksi v34 +11 cek → 142/142; FEATURES.md seksi v34 (chmod 644 kedua file).
+- Bug saat pertama compile: `Export hostnameOf doesn't exist` → hostnameOf diekspor dari link-preview.tsx (500 → 200). Lint warning eslint-disable tak terpakai dihapus → 0/0.
+- E2E (t53, :81, fixture UjiBrowser53/uji53, full reload pasca Fast Refresh): klik KARTU → dialog terbuka DI APP (tidak pindah halaman), iframe src youtube-nocookie embed + allowfullscreen, tombol Salin/Buka di browser/Close ada; tutup → dialog & iframe benar-benar hilang; klik TAUTAN TEKS → dialog terbuka (ViewerFetch + sinkron store → judul asli "HOROR! ROMBONGAN…" & site RJL 5 tampil di header); Escape menutup; mobile 390×844: dialog pas, tombol utuh (bukaVisible=true). Catatan jujur: di sandbox YouTube menampilkan bot-check "Sign in to confirm you're not a bot" pada IFRAME (IP datacenter); di perangkat user (IP rumah/HP) embed normal — thumbnail & struktur dialog terverifikasi 0 error console.
+- Cleanup: UjiBrowser53 + percakapan dihapus; users kembali 5 asli; allowRegistration='0' (t53-verify-clean.ts).
+
+Stage Summary:
+- Task 53 SELESAI: tautan kini DIBUKA DI DALAM APLIKASI — ketukan pada kartu pratinjau maupun tautan di teks/caption membuka popup LinkViewer: YouTube/TikTok diputar via embed resmi tanpa keluar aplikasi (dialog tutup = video berhenti), situs lain tampil sebagai info, dan "Buka di browser"/"Salin" selalu tersedia. Verify 142/142, lint 0/0, E2E desktop+mobile 0 error, data uji bersih. GitHub sinkron (b2b0996 + 9cd94f8 + tag rescue-v34).
