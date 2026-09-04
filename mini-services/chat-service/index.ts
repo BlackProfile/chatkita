@@ -6977,7 +6977,7 @@ io.on('connection', (socket) => {
       io.to(`user:${conversation.user_a_id}`).emit('message:new', message)
       io.to(`user:${conversation.user_b_id}`).emit('message:new', message)
       // Admin menerima versi perbarui (bubble ⏳ berubah jadi pesan normal).
-      io.to('admins').emit('message:updated', message)
+      io.to('admins').emit('message:updated', { ...message, pending: false })
       pushConversationsTo(conversation.user_a_id)
       pushConversationsTo(conversation.user_b_id)
       audit('moderation_approve', `#${row.id}`)

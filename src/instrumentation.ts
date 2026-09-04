@@ -19,7 +19,7 @@ export async function register() {
   const net = await import(/* turbopackIgnore: true */ "node:net");
 
   const PORT = 3003;
-  void 0; // v21 — bump agar register() dijalankan ulang oleh dev server.
+  void 0; // v40 — bump agar register() dijalankan ulang oleh dev server (Task 59).
 
   /* v21 Task 37 — SELF-HEAL anti-rollback: checkpoint sandbox pernah menghapus
    * file lewat "commit UUID" (contoh df40cd2 menghapus /api/upload/route.ts).
