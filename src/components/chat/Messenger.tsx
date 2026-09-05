@@ -2161,6 +2161,14 @@ export function Messenger() {
     };
   }, [call?.phase]);
 
+  // v44 — polish: logout/epoch berubah atau unmount → matikan media call
+  // (track kamera/mikrofon tidak boleh tetap hidup setelah sesi berakhir).
+  useEffect(() => {
+    return () => {
+      webrtcRef.current?.stop();
+    };
+  }, [epoch]);
+
   /* ---------------------------------------------------------------- */
   /* Render: login                                                     */
   /* ---------------------------------------------------------------- */
