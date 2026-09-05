@@ -94,6 +94,7 @@ import type {
   AdminUnbindDevicesAck,
   AdminUserCreateAck,
   AdminUserDeleteAck,
+  AdminUserRoleAck,
   AppSettings,
   AppSettingsAck,
   BackupAck,
@@ -358,13 +359,17 @@ function SenderSplit({ user, admin }: { user: number; admin: number }) {
   );
 }
 
+/** v43 — tab yang disembunyikan untuk moderator (isinya destruktif). */
+const MODERATOR_HIDDEN_TABS: DashboardTab[] = ["pusat", "cheat", "siaran", "pengaturan"];
+
 export function AdminDashboard({
   open,
   onOpenChange,
   socket,
-  tab,
+  tab: tabProp,
   onTabChange,
   usingDefaultPassword,
+  actorRole = "admin",
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -374,7 +379,15 @@ export function AdminDashboard({
   onTabChange: (tab: DashboardTab) => void;
   /** v23 — true bila password admin masih bawaan admin123. */
   usingDefaultPassword?: boolean;
+  /** v43 — role aktor sesi admin; moderator tidak melihat tab destruktif. */
+  actorRole?: "admin" | "moderator";
 }) {
+  // v43 — tab efektif: moderator yang membuka tab terlarang diarahkan ke ringkasan.
+  const tab: DashboardTab =
+    actorRole === "moderator" && MODERATOR_HIDDEN_TABS.includes(tabProp)
+      ? "ringkasan"
+      : tabProp;
+  const canManageRoles = actorRole !== "moderator";
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -761,6 +774,27 @@ export function AdminDashboard({
     }
   };
 
+  /** v43 — ubah role akun user↔moderator (server menolak ADMIN_ID/role admin). */
+  const changeUserRole = (u: DashboardUserRow, role: "user" | "moderator") => {
+    if (!socket) return;
+    socket.emit(
+      "admin:user_role",
+      { userId: u.id, role },
+      (res: AckOf<AdminUserRoleAck> | ChatErrorAck) => {
+        if (res.ok) {
+          toast.success(
+            `${u.name} → ${res.role === "moderator" ? "moderator (lihat semua)" : "user biasa"}`
+          );
+          fetchStats();
+        } else if (res.error === "FORBIDDEN") {
+          toast.error("Hanya admin penuh yang boleh mengubah role");
+        } else {
+          toast.error("Gagal mengubah role akun");
+        }
+      }
+    );
+  };
+
   /** v23 — ganti password admin (verifikasi password lama di server, bcrypt). */
   const changeAdminPassword = () => {
     if (!socket || pwBusy) return;
@@ -882,6 +916,9 @@ export function AdminDashboard({
         <p className="flex items-center gap-1.5 truncate text-sm font-medium">
           {rank === 1 ? "🥇 " : rank === 2 ? "🥈 " : rank === 3 ? "🥉 " : ""}
           {u.name}
+          {u.role === "moderator" ? (
+            <Badge className="bg-amber-500 px-1.5 py-0 text-[10px] text-white">mod</Badge>
+          ) : null}
         </p>
         <p className="truncate text-[11px] text-muted-foreground">
           {u.online
@@ -923,6 +960,19 @@ export function AdminDashboard({
               <Lightbulb className="size-4" aria-hidden="true" />
               Insight pengguna
             </DropdownMenuItem>
+            {/* v43 — kelola role (hanya admin penuh; server menolak moderator). */}
+            {canManageRoles && u.role !== "moderator" ? (
+              <DropdownMenuItem onSelect={() => changeUserRole(u, "moderator")}>
+                <ShieldCheck className="size-4" aria-hidden="true" />
+                Jadikan moderator
+              </DropdownMenuItem>
+            ) : null}
+            {canManageRoles && u.role === "moderator" ? (
+              <DropdownMenuItem onSelect={() => changeUserRole(u, "user")}>
+                <UserPlus className="size-4" aria-hidden="true" />
+                Jadikan user biasa
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem onSelect={() => {
               setResetTarget(u);
               setResetPw("");
@@ -971,7 +1021,7 @@ export function AdminDashboard({
 
         {/* Tab bar */}
         <div className="flex shrink-0 gap-1 overflow-x-auto border-b px-3 py-2 sm:px-6">
-          {TABS.map((t) => (
+          {TABS.filter((t) => actorRole !== "moderator" || !MODERATOR_HIDDEN_TABS.includes(t.key)).map((t) => (
             <button
               key={t.key}
               type="button"

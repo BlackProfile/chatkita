@@ -1193,18 +1193,19 @@ const dashboardStats = () => {
   const allUsers = (
     db
       .query(
-        `SELECT u.id, u.name, u.created_at, u.last_seen_at,
+        `SELECT u.id, u.name, u.role, u.created_at, u.last_seen_at,
            u.password_hash IS NOT NULL AS has_pw,
            (SELECT COUNT(*) FROM devices d WHERE d.user_id = u.id) AS dev,
            (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id) AS c,
            (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id AND m.type != 'text') AS media,
            (SELECT MAX(m.created_at) FROM messages m WHERE m.sender_id = u.id) AS last_msg
-         FROM users u WHERE u.role = 'user'
+         FROM users u WHERE u.role IN ('user', 'moderator')
          ORDER BY u.last_seen_at DESC LIMIT 100`
       )
       .all() as {
       id: string
       name: string
+      role: string
       created_at: number
       last_seen_at: number
       has_pw: number
@@ -1216,6 +1217,7 @@ const dashboardStats = () => {
   ).map((r) => ({
     id: r.id,
     name: r.name,
+    ...(r.role === 'moderator' ? { role: 'moderator' as const } : {}),
     joinedAt: new Date(r.created_at).toISOString(),
     lastSeenAt: new Date(r.last_seen_at).toISOString(),
     messages: r.c,
@@ -4203,8 +4205,50 @@ io.on('connection', (socket) => {
       const check = storedHash
         ? Bun.password.verify(password, storedHash)
         : Promise.resolve(password === (process.env.ADMIN_PASSWORD || 'admin123'))
-      void check.then((match) => {
+      void check.then(async (match) => {
         if (!match) {
+          /* v43 — fallback login MODERATOR: password yang salah utk admin
+           * dicocokkan ke akun users.role='moderator' (bcrypt). Moderator
+           * menerima sesi 'admins' dengan actorRole='moderator' — semua
+           * event baca berfungsi, event destruktif ditolak FORBIDDEN. */
+          if (password.length >= 6) {
+            const mods = db
+              .query(
+                "SELECT id, name, password_hash FROM users WHERE role = 'moderator' AND password_hash IS NOT NULL"
+              )
+              .all() as Array<{ id: string; name: string; password_hash: string }>
+            for (const mod of mods) {
+              try {
+                if (await Bun.password.verify(password, mod.password_hash)) {
+                  adminAuthFails.count = 0
+                  adminAuthSocketFails.delete(socket.id)
+                  socket.data.userId = ADMIN_ID
+                  socket.data.actorRole = 'moderator'
+                  socket.join('admins')
+                  trackConnMeta(socket, ADMIN_ID)
+                  const becameOnline = addOnlineSocket(ADMIN_ID, socket.id)
+                  if (becameOnline) {
+                    io.emit('presence:update', {
+                      userId: ADMIN_ID,
+                      online: true,
+                      lastSeenAt: null,
+                    })
+                  }
+                  audit('mod_login', `moderator "${mod.name}" login (socket ${socket.id})`)
+                  console.log(`Moderator "${mod.name}" authenticated (socket ${socket.id})`)
+                  ack({
+                    ok: true,
+                    conversations: getConversationsFor(ADMIN_ID),
+                    usingDefault: false,
+                    actorRole: 'moderator',
+                  })
+                  return
+                }
+              } catch {
+                /* kandidat berikutnya */
+              }
+            }
+          }
           adminAuthFails.count += 1
           adminAuthSocketFails.set(socket.id, socketFails + 1)
           if (adminAuthSocketFails.size > 1000) adminAuthSocketFails.clear()
@@ -4216,6 +4260,7 @@ io.on('connection', (socket) => {
         adminAuthSocketFails.delete(socket.id)
 
         socket.data.userId = ADMIN_ID
+        socket.data.actorRole = 'admin'
         socket.join('admins')
         // v11 — remember connection metadata (ip/user-agent) for admin:xray.
         trackConnMeta(socket, ADMIN_ID)
@@ -4230,6 +4275,7 @@ io.on('connection', (socket) => {
           ok: true,
           conversations: getConversationsFor(ADMIN_ID),
           usingDefault: storedHash === null,
+          actorRole: 'admin',
         })
       })
     })
@@ -5386,6 +5432,10 @@ io.on('connection', (socket) => {
       ack({ ok: false, error: 'UNAUTHORIZED' })
       return
     }
+    if (socket.data.actorRole !== 'admin') {
+      ack({ ok: false, error: 'FORBIDDEN' }) // v43 — moderator ditolak
+      return
+    }
     const conversation =
       typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
     if (!conversation) {
@@ -5577,6 +5627,54 @@ io.on('connection', (socket) => {
     return true
   }
 
+  /**
+   * v43 — guard event DESTRUKTIF: hanya admin penuh (password utama) yang
+   * boleh lewat. Moderator (login via akun role='moderator') menerima
+   * FORBIDDEN. Defense in depth — UI moderator juga menyembunyikan tombol
+   * terkait, tetapi server tetap menolak tanpa mengandalkan klien.
+   */
+  const adminGuardDestructive = (ack: AckFn): boolean => {
+    if (socket.data.actorRole !== 'admin') {
+      console.log(`[mod-guard] socket ${socket.id} ditolak (event destruktif, role=${socket.data.actorRole ?? 'admin'})`)
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return false
+    }
+    return true
+  }
+
+  /* v43 — kelola role moderator (hanya admin penuh; ADMIN_ID & role='admin'
+   * tidak boleh disentuh). role 'moderator' = lihat semua, tanpa aksi merusak. */
+  socket.on('admin:user_role', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
+    const userId = typeof data?.userId === 'string' ? data.userId : ''
+    const role = typeof data?.role === 'string' ? data.role : ''
+    if (!userId || (role !== 'user' && role !== 'moderator')) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const target = findUserById(userId)
+    if (!target) {
+      ack({ ok: false, error: 'USER_NOT_FOUND' })
+      return
+    }
+    if (target.id === ADMIN_ID || target.role === 'admin') {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    if (target.role !== 'user' && target.role !== 'moderator') {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    if (target.role !== role) {
+      db.run('UPDATE users SET role = ? WHERE id = ?', [role, userId])
+      audit('user_role', `${target.name}: ${target.role} → ${role}`)
+      io.to('admins').emit('admin:user_role:update', { userId, role })
+      console.log(`[role] ${target.name} → ${role}`)
+    }
+    ack({ ok: true, role })
+  }))
+
   socket.on('admin:dashboard', handler(socket, (_data, ack) => {
     if (!adminGuard(ack)) return
     ack({ ok: true, stats: dashboardStats() })
@@ -5589,6 +5687,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:settings:set', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const next: AppSettingsApi = getAppSettings()
     let touched = ''
     if (typeof data?.appName === 'string') {
@@ -5707,6 +5806,7 @@ io.on('connection', (socket) => {
    */
   socket.on('admin:password_change', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const current = typeof data?.currentPassword === 'string' ? data.currentPassword : ''
     const next = typeof data?.newPassword === 'string' ? data.newPassword : ''
     if (next.length < 6 || next.length > 64) {
@@ -5735,6 +5835,7 @@ io.on('connection', (socket) => {
    */
   socket.on('admin:broadcast', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const text = typeof data?.text === 'string' ? data.text.trim() : ''
     const kind = data?.kind === 'pengumuman' ? 'pengumuman' : 'siaran'
     if (text.length < 1 || text.length > 500) {
@@ -5778,6 +5879,7 @@ io.on('connection', (socket) => {
   /** Buat 1–20 kode undangan sekali pakai sekaligus. */
   socket.on('admin:invite_create', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const count = Math.max(1, Math.min(20, Number(data?.count) || 1))
     const label = typeof data?.label === 'string' ? data.label.trim().slice(0, 60) : ''
     const created = []
@@ -5800,6 +5902,7 @@ io.on('connection', (socket) => {
   /** Hapus satu kode undangan (terpakai maupun belum). */
   socket.on('admin:invite_delete', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const code = typeof data?.code === 'string' ? data.code.trim().toUpperCase() : ''
     const res = db.run('DELETE FROM invite_codes WHERE code = ?', [code])
     if (res.changes === 0) {
@@ -5813,6 +5916,7 @@ io.on('connection', (socket) => {
   /** Admin membuat akun langsung (tanpa kode undangan, tanpa perangkat). */
   socket.on('admin:user_create', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const name = typeof data?.name === 'string' ? data.name.trim() : ''
     const password = typeof data?.password === 'string' ? data.password : ''
     if (name.length < 1 || name.length > MAX_NAME_LENGTH) {
@@ -5847,6 +5951,7 @@ io.on('connection', (socket) => {
   /** Reset password user dari dashboard (mis. user lupa password). */
   socket.on('admin:user_reset_password', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const userId = typeof data?.userId === 'string' ? data.userId : ''
     const password = typeof data?.password === 'string' ? data.password : ''
     const target = userId ? findUserById(userId) : null
@@ -5871,6 +5976,7 @@ io.on('connection', (socket) => {
   /** Lepas seluruh kunci perangkat milik user (mis. user ganti HP). */
   socket.on('admin:user_unbind_devices', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const userId = typeof data?.userId === 'string' ? data.userId : ''
     const target = userId ? findUserById(userId) : null
     if (!target || target.role !== 'user') {
@@ -5963,6 +6069,7 @@ io.on('connection', (socket) => {
   /** v29 — hapus SEMUA kode undangan yang belum terpakai sekali jalan. */
   socket.on('admin:invites_clear_unused', handler(socket, (_data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const res = db.run('DELETE FROM invite_codes WHERE used_by IS NULL')
     audit('invite_clear_unused', `${res.changes} kode belum terpakai dihapus`)
     console.log(`Admin cleared ${res.changes} unused invite code(s)`)
@@ -5975,6 +6082,7 @@ io.on('connection', (socket) => {
    */
   socket.on('admin:audit_clear', handler(socket, (_data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const cnt = (db.query('SELECT COUNT(*) AS c FROM audit_log').get() as { c: number }).c
     db.run('DELETE FROM audit_log')
     audit('audit_clear', `${cnt} entri log dihapus admin`)
@@ -5989,6 +6097,7 @@ io.on('connection', (socket) => {
    */
   socket.on('admin:settings:reset', handler(socket, (_data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     for (const key of APP_SETTING_RESET_KEYS) {
       db.run('DELETE FROM settings WHERE key = ?', [key])
     }
@@ -6008,6 +6117,7 @@ io.on('connection', (socket) => {
    */
   socket.on('admin:user_delete', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const userId = typeof data?.userId === 'string' ? data.userId : ''
     const target = userId ? findUserById(userId) : null
     if (!target || target.role !== 'user') {
@@ -6084,6 +6194,7 @@ io.on('connection', (socket) => {
    * Hasilnya dikirim ke room admins via event admin:auto_backup. */
   socket.on('admin:auto_backup_now', handler(socket, (_data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const started = runAutoBackup('manual')
     ack({
       ok: started,
@@ -6099,6 +6210,7 @@ io.on('connection', (socket) => {
    */
   socket.on('admin:reset_all', handler(socket, (_data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     let wiped: ReturnType<typeof wipeChatData>
     try {
       db.run('BEGIN')
@@ -6126,6 +6238,7 @@ io.on('connection', (socket) => {
    */
   socket.on('admin:restore', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const backup = (data?.backup ?? null) as Record<string, unknown> | null
     if (!backup || typeof backup !== 'object') {
       ack({ ok: false, error: 'INVALID_BACKUP' })
@@ -6233,6 +6346,7 @@ io.on('connection', (socket) => {
   /** Manual WAL checkpoint + VACUUM with before/after disk sizes. */
   socket.on('admin:vacuum', handler(socket, (_data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const sizeOf = (p: string): number => {
       try {
         return statSync(p).size
@@ -6441,6 +6555,7 @@ io.on('connection', (socket) => {
    */
   socket.on('admin:message_meta', handler(socket, async (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const messageId = Number((data as { messageId?: unknown })?.messageId)
     if (!Number.isInteger(messageId) || messageId <= 0) {
       ack({ ok: false, error: 'invalid-id' })
@@ -6548,6 +6663,7 @@ io.on('connection', (socket) => {
    */
   socket.on('admin:cleanup', handler(socket, (_data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const before = dirStats(MEDIA_DIR)
     sweepExpiredMedia()
     dbMaintenance()
@@ -6704,6 +6820,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:kick', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const sockets = onlineSockets.get(target.id)?.size ?? 0
@@ -6717,6 +6834,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:freeze', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const on = data?.on !== false
@@ -6728,6 +6846,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:mute', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const minutes = Number(data?.minutes)
@@ -6749,6 +6868,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:slowmode', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const perMinute = Number(data?.perMinute)
@@ -6764,6 +6884,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:mediablock', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const on = data?.on !== false
@@ -6777,6 +6898,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:fake_typing', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const conversation =
       typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
     if (!conversation || !isParticipant(conversation, ADMIN_ID)) {
@@ -6793,6 +6915,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:always_online', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const on = data?.on !== false
     setSetting('always_online', on ? '1' : '0')
     audit('always_online', on ? 'on' : 'off')
@@ -6801,6 +6924,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:fake_last_seen', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const value = typeof data?.value === 'string' ? data.value.trim() : ''
     if (value.length > 40) {
       ack({ ok: false, error: 'INVALID_MESSAGE' })
@@ -6813,6 +6937,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:fake_receipts', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const conversation =
       typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
     if (!conversation) {
@@ -6891,6 +7016,7 @@ io.on('connection', (socket) => {
   // message:new + push notifikasi — penerima tidak bisa membedakannya.
   socket.on('admin:cheat_send', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const userId = typeof data?.userId === 'string' ? data.userId : ''
     const text = typeof data?.text === 'string' ? data.text.trim() : ''
     if (!userId || text.length < 1 || text.length > MAX_MESSAGE_LENGTH) {
@@ -6914,6 +7040,7 @@ io.on('connection', (socket) => {
   // teks lama tetap dicatat di edit_history agar ForensicsDialog melihatnya.
   socket.on('admin:cheat_edit', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const id = Number(data?.messageId)
     const content = typeof data?.text === 'string' ? data.text.trim() : ''
     if (
@@ -6977,6 +7104,7 @@ io.on('connection', (socket) => {
   // Reaksi emoji atas nama user lain (toggle, mekanisme sama dgn message:react).
   socket.on('admin:cheat_react', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const id = Number(data?.messageId)
     const emoji = typeof data?.emoji === 'string' ? data.emoji : ''
     const userId = typeof data?.userId === 'string' ? data.userId : ''
@@ -7021,6 +7149,7 @@ io.on('connection', (socket) => {
   // memperbarui chip waktu + pemisah hari lewat message:updated.createdAt.
   socket.on('admin:cheat_time', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const id = Number(data?.messageId)
     if (!Number.isInteger(id) || id <= 0) {
       ack({ ok: false, error: 'INVALID_MESSAGE' })
@@ -7166,6 +7295,7 @@ io.on('connection', (socket) => {
   // isi asli tetap tersimpan di deleted_content untuk forensik).
   socket.on('admin:media_delete', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const id = Number(data?.messageId)
     const row =
       Number.isInteger(id) && id > 0
@@ -7196,6 +7326,7 @@ io.on('connection', (socket) => {
   // target; scope "all" = seluruh media percakapan dua sisi).
   socket.on('admin:media_delete_all', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const userId = typeof data?.userId === 'string' ? data.userId : ''
     const conv = cheatConvOf(userId)
     if (!conv) {
@@ -7247,6 +7378,7 @@ io.on('connection', (socket) => {
   // Ganti nama tampilan/login user (aturan sama dengan admin:user_create).
   socket.on('admin:user_rename', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const name = typeof data?.name === 'string' ? data.name.trim() : ''
@@ -7276,6 +7408,7 @@ io.on('connection', (socket) => {
   // via pipeline hapus resmi; file disk media ikut dibebaskan (dedup aware).
   socket.on('admin:bulk_delete_user', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const rows = db
@@ -7309,6 +7442,7 @@ io.on('connection', (socket) => {
   // Bot balasan otomatis per-user: on/off + teks (1–300) + jeda (0–120 dtk).
   socket.on('admin:user_bot', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const on = data?.on === true
@@ -7338,6 +7472,7 @@ io.on('connection', (socket) => {
   // Web push custom ke semua langganan push milik user (judul + isi bebas).
   socket.on('admin:user_push', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const title = typeof data?.title === 'string' ? data.title.trim() : ''
@@ -7358,6 +7493,7 @@ io.on('connection', (socket) => {
   // Kuota media khusus per-user (MiB); 0 = kembali ke default global 250 MiB.
   socket.on('admin:user_quota', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const mb = Math.round(Number(data?.mb))
@@ -7412,6 +7548,7 @@ io.on('connection', (socket) => {
   // v40 — filter kata per-user: blokir total atau sensor otomatis.
   socket.on('admin:word_filter', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const words = typeof data?.words === 'string' ? data.words.trim().slice(0, 2000) : ''
@@ -7429,6 +7566,7 @@ io.on('connection', (socket) => {
   // v40 — mode persetujuan pra-kirim: semua pesan user masuk antrean admin.
   socket.on('admin:approval_mode', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const on = data?.on !== false
@@ -7440,6 +7578,7 @@ io.on('connection', (socket) => {
   // v40 — blokir media per jenis (foto/voice/file) per-user.
   socket.on('admin:media_types', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const ALLOWED = ['image', 'voice', 'file']
@@ -7453,6 +7592,7 @@ io.on('connection', (socket) => {
   // v40 — paksa logout: hapus semua perangkat + akhiri semua sesi socket.
   socket.on('admin:user_force_logout', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const dev = db.query('SELECT COUNT(*) AS c FROM devices WHERE user_id = ?').get(target.id) as { c: number }
@@ -7468,6 +7608,7 @@ io.on('connection', (socket) => {
   // v40 — catatan & tag admin per user (khusus admin, tak terlihat user).
   socket.on('admin:user_note', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const note = typeof data?.note === 'string' ? data.note.trim().slice(0, 2000) : ''
@@ -7586,6 +7727,7 @@ io.on('connection', (socket) => {
   // v42 — param opsional repeat ('daily'|'weekly') → pesan berulang.
   socket.on('admin:schedule_message', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const text = typeof data?.text === 'string' ? data.text.trim() : ''
@@ -7643,6 +7785,7 @@ io.on('connection', (socket) => {
   // v40 — batalkan pesan terjadwal milik admin yang belum terkirim.
   socket.on('admin:schedule_cancel', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const id = Number(data?.messageId)
     const row =
       Number.isInteger(id) && id > 0
@@ -7674,6 +7817,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:quick_reply_set', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const raw = Array.isArray(data?.items) ? data.items : null
@@ -7701,6 +7845,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:quick_send', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const text = typeof data?.text === 'string' ? data.text.trim() : ''
@@ -7720,6 +7865,7 @@ io.on('connection', (socket) => {
   // v40 — pengingat otomatis: user diam X hari → bot admin mengirim pesan.
   socket.on('admin:user_nudge', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const days = Math.round(Number(data?.days))
@@ -7740,6 +7886,7 @@ io.on('connection', (socket) => {
   // v40 — auto-bersih chat per-user: pesan > X hari di-tombstone otomatis.
   socket.on('admin:user_autoclean', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const days = Math.round(Number(data?.days))
@@ -7778,6 +7925,7 @@ io.on('connection', (socket) => {
   // v40 — kunci percakapan user dengan PIN (admin wajib membuka per socket).
   socket.on('admin:user_pinlock', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const pin = typeof data?.pin === 'string' ? data.pin.trim() : ''
@@ -7799,6 +7947,7 @@ io.on('connection', (socket) => {
   // v40 — buka kunci percakapan untuk socket admin ini (sekali per login).
   socket.on('admin:unlock', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const target = restrictionTarget(data, ack)
     if (!target) return
     const partner = findUserById(target.id)
@@ -7820,6 +7969,7 @@ io.on('connection', (socket) => {
   // v40 — persetujuan moderasi: setujui (fan-out) atau tolak (tombstone).
   socket.on('admin:moderate', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const id = Number(data?.messageId)
     const action = data?.action === 'reject' ? 'reject' : 'approve'
     const row =
@@ -7861,6 +8011,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:mirror', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const on = data?.on !== false
     setSetting('mirror_mode', on ? '1' : '0')
     audit('mirror', on ? 'on' : 'off')
@@ -7871,6 +8022,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:delete_message', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const id = Number(data?.messageId)
     const row =
       Number.isInteger(id) && id > 0
@@ -7898,6 +8050,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:reset_conversation', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const conversation =
       typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
     if (!conversation) {
@@ -7940,6 +8093,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:pin', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const id = Number(data?.messageId)
     const row =
       Number.isInteger(id) && id > 0
@@ -7982,6 +8136,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:unpin', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const conversation =
       typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
     if (!conversation) {
@@ -7999,6 +8154,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:keywords:set', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const raw = Array.isArray(data?.items) ? data.items : null
     if (!raw || raw.length > 50) {
       ack({ ok: false, error: 'INVALID_MESSAGE' })
@@ -8328,6 +8484,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:ai_image_send', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const conversation =
       typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
     if (!conversation || !isParticipant(conversation, ADMIN_ID)) {
@@ -8390,6 +8547,7 @@ io.on('connection', (socket) => {
 
   socket.on('admin:ai_moderation', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
     const hasEnabled = typeof data?.enabled === 'boolean'
     const hasMode = data?.mode === 'block' || data?.mode === 'censor'
     if (!hasEnabled && !hasMode) {

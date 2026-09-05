@@ -285,6 +285,20 @@ export interface AdminAuthAck {
   conversations: ConversationOverview[];
   /** v23 — true bila masih memakai password bawaan admin123 (belum di-custom). */
   usingDefault?: boolean;
+  /** v43 — role aktor sesi; 'moderator' = akses baca (event destruktif ditolak). */
+  actorRole?: 'admin' | 'moderator';
+}
+
+/** v43 — ack `admin:user_role` (ubah role user↔moderator; admin penuh saja). */
+export interface AdminUserRoleAck {
+  ok: true;
+  role: 'user' | 'moderator';
+}
+
+/** v43 — server → admins: role sebuah akun berubah. */
+export interface AdminUserRoleUpdatePayload {
+  userId: string;
+  role: 'user' | 'moderator';
 }
 
 /** Ack payload returned by `admin:password_change` (v23 — custom login admin). */
@@ -526,6 +540,8 @@ export interface DashboardUserRow {
   messages: number;
   lastSeenAt: string;
   online: boolean;
+  /** v43 — hanya untuk baris daftar semua user ('moderator' = lihat semua). */ 
+  role?: "user" | "moderator";
   /** Only on the all-users list. */
   joinedAt?: string;
   /* v13 — richer per-user analytics. */

@@ -321,6 +321,8 @@ export function AdminPanel() {
   const [authed, setAuthed] = useState(false);
   // v23 — true bila admin masih memakai password bawaan admin123 (belum custom).
   const [usingDefault, setUsingDefault] = useState(false);
+  // v43 — role aktor sesi ini; 'moderator' = akses baca (tombol destruktif disembunyikan).
+  const [actorRole, setActorRole] = useState<"admin" | "moderator">("admin");
   const [conversations, setConversations] = useState<ConversationOverview[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messagesMap, setMessagesMap] = useState<Record<string, ChatMessage[]>>({});
@@ -811,6 +813,7 @@ export function AdminPanel() {
     if (!socket || !lockPin.trim()) return;
     socket.emit("admin:auth", { password: lockPin }, (res: AckOf<AdminAuthAck>) => {
       if (res.ok) {
+        setActorRole(res.actorRole === "moderator" ? "moderator" : "admin"); // v43
         try {
           window.sessionStorage.removeItem(ADMIN_LOCK_KEY);
         } catch {
@@ -1292,7 +1295,12 @@ export function AdminPanel() {
           passwordRef.current = trimmed;
           setAuthed(true);
           setUsingDefault(!!res.usingDefault);
+          setActorRole(res.actorRole === "moderator" ? "moderator" : "admin");
           setConversations(res.conversations);
+          // v43 — moderator: info mode terbatas.
+          if (res.actorRole === "moderator") {
+            toast("Mode moderator — akses terbatas (lihat saja)");
+          }
         } else {
           setPwCorrect(false); // v24 — auth sungguhan gagal: hilangkan efek hijau
           setAuthError(
@@ -2420,7 +2428,14 @@ export function AdminPanel() {
                   </AvatarFallback>
                 </Avatar>
                 <div className="min-w-0 flex-1">
-                  <p className="truncate font-semibold leading-tight">{ADMIN_NAME}</p>
+                  <p className="flex items-center gap-1.5 truncate font-semibold leading-tight">
+                    {ADMIN_NAME}
+                    {actorRole === "moderator" ? (
+                      <Badge className="bg-amber-500 px-1.5 py-0 text-[10px] text-white">
+                        Moderator
+                      </Badge>
+                    ) : null}
+                  </p>
                   <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
                     <span
                       aria-hidden="true"
@@ -2972,13 +2987,15 @@ export function AdminPanel() {
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
-                  <button
-                    type="button"
-                    className="flex h-7 shrink-0 items-center gap-1 rounded-full border bg-background px-2.5 text-[11px] font-medium text-destructive transition-colors hover:bg-destructive/10"
-                    onClick={() => setResetConfirm(true)}
-                  >
-                    Reset chat
-                  </button>
+                  {actorRole !== "moderator" ? (
+                    <button
+                      type="button"
+                      className="flex h-7 shrink-0 items-center gap-1 rounded-full border bg-background px-2.5 text-[11px] font-medium text-destructive transition-colors hover:bg-destructive/10"
+                      onClick={() => setResetConfirm(true)}
+                    >
+                      Reset chat
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="flex h-7 shrink-0 items-center gap-1 rounded-full border bg-background px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -3725,6 +3742,7 @@ export function AdminPanel() {
         tab={dashTab}
         onTabChange={setDashTab}
         usingDefaultPassword={usingDefault}
+        actorRole={actorRole}
       />
 
       {/* v11 — Manajemen pengguna (daftar + X-Ray + aksi sesi) */}
