@@ -3,15 +3,23 @@
 import { useEffect, useRef, useState } from "react";
 import type { Socket } from "socket.io-client";
 import {
+  AudioLines,
   Clock,
+  Copy,
   Eraser,
+  EyeOff,
+  Gauge,
   Ghost,
+  Hourglass,
+  Image as ImageIcon,
   PencilLine,
+  Reply,
   SendHorizonal,
   Smile,
   Timer,
   Trash2,
   Wand2,
+  Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -26,6 +34,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import type {
@@ -88,12 +103,15 @@ export function UserCheatDialog({
   /** Keadaan "Typing palsu" percakapan aktif — dimiliki AdminPanel agar pill toolbar & dialog selalu sinkron. */
   typingOn,
   onToggleTyping,
+  /** v45 — daftar user utk target CLONE percakapan (dari daftar percakapan admin). */
+  partners = [],
 }: {
   target: UserCheatTarget | null;
   onClose: () => void;
   socket: Socket | null;
   typingOn: boolean;
   onToggleTyping: () => void;
+  partners?: UserCheatTarget[];
 }) {
   return (
     <Dialog
@@ -110,6 +128,7 @@ export function UserCheatDialog({
             socket={socket}
             typingOn={typingOn}
             onToggleTyping={onToggleTyping}
+            partners={partners}
           />
         ) : null}
       </DialogContent>
@@ -123,11 +142,13 @@ function CheatBody({
   socket,
   typingOn,
   onToggleTyping,
+  partners,
 }: {
   target: UserCheatTarget;
   socket: Socket | null;
   typingOn: boolean;
   onToggleTyping: () => void;
+  partners: UserCheatTarget[];
 }) {
   const [msgs, setMsgs] = useState<ChatMessage[]>([]);
   const [convId, setConvId] = useState("");
@@ -145,6 +166,24 @@ function CheatBody({
   const [mirror, setMirror] = useState(false);
   const [ghost, setGhost] = useState(false);
   const [lastSeen, setLastSeen] = useState("");
+  // v45 — cheat lanjutan per-user.
+  const [shadowban, setShadowban] = useState(false);
+  const [shadowCount, setShadowCount] = useState(0);
+  const [throttleSec, setThrottleSec] = useState(0);
+  const [throttlePick, setThrottlePick] = useState("0");
+  const [autoReplyOn, setAutoReplyOn] = useState(false);
+  const [autoReplyText, setAutoReplyText] = useState("");
+  const [autoReplyDelay, setAutoReplyDelay] = useState("3");
+  const [voiceText, setVoiceText] = useState("");
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  const [imagePrompt, setImagePrompt] = useState("");
+  const [imageBusy, setImageBusy] = useState(false);
+  const [floodText, setFloodText] = useState("");
+  const [floodCount, setFloodCount] = useState("5");
+  const [floodInterval, setFloodInterval] = useState("500");
+  const [warpHours, setWarpHours] = useState("24");
+  const [cloneTarget, setCloneTarget] = useState("");
+  const [cloneMove, setCloneMove] = useState(false);
   // Log aksi cheat (lokal, terbaru di atas).
   const [log, setLog] = useState<CheatLogEntry[]>([]);
   const busyRef = useRef(false);
@@ -191,6 +230,14 @@ function CheatBody({
         setMirror(res.cheatState.mirror);
         setGhost(res.cheatState.ghost);
         setLastSeen(res.cheatState.fakeLastSeen);
+        // v45 — cheat lanjutan per-user.
+        setShadowban(res.cheatState.shadowban);
+        setShadowCount(res.cheatState.shadowCount);
+        setThrottleSec(res.cheatState.throttleSec);
+        setThrottlePick(String(res.cheatState.throttleSec));
+        setAutoReplyOn(res.cheatState.autoreply.on);
+        setAutoReplyText(res.cheatState.autoreply.text ?? "");
+        setAutoReplyDelay(String(res.cheatState.autoreply.delaySec));
         if (!keepSelection) setSelMsgId(null);
       }
     );
@@ -342,6 +389,163 @@ function CheatBody({
 
   const noMsg = selMsgId == null;
   const canEdit = !!selMsg && selMsg.type === "text" && !selMsg.deletedAt;
+
+  // ---- v45 — cheat lanjutan per-user --------------------------------
+
+  // (1) Shadowban: pesan user sukses di sisinya, tapi tak sampai ke admin.
+  const toggleShadowban = (v: boolean) => {
+    if (!socket?.connected) return;
+    setShadowban(v); // optimis
+    socket.emit("admin:cheat_shadowban", { userId: target.id, on: v }, (res: { ok: boolean; error?: string; revealed?: number }) => {
+      pushLog(v ? "Shadowban AKTIF — pesan user tak sampai ke admin." : `Shadowban mati — ${res.revealed ?? 0} pesan bayangan terungkap.`, res.ok);
+      if (res.ok) {
+        toast.success(v ? "Shadowban AKTIF." : `Shadowban mati — ${res.revealed ?? 0} pesan terungkap.`);
+        setShadowCount(0);
+        refreshPeek(true);
+      } else {
+        setShadowban(!v);
+        toast.error(`Gagal — ${res.error ?? "kesalahan server"}`);
+      }
+    });
+  };
+
+  // (2) Spoof suara (TTS atas nama user).
+  const sendVoice = () => {
+    const text = voiceText.trim();
+    if (!text || !socket?.connected || voiceBusy) return;
+    setVoiceBusy(true);
+    socket.emit("admin:cheat_voice", { userId: target.id, text }, (res: { ok: boolean; error?: string }) => {
+      setVoiceBusy(false);
+      pushLog(`Suara palsu (TTS) dikirim sebagai ${target.name}.`, res.ok);
+      if (res.ok) {
+        toast.success("Pesan suara palsu terkirim.");
+        setVoiceText("");
+        refreshPeek(true);
+      } else {
+        toast.error(`Gagal — ${res.error ?? "kesalahan server"}`);
+      }
+    });
+  };
+
+  // (3) Gambar AI atas nama user.
+  const sendImageAi = () => {
+    const prompt = imagePrompt.trim();
+    if (prompt.length < 3 || !socket?.connected || imageBusy) return;
+    setImageBusy(true);
+    socket.emit("admin:cheat_image_ai", { userId: target.id, prompt }, (res: { ok: boolean; error?: string }) => {
+      setImageBusy(false);
+      pushLog(`Gambar AI dikirim sebagai ${target.name}.`, res.ok);
+      if (res.ok) {
+        toast.success("Foto AI palsu terkirim.");
+        setImagePrompt("");
+        refreshPeek(true);
+      } else {
+        toast.error(`Gagal — ${res.error ?? "kesalahan server"}`);
+      }
+    });
+  };
+
+  // (4) Flood injector + stop.
+  const startFlood = () => {
+    const text = floodText.trim();
+    const count = Math.round(Number(floodCount));
+    const intervalMs = Math.round(Number(floodInterval));
+    if (!text || !socket?.connected) return;
+    if (!Number.isInteger(count) || count < 1 || count > 30) {
+      toast.error("Jumlah harus 1–30.");
+      return;
+    }
+    if (!Number.isInteger(intervalMs) || intervalMs < 250 || intervalMs > 5000) {
+      toast.error("Jeda harus 250–5000 ms.");
+      return;
+    }
+    socket.emit("admin:cheat_flood", { userId: target.id, text, count, intervalMs }, (res: { ok: boolean; error?: string }) => {
+      pushLog(`Flood ${count} pesan dijadwalkan (${intervalMs}ms).`, res.ok);
+      if (res.ok) toast.success(`Flood ${count} pesan dimulai.`);
+      else toast.error(`Gagal — ${res.error ?? "kesalahan server"}`);
+    });
+  };
+  const stopFlood = () => {
+    if (!socket?.connected) return;
+    socket.emit("admin:cheat_flood_stop", { userId: target.id }, (res: { ok: boolean; stopped?: number }) => {
+      pushLog(`Flood dihentikan (${res.stopped ?? 0} dibatalkan).`, res.ok);
+      toast.success(`Dihentikan — ${res.stopped ?? 0} pesan dibatalkan.`);
+    });
+  };
+
+  // (5) Time warp massal: geser waktu semua pesan user.
+  const applyTimewarp = () => {
+    const deltaHours = Math.round(Number(warpHours));
+    if (!Number.isInteger(deltaHours) || deltaHours === 0 || Math.abs(deltaHours) > 2160) {
+      toast.error("Isi pergeseran jam (±1 sampai ±2160, bukan 0).");
+      return;
+    }
+    runCheat(
+      "admin:cheat_timewarp",
+      { userId: target.id, deltaHours },
+      `Waktu semua pesan ${target.name} digeser ${deltaHours > 0 ? "+" : ""}${deltaHours} jam.`,
+      () => refreshPeek(true)
+    );
+  };
+
+  // (6) Auto-reply atas nama user.
+  const saveAutoReply = (on: boolean) => {
+    if (!socket?.connected) return;
+    const text = autoReplyText.trim();
+    if (on && !text) {
+      toast.error("Isi dulu teks balasan otomatis.");
+      return;
+    }
+    const prev = autoReplyOn;
+    setAutoReplyOn(on); // optimis
+    socket.emit(
+      "admin:cheat_autoreply",
+      { userId: target.id, on, text, delaySec: Math.round(Number(autoReplyDelay) || 0) },
+      (res: { ok: boolean; error?: string }) => {
+        pushLog(on ? "Auto-reply user AKTIF." : "Auto-reply user mati.", res.ok);
+        if (res.ok) {
+          toast.success(on ? "Auto-reply AKTIF — user membalas otomatis." : "Auto-reply dimatikan.");
+        } else {
+          setAutoReplyOn(prev);
+          toast.error(`Gagal — ${res.error ?? "kesalahan server"}`);
+        }
+      }
+    );
+  };
+
+  // (7) Throttle pesan user.
+  const applyThrottle = () => {
+    const seconds = Math.round(Number(throttlePick) || 0);
+    if (!Number.isInteger(seconds) || seconds < 0 || seconds > 300) {
+      toast.error("Jeda harus 0–300 detik.");
+      return;
+    }
+    runCheat(
+      "admin:cheat_throttle",
+      { userId: target.id, seconds },
+      seconds > 0 ? `Pesan ${target.name} ditunda ${seconds} dtk di sisi admin.` : "Throttle pesan dimatikan.",
+      () => setThrottleSec(seconds)
+    );
+  };
+
+  // (8) Clone percakapan ke user lain.
+  const applyClone = () => {
+    if (!cloneTarget || !socket?.connected) return;
+    if (cloneTarget === target.id) {
+      toast.error("Target harus user lain.");
+      return;
+    }
+    runCheat(
+      "admin:clone_conversation",
+      { fromUserId: target.id, toUserId: cloneTarget, move: cloneMove },
+      cloneMove ? "Percakapan dipindahkan." : "Percakapan disalin.",
+      () => {
+        setCloneTarget("");
+        setCloneMove(false);
+        refreshPeek(true);
+      }
+    );
+  };
 
   return (
     <>
@@ -670,6 +874,316 @@ function CheatBody({
               Pasang
             </Button>
           </div>
+        </div>
+      </div>
+
+      {/* C. Cheat lanjutan (v45) */}
+      <div className="space-y-2.5 rounded-xl border border-violet-200 bg-violet-50/50 p-3 dark:border-violet-900/50 dark:bg-violet-950/20">
+        <p className="flex items-center gap-1.5 text-xs font-semibold text-violet-700 dark:text-violet-400">
+          <Wand2 className="size-3.5" aria-hidden="true" />
+          Cheat lanjutan (v45) — ilusi & otomasi berat
+        </p>
+
+        {/* 1 — Shadowban */}
+        <div className="flex items-center justify-between gap-3 rounded-lg border bg-background p-2.5">
+          <div className="min-w-0">
+            <p className="flex items-center gap-1.5 text-xs font-medium">
+              <EyeOff className="size-3.5" aria-hidden="true" />
+              Shadowban
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              Pesan dia tampak terkirim di sisinya, tapi tak pernah sampai ke
+              admin. Matikan → semua pesan bayangan terungkap.
+            </p>
+            {shadowCount > 0 ? (
+              <Badge className="mt-1 bg-amber-600 text-white">
+                {shadowCount} pesan bayangan tersembunyi
+              </Badge>
+            ) : null}
+          </div>
+          <Switch
+            checked={shadowban}
+            onCheckedChange={toggleShadowban}
+            aria-label="Aktifkan shadowban"
+          />
+        </div>
+
+        {/* 2 — Spoof suara (TTS) */}
+        <div className="space-y-1.5 rounded-lg border bg-background p-2.5">
+          <p className="flex items-center gap-1.5 text-xs font-medium">
+            <AudioLines className="size-3.5" aria-hidden="true" />
+            Suara palsu (TTS) sebagai {target.name}
+          </p>
+          <Textarea
+            value={voiceText}
+            onChange={(e) => setVoiceText(e.target.value)}
+            placeholder="Teks yang akan diucapkan… (maks 500 karakter)"
+            rows={2}
+            className="min-h-14 text-sm"
+            aria-label="Teks suara palsu"
+            maxLength={500}
+          />
+          <Button
+            size="sm"
+            className="h-8 w-full bg-violet-600 text-white hover:bg-violet-600/90"
+            onClick={sendVoice}
+            disabled={!voiceText.trim() || voiceBusy || !convId}
+          >
+            <AudioLines className="size-4" aria-hidden="true" />
+            {voiceBusy ? "Membuat suara…" : "Kirim pesan suara"}
+          </Button>
+        </div>
+
+        {/* 3 — Gambar AI atas nama user */}
+        <div className="space-y-1.5 rounded-lg border bg-background p-2.5">
+          <p className="flex items-center gap-1.5 text-xs font-medium">
+            <ImageIcon className="size-3.5" aria-hidden="true" />
+            Foto AI atas nama {target.name}
+          </p>
+          <div className="flex gap-2">
+            <Input
+              value={imagePrompt}
+              onChange={(e) => setImagePrompt(e.target.value)}
+              placeholder="Prompt gambar… mis. kucing oranye pakai topi"
+              className="h-9 text-xs"
+              maxLength={200}
+              aria-label="Prompt gambar AI"
+            />
+            <Button
+              size="sm"
+              className="h-9 shrink-0 bg-violet-600 text-white hover:bg-violet-600/90"
+              onClick={sendImageAi}
+              disabled={imagePrompt.trim().length < 3 || imageBusy || !convId}
+            >
+              <ImageIcon className="size-4" aria-hidden="true" />
+              {imageBusy ? "…" : "Buat"}
+            </Button>
+          </div>
+        </div>
+
+        {/* 4 — Flood injector */}
+        <div className="space-y-1.5 rounded-lg border bg-background p-2.5">
+          <p className="flex items-center gap-1.5 text-xs font-medium">
+            <Zap className="size-3.5" aria-hidden="true" />
+            Flood injector (simulasi spammer)
+          </p>
+          <Input
+            value={floodText}
+            onChange={(e) => setFloodText(e.target.value)}
+            placeholder="Teks yang dibanjirkan…"
+            className="h-9 text-xs"
+            maxLength={200}
+            aria-label="Teks flood"
+          />
+          <div className="flex items-end gap-2">
+            <div className="min-w-0 flex-1 space-y-1">
+              <Label className="text-[11px] text-muted-foreground">Jumlah (1–30)</Label>
+              <Input
+                type="number"
+                min={1}
+                max={30}
+                value={floodCount}
+                onChange={(e) => setFloodCount(e.target.value)}
+                className="h-9 text-xs"
+                aria-label="Jumlah pesan flood"
+              />
+            </div>
+            <div className="min-w-0 flex-1 space-y-1">
+              <Label className="text-[11px] text-muted-foreground">Jeda (ms, 250–5000)</Label>
+              <Select value={floodInterval} onValueChange={setFloodInterval}>
+                <SelectTrigger className="h-9 text-xs" aria-label="Jeda antar pesan">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="250">250 ms</SelectItem>
+                  <SelectItem value="500">500 ms</SelectItem>
+                  <SelectItem value="1000">1 detik</SelectItem>
+                  <SelectItem value="3000">3 detik</SelectItem>
+                  <SelectItem value="5000">5 detik</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <Button
+              size="sm"
+              className="h-9 shrink-0 bg-violet-600 text-white hover:bg-violet-600/90"
+              onClick={startFlood}
+              disabled={!floodText.trim() || !convId}
+            >
+              <Zap className="size-4" aria-hidden="true" />
+              Mulai
+            </Button>
+            <Button size="sm" variant="outline" className="h-9 shrink-0" onClick={stopFlood}>
+              Stop
+            </Button>
+          </div>
+        </div>
+
+        {/* 5 — Time warp massal */}
+        <div className="space-y-1.5 rounded-lg border bg-background p-2.5">
+          <p className="flex items-center gap-1.5 text-xs font-medium">
+            <Hourglass className="size-3.5" aria-hidden="true" />
+            Time warp — geser waktu SEMUA pesan dia (massal)
+          </p>
+          <div className="flex gap-2">
+            <Input
+              type="number"
+              value={warpHours}
+              onChange={(e) => setWarpHours(e.target.value)}
+              placeholder="mis. -72 (mundur 3 hari) atau 24"
+              className="h-9 text-xs"
+              aria-label="Pergeseran jam"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 shrink-0"
+              onClick={applyTimewarp}
+              disabled={!convId}
+            >
+              <Hourglass className="size-4" aria-hidden="true" />
+              Geser
+            </Button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Satuan jam (−2160 sampai +2160). Negatif = mundur ke masa lalu.
+          </p>
+        </div>
+
+        {/* 6 — Auto-reply atas nama user */}
+        <div className="space-y-1.5 rounded-lg border bg-background p-2.5">
+          <div className="flex items-center justify-between gap-3">
+            <p className="flex items-center gap-1.5 text-xs font-medium">
+              <Reply className="size-3.5" aria-hidden="true" />
+              Auto-reply atas nama {target.name}
+            </p>
+            <Switch
+              checked={autoReplyOn}
+              onCheckedChange={saveAutoReply}
+              aria-label="Aktifkan auto-reply user"
+            />
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Saat admin mengirim pesan, dia membalas otomatis (kebalikan bot v39).
+          </p>
+          <Textarea
+            value={autoReplyText}
+            onChange={(e) => setAutoReplyText(e.target.value)}
+            placeholder="Teks balasan otomatis… (maks 300 karakter)"
+            rows={2}
+            className="min-h-14 text-sm"
+            aria-label="Teks balasan otomatis user"
+            maxLength={300}
+          />
+          <div className="flex items-end gap-2">
+            <div className="min-w-0 flex-1 space-y-1">
+              <Label className="text-[11px] text-muted-foreground">Jeda balasan</Label>
+              <Select value={autoReplyDelay} onValueChange={setAutoReplyDelay}>
+                <SelectTrigger className="h-9 text-xs" aria-label="Jeda balasan otomatis">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="0">Langsung</SelectItem>
+                  <SelectItem value="3">3 detik</SelectItem>
+                  <SelectItem value="10">10 detik</SelectItem>
+                  <SelectItem value="30">30 detik</SelectItem>
+                  <SelectItem value="60">1 menit</SelectItem>
+                  <SelectItem value="120">2 menit</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 shrink-0"
+              onClick={() => saveAutoReply(autoReplyOn)}
+            >
+              Simpan teks
+            </Button>
+          </div>
+        </div>
+
+        {/* 7 — Throttle pesan */}
+        <div className="space-y-1.5 rounded-lg border bg-background p-2.5">
+          <p className="flex items-center gap-1.5 text-xs font-medium">
+            <Gauge className="size-3.5" aria-hidden="true" />
+            Throttle pesan — tunda pengiriman ke admin
+          </p>
+          <div className="flex items-end gap-2">
+            <div className="min-w-0 flex-1 space-y-1">
+              <Label className="text-[11px] text-muted-foreground">
+                Jeda sisi admin (0 = mati{throttleSec > 0 ? ` · aktif ${throttleSec} dtk` : ""})
+              </Label>
+              <Select value={throttlePick} onValueChange={setThrottlePick}>
+                <SelectTrigger className="h-9 text-xs" aria-label="Jeda throttle">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="0">Mati (instan)</SelectItem>
+                  <SelectItem value="5">5 detik</SelectItem>
+                  <SelectItem value="15">15 detik</SelectItem>
+                  <SelectItem value="30">30 detik</SelectItem>
+                  <SelectItem value="60">1 menit</SelectItem>
+                  <SelectItem value="300">5 menit</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 shrink-0"
+              onClick={applyThrottle}
+              disabled={!convId}
+            >
+              <Gauge className="size-4" aria-hidden="true" />
+              Terapkan
+            </Button>
+          </div>
+        </div>
+
+        {/* 8 — Clone percakapan */}
+        <div className="space-y-1.5 rounded-lg border bg-background p-2.5">
+          <p className="flex items-center gap-1.5 text-xs font-medium">
+            <Copy className="size-3.5" aria-hidden="true" />
+            Salin/pindahkan percakapan ke user lain
+          </p>
+          <div className="flex items-end gap-2">
+            <div className="min-w-0 flex-1 space-y-1">
+              <Label className="text-[11px] text-muted-foreground">Target user</Label>
+              <Select value={cloneTarget} onValueChange={setCloneTarget}>
+                <SelectTrigger className="h-9 text-xs" aria-label="Target kloning">
+                  <SelectValue placeholder="Pilih user…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {partners
+                    .filter((p) => p.id !== target.id)
+                    .map((p) => (
+                      <SelectItem key={p.id} value={p.id}>
+                        {p.name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 shrink-0"
+              onClick={applyClone}
+              disabled={!cloneTarget || !convId}
+            >
+              <Copy className="size-4" aria-hidden="true" />
+              {cloneMove ? "Pindah" : "Salin"}
+            </Button>
+          </div>
+          <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={cloneMove}
+              onChange={(e) => setCloneMove(e.target.checked)}
+              className="size-3.5 accent-violet-600"
+            />
+            Mode pindah (pesan asal dihapus setelah disalin)
+          </label>
         </div>
       </div>
 

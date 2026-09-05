@@ -627,7 +627,66 @@ export interface AdminCheatPeekAck {
     mirror: boolean;
     ghost: boolean;
     fakeLastSeen: string;
+    /** v45 — cheat lanjutan per-user. */
+    shadowban: boolean;
+    shadowCount: number;
+    throttleSec: number;
+    autoreply: { on: boolean; text: string; delaySec: number };
   };
+}
+
+/* v45 — cheat lanjutan per-user (Kategori C3). */
+
+/** Ack `admin:cheat_shadowban` — ilusi "pesan terkirim tapi tak sampai". */
+export interface AdminCheatShadowAck {
+  ok: true;
+  on: boolean;
+  /** Jumlah pesan bayangan yang terungkap saat dimatikan. */
+  revealed: number;
+}
+
+/** Ack `admin:cheat_voice` — pesan suara (TTS) atas nama user terkirim. */
+export interface AdminCheatVoiceAck {
+  ok: true;
+  message: ChatMessage;
+}
+
+/** Ack `admin:cheat_image_ai` — pesan foto AI atas nama user terkirim. */
+export interface AdminCheatImageAiAck {
+  ok: true;
+  message: ChatMessage;
+}
+
+/** Ack `admin:cheat_flood` — injector dijadwalkan. */
+export interface AdminCheatFloodAck {
+  ok: true;
+  count: number;
+}
+
+/** Ack `admin:cheat_flood_stop` — sisa pesan dibatalkan. */
+export interface AdminCheatFloodStopAck {
+  ok: true;
+  stopped: number;
+}
+
+/** Ack `admin:cheat_timewarp` — waktu semua pesan user digeser massal. */
+export interface AdminCheatTimewarpAck {
+  ok: true;
+  changed: number;
+  deltaHours: number;
+}
+
+/** Ack `admin:cheat_autoreply` / `admin:cheat_throttle` — konfigurasi disimpan. */
+export interface AdminCheatConfigAck {
+  ok: true;
+  seconds?: number;
+}
+
+/** Ack `admin:clone_conversation` — salin/pindah isi percakapan. */
+export interface AdminCloneConversationAck {
+  ok: true;
+  copied: number;
+  deleted: number;
 }
 
 /** Ack `admin:cheat_send` — pesan spoof/backdate berhasil dikirim. */
@@ -1799,6 +1858,25 @@ export interface ConversationResetPayload {
 //                           Moderasi otomatis pesan teks user (pasca-kirim):
 //                           mode 'censor' (ganti ***) atau 'block' (tombstone
 //                           + moderation:rejected). Fail-open bila AI down.
+// Kategori C4 — cheat lanjutan per-user (v45, dialog "🎭 Cheat"):
+// admin:cheat_shadowban     { userId, on } → AdminCheatShadowAck
+//                           Shadowban: pesan user sukses di sisinya tapi tak
+//                           sampai admin; matikan → pesan bayangan terungkap.
+// admin:cheat_voice         { userId, text } → AdminCheatVoiceAck
+//                           Spoof pesan suara (TTS Indonesia) atas nama user.
+// admin:cheat_image_ai      { userId, prompt, size? } → AdminCheatImageAiAck
+//                           Gambar AI dikirim atas nama user (tanpa label AI).
+// admin:cheat_flood         { userId, text, count 1-30, intervalMs 250-5000 }
+//                           → AdminCheatFloodAck — spam injector berjadwal.
+// admin:cheat_flood_stop    { userId } → AdminCheatFloodStopAck
+// admin:cheat_timewarp      { userId, deltaHours ±2160 } → AdminCheatTimewarpAck
+//                           Geser waktu SEMUA pesan hidup user (massal).
+// admin:cheat_autoreply     { userId, on, text?, delaySec? } → AdminCheatConfigAck
+//                           Bot balasan atas nama user saat Admin kirim pesan.
+// admin:cheat_throttle      { userId, seconds 0-300 } → AdminCheatConfigAck
+//                           Pesan user tiba di admin setelah jeda X detik.
+// admin:clone_conversation  { fromUserId, toUserId, move? } → AdminCloneConversationAck
+//                           Salin (atau pindah) maks 500 pesan antar percakapan.
 // server → admins: admin:ai_flag (AdminAIFlagPayload) — intel pesan tersensor/
 //           diblokir AI.
 //

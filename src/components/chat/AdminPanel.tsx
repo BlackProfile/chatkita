@@ -4089,6 +4089,8 @@ export function AdminPanel() {
         onToggleTyping={() => {
           if (activeId) toggleFakeTyping(activeId);
         }}
+        /* v45 — daftar user utk fitur clone percakapan. */
+        partners={conversations.map((c) => ({ id: c.partner.id, name: c.partner.name }))}
       />
 
       {/* v38 — kontrol media PER-USER dari toolbar percakapan */}

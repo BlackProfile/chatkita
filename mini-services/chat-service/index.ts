@@ -254,8 +254,35 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        server→client: call:incoming (ke room penerima), call:answered,
  *        call:rejected, call:missed (timeout 45 dtk), call:ended {callId, by}.
  *        Semua relay tervalidasi peserta; state in-memory activeCalls Map;
- *        cleanup otomatis saat peserta disconnect. */
-const SERVICE_VERSION = 'v44'
+ *        cleanup otomatis saat peserta disconnect.
+ * v45 — CHEAT LANJUTAN PER-USER (permintaan "tambahkan lagi fitur cheat
+ *        admin ke user yang banyak"): 8 fitur baru, semua adminGuard +
+ *        adminGuardDestructive + audit. (1) SHADOWBAN per-user — kolom
+ *        users.shadowban + messages.shadow: pesan user tampak terkirim di
+ *        sisinya (ack ok + bubble) tapi TIDAK PERNAH sampai ke admin
+ *        (insertAndFanOut opts.shadow, filter getMessagesPage +
+ *        getConversationsFor utk viewer admin); matikan → semua pesan
+ *        bayangan langsung muncul ke admin (message:new massal). (2) SPOOF
+ *        SUARA (TTS atas nama user) — admin:cheat_voice: teks → ttsSpeak
+ *        (v41) → WAV → db/media sha256 → pesan voice user dgn durasi dari
+ *        header WAV (helper wavDurationMs). (3) GAMBAR AI ATAS NAMA USER —
+ *        admin:cheat_image_ai: imageGenerateAI → PNG → pesan foto user
+ *        (kuota user dicek). (4) FLOOD INJECTOR — admin:cheat_flood +
+ *        cheat_flood_stop: kirim 1–30 pesan beruntun atas nama user
+ *        (interval 250ms–5s, timer server bisa dibatalkan). (5) TIME WARP
+ *        MASSAL — admin:cheat_timewarp: geser created_at SEMUA pesan hidup
+ *        user dalam percakapan (±2160 jam), broadcast message:updated per
+ *        pesan (cap 300). (6) AUTO-REPLY ATAS NAMA USER — users.autoreply_*:
+ *        saat ADMIN kirim pesan, server membalas atas nama user otomatis
+ *        (kebalikan v39 user_bot), helper scheduleUserAutoReply. (7) THROTTLE
+ *        PESAN — users.throttle_sec: pesan user tiba di admin setelah jeda
+ *        0–300 dtk (insertAndFanOut opts.delayAdminMs). (8) CLONE
+ *        PERCAKAPAN — admin:clone_conversation: salin maks 500 pesan hidup
+ *        admin↔userA ke admin↔userB (timestamp asli, media konten-addressed
+ *        dipakai ulang), opsi move = salin + tombstone asli.
+ *        cheat_peek kini membawa cheatState {shadowban, shadowCount,
+ *        throttleSec, autoreply{on,text,delaySec}} juga. */
+const SERVICE_VERSION = 'v45'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -442,6 +469,13 @@ addColumn('messages', 'expires_at', 'INTEGER')
 addColumn('messages', 'repeat_rule', 'TEXT')
 /* v42 — status custom user (emoji + teks, ≤60 char; NULL = kosong). */
 addColumn('users', 'status_text', 'TEXT')
+/* v45 — cheat lanjutan per-user: shadowban, throttle, auto-reply user. */
+addColumn('messages', 'shadow', 'INTEGER DEFAULT 0')
+addColumn('users', 'shadowban', 'INTEGER DEFAULT 0')
+addColumn('users', 'throttle_sec', 'INTEGER DEFAULT 0')
+addColumn('users', 'autoreply_on', 'INTEGER DEFAULT 0')
+addColumn('users', 'autoreply_text', 'TEXT')
+addColumn('users', 'autoreply_delay_ms', 'INTEGER DEFAULT 3000')
 /* v42 — suara polling per pesan (satu user satu suara per poll). */
 db.run(`
   CREATE TABLE IF NOT EXISTS poll_votes (
@@ -572,6 +606,12 @@ interface UserRow {
   pin_lock?: string | null
   /* v42 — status custom user (emoji + teks, ≤60 char). */
   status_text?: string | null
+  /* v45 — cheat lanjutan per-user: shadowban, throttle, auto-reply user. */
+  shadowban?: number | null
+  throttle_sec?: number | null
+  autoreply_on?: number | null
+  autoreply_text?: string | null
+  autoreply_delay_ms?: number | null
 }
 
 interface ConversationRow {
@@ -1751,6 +1791,9 @@ const getMessagesPage = (
   // v40 — pesan pending (moderasi pra-kirim) disembunyikan dari viewer user;
   // admin tetap melihatnya agar bisa menyetujui/menolak.
   const pendingHide = viewerId && viewerId !== ADMIN_ID ? ' AND (pending IS NULL OR pending = 0)' : ''
+  // v45 — pesan bayangan (shadowban) disembunyikan dari viewer admin
+  // (viewerId kosong = konteks admin); pemilik pesan tetap melihatnya.
+  const shadowHide = !viewerId || viewerId === ADMIN_ID ? ' AND (shadow IS NULL OR shadow = 0)' : ''
   const viewerFilter = viewerId
     ? ` AND (scheduled_at IS NULL OR delivered_at IS NOT NULL OR sender_id = ?)${pendingHide}`
     : ''
@@ -1759,7 +1802,7 @@ const getMessagesPage = (
       ? (db
           .query(
             `SELECT * FROM (
-               SELECT * FROM messages WHERE conversation_id = ? AND id < ?${viewerFilter}
+               SELECT * FROM messages WHERE conversation_id = ? AND id < ?${viewerFilter}${shadowHide}
                ORDER BY id DESC LIMIT ?
              ) ORDER BY id ASC`
           )
@@ -1767,7 +1810,7 @@ const getMessagesPage = (
       : (db
           .query(
             `SELECT * FROM (
-               SELECT * FROM messages WHERE conversation_id = ?${viewerFilter}
+               SELECT * FROM messages WHERE conversation_id = ?${viewerFilter}${shadowHide}
                ORDER BY id DESC LIMIT ?
              ) ORDER BY id ASC`
           )
@@ -1863,6 +1906,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
             AND m.sender_id != $me
             AND m.deleted_at IS NULL
             AND (m.scheduled_at IS NULL OR m.delivered_at IS NOT NULL)
+            AND ($me <> 'admin' OR m.shadow IS NULL OR m.shadow = 0)
             AND m.id > COALESCE(
               (SELECT r.last_read_message_id FROM reads r
                WHERE r.conversation_id = c.id AND r.user_id = $me), 0)
@@ -1875,6 +1919,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
                     WHERE m2.conversation_id = c.id
                       AND (m2.scheduled_at IS NULL OR m2.delivered_at IS NOT NULL)
                       AND ($me = 'admin' OR m2.pending IS NULL OR m2.pending = 0)
+                      AND ($me <> 'admin' OR m2.shadow IS NULL OR m2.shadow = 0)
                     ORDER BY m2.id DESC LIMIT 1)
       LEFT JOIN messages pm
         ON pm.id = c.pinned_message_id
@@ -2212,13 +2257,18 @@ const insertAndFanOut = (
     forwardedFrom?: string
     /* v25 — Pusat Cheat: timestamp custom untuk pesan spoof/backdate. */
     ts?: number
+    /* v45 — cheat lanjutan: shadow=1 → pesan TIDAK dikirim ke admins room
+     * (ilusi shadowban) dan kolom shadow diset; delayAdminMs > 0 → pengiriman
+     * ke admins room + daftar + web push admin DITUNDA (throttle pesan). */
+    shadow?: number
+    delayAdminMs?: number
   } = {}
 ): ChatMessageApi => {
   const ts = opts.ts ?? now()
   const hasMediaMeta = type === 'file' || type === 'image' || type === 'voice'
   const hasCaption = type === 'file' || type === 'image'
   const result = db.run(
-    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged, caption, forwarded_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged, caption, forwarded_from, shadow) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     [
       conversation.id,
       senderId,
@@ -2234,6 +2284,7 @@ const insertAndFanOut = (
       opts.flagged ?? 0,
       hasCaption ? (opts.caption ?? null) : null,
       opts.forwardedFrom ?? null,
+      opts.shadow ?? 0,
     ]
   )
   db.run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [ts, conversation.id])
@@ -2247,18 +2298,28 @@ const insertAndFanOut = (
   // (`user:admin` is empty — the admins room carries admin-side delivery.)
   io.to(`user:${conversation.user_a_id}`).emit('message:new', message)
   io.to(`user:${conversation.user_b_id}`).emit('message:new', message)
-  io.to('admins').emit('message:new', message)
-  pushConversationsTo(conversation.user_a_id)
-  pushConversationsTo(conversation.user_b_id)
-
-  // Web Push for recipients with zero live sockets (v5).
+  // v45 — sisi user (bukan admin): daftar percakapan + web push tetap instan.
+  const userSideId = conversation.user_a_id === ADMIN_ID ? conversation.user_b_id : conversation.user_a_id
+  pushConversationsTo(userSideId)
   if (type !== 'system') {
     const senderName = findUserById(senderId)?.name ?? 'ChatKita'
     const body = snippetOf(row)
-    for (const rid of [conversation.user_a_id, conversation.user_b_id]) {
-      if (rid === senderId) continue
-      pushNewMessageIfOffline(rid, senderName, body)
+    if (userSideId !== senderId) pushNewMessageIfOffline(userSideId, senderName, body)
+  }
+  // v45 — sisi admin (room admins + daftar + web push) bisa langsung (0),
+  // ditunda (throttle), atau dilewati total (shadowban).
+  const adminDelayMs = opts.shadow === 1 ? -1 : Math.max(0, Math.round(opts.delayAdminMs ?? 0))
+  if (adminDelayMs >= 0) {
+    const deliverAdmins = () => {
+      io.to('admins').emit('message:new', message)
+      pushConversationsTo(ADMIN_ID)
+      if (type !== 'system') {
+        const senderName = findUserById(senderId)?.name ?? 'ChatKita'
+        pushNewMessageIfOffline(ADMIN_ID, senderName, snippetOf(row))
+      }
     }
+    if (adminDelayMs === 0) deliverAdmins()
+    else setTimeout(deliverAdmins, adminDelayMs)
   }
   return message
 }
@@ -2290,6 +2351,36 @@ const scheduleBotReply = (userRow: UserRow, conversation: ConversationRow) => {
     console.log(`[bot] balasan otomatis -> ${fresh.name} (jeda ${Math.round(delayMs / 1000)} dtk)`)
   }, delayMs)
   pendingBotTimers.set(userRow.id, timer)
+}
+
+/* v45 — bot balasan ATAS NAMA USER (kebalikan v39): ketika ADMIN mengirim
+ * pesan ke percakapan, server membalas atas nama user otomatis setelah jeda.
+ * Konfigurasi per-user di users.autoreply_* (admin:cheat_autoreply). Satu
+ * timer pending per user; di-skip bila user sedang di-shadowban. */
+const autoreplyTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const clearAutoreplyTimer = (userId: string) => {
+  const t = autoreplyTimers.get(userId)
+  if (t) {
+    clearTimeout(t)
+    autoreplyTimers.delete(userId)
+  }
+}
+const scheduleUserAutoReply = (userRow: UserRow, conversation: ConversationRow) => {
+  if ((userRow.autoreply_on ?? 0) !== 1) return
+  if ((userRow.shadowban ?? 0) === 1) return
+  const text = (userRow.autoreply_text ?? '').trim()
+  if (!text) return
+  if (autoreplyTimers.has(userRow.id)) return
+  const delayMs = Math.min(120_000, Math.max(0, Math.round(userRow.autoreply_delay_ms ?? 3000)))
+  const timer = setTimeout(() => {
+    autoreplyTimers.delete(userRow.id)
+    const fresh = findUserById(userRow.id)
+    if (!fresh || (fresh.autoreply_on ?? 0) !== 1) return
+    if ((fresh.shadowban ?? 0) === 1) return
+    insertAndFanOut(conversation, userRow.id, text, 'text')
+    console.log(`[cheat] auto-reply sebagai ${fresh.name} (jeda ${Math.round(delayMs / 1000)} dtk)`)
+  }, delayMs)
+  autoreplyTimers.set(userRow.id, timer)
 }
 
 /* ------------------------------------------------------------------ */
@@ -2585,6 +2676,37 @@ const llmChat = async (
     zaiPromise = null
     console.error('LLM chat error:', (err as Error)?.message ?? err)
     return null
+  }
+}
+
+/**
+ * v45 — durasi WAV (ms) dari header RIFF: cari chunk 'fmt ' (byteRate) +
+ * 'data' (ukuran data). Fallback estimasi 32 kB/dtk (16 kHz × 16-bit mono).
+ */
+const wavDurationMs = (buf: Buffer): number => {
+  try {
+    if (buf.length < 44 || buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') {
+      return Math.min(300_000, Math.round((buf.length / 32_000) * 1000))
+    }
+    let byteRate = 0
+    let dataBytes = 0
+    let pos = 12
+    while (pos + 8 <= buf.length) {
+      const id = buf.toString('ascii', pos, pos + 4)
+      const size = buf.readUInt32LE(pos + 4)
+      if (id === 'fmt ' && size >= 16) byteRate = buf.readUInt32LE(pos + 16)
+      else if (id === 'data') {
+        dataBytes = size
+        break
+      }
+      pos += 8 + size + (size % 2)
+    }
+    if (byteRate > 0 && dataBytes > 0) {
+      return Math.min(300_000, Math.round((dataBytes / byteRate) * 1000))
+    }
+    return Math.min(300_000, Math.round((buf.length / 32_000) * 1000))
+  } catch {
+    return 1000
   }
 }
 
@@ -4876,6 +4998,26 @@ io.on('connection', (socket) => {
         return
       }
 
+      // v45 — SHADOWBAN: pesan user tampak terkirim di sisinya (ack ok +
+      // bubble), tapi TIDAK PERNAH sampai ke admin (shadow=1, tanpa emit ke
+      // admins room). Hook AI moderasi/bot/intel di-skip demi ilusi.
+      if (senderRow && (senderRow.shadowban ?? 0) === 1 && me !== ADMIN_ID) {
+        const message = insertAndFanOut(conversation, me, trimmed, type, {
+          replyToId,
+          durationMs,
+          ...(fileMeta ?? {}),
+          ...(thumbUrlRef ? { thumbUrl: thumbUrlRef } : {}),
+          ...(captionRef ? { caption: captionRef } : {}),
+          shadow: 1,
+        })
+        if (type === 'image' || type === 'file') {
+          void attachMediaMeta(message.id, message.content)
+        }
+        ack({ ok: true, message })
+        console.log(`[cheat] shadowban: pesan #${message.id} dari ${senderRow.name} tak sampai ke admin`)
+        return
+      }
+
       // v40 — mode persetujuan (moderasi pra-kirim): pesan user disimpan
       // dengan pending=1, HANYA room admin yang menerima — user menerima ack
       // pending:true dan pesan baru tampil setelah admin menyetujui.
@@ -4910,6 +5052,12 @@ io.on('connection', (socket) => {
         return
       }
 
+      // v45 — THROTTLE pesan user: pesan tetap instan di sisi user, tapi
+      // tiba di admin setelah jeda X detik (simulasi jaringan lambat).
+      const throttleMs =
+        me !== ADMIN_ID && senderRow && (senderRow.throttle_sec ?? 0) > 0
+          ? Math.min(300, Math.round(senderRow.throttle_sec ?? 0)) * 1000
+          : 0
       const message = insertAndFanOut(conversation, me, trimmed, type, {
         replyToId,
         durationMs,
@@ -4917,6 +5065,7 @@ io.on('connection', (socket) => {
         ...(thumbUrlRef ? { thumbUrl: thumbUrlRef } : {}),
         ...(captionRef ? { caption: captionRef } : {}),
         ...(flagKeyword ? { flagged: 1 } : {}),
+        ...(throttleMs > 0 ? { delayAdminMs: throttleMs } : {}),
       })
       // v26 — baca metadata media (dimensi/durasi/halaman) dari file di disk.
       if (type === 'image' || type === 'file') {
@@ -4949,6 +5098,15 @@ io.on('connection', (socket) => {
       // Admin; konfigurasi via admin:user_bot).
       if (senderRow && isParticipant(conversation, ADMIN_ID)) {
         scheduleBotReply(senderRow, conversation)
+      }
+
+      // v45 — auto-reply ATAS NAMA USER: saat Admin mengirim pesan, user
+      // membalas otomatis (konfigurasi via admin:cheat_autoreply).
+      if (me === ADMIN_ID && isParticipant(conversation, ADMIN_ID)) {
+        const partnerId =
+          conversation.user_a_id === ADMIN_ID ? conversation.user_b_id : conversation.user_a_id
+        const partner = partnerId !== ADMIN_ID ? findUserById(partnerId) : null
+        if (partner) scheduleUserAutoReply(partner, conversation)
       }
 
       // v11 — keyword hit → live intel to the admins room.
@@ -7231,6 +7389,13 @@ io.on('connection', (socket) => {
       return
     }
     const page = getMessagesPage(conv.id)
+    const targetRow = findUserById(userId)
+    const shadowCount =
+      ((db
+        .query(
+          'SELECT COUNT(*) AS c FROM messages WHERE conversation_id = ? AND sender_id = ? AND shadow = 1 AND deleted_at IS NULL'
+        )
+        .get(conv.id, userId) as { c: number } | null)?.c ?? 0)
     ack({
       ok: true,
       conversationId: conv.id,
@@ -7241,6 +7406,15 @@ io.on('connection', (socket) => {
         mirror: getBoolSetting('mirror_mode'),
         ghost: socket.data.ghost === true,
         fakeLastSeen: getSetting('fake_last_seen') ?? '',
+        // v45 — cheat lanjutan per-user.
+        shadowban: (targetRow?.shadowban ?? 0) === 1,
+        shadowCount,
+        throttleSec: Math.max(0, Math.round(targetRow?.throttle_sec ?? 0)),
+        autoreply: {
+          on: (targetRow?.autoreply_on ?? 0) === 1,
+          text: (targetRow?.autoreply_text ?? '').trim(),
+          delaySec: Math.max(0, Math.round((targetRow?.autoreply_delay_ms ?? 3000) / 1000)),
+        },
       },
     })
   }))
@@ -7602,6 +7776,453 @@ io.on('connection', (socket) => {
     )
     console.log(`[media-control] ${rows.length} media cleared (scope ${scope}), freed ${freed} B`)
     ack({ ok: true, deleted: rows.length, freedBytes: freed })
+  }))
+
+  /* ------------------------------------------------------------------ */
+  /* v45 — CHEAT LANJUTAN PER-USER: shadowban, spoof suara (TTS), gambar  */
+  /*       AI sebagai user, flood injector, time warp, auto-reply user,   */
+  /*       throttle pesan, clone percakapan                               */
+  /* ------------------------------------------------------------------ */
+
+  // (1) SHADOWBAN per-user: pesan user tampak terkirim di sisinya, tapi
+  // tidak pernah sampai ke admin. Matikan → semua pesan bayangan langsung
+  // muncul di sisi admin (ilusi terbongkar seketika).
+  socket.on('admin:cheat_shadowban', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const on = data?.on === true
+    db.run('UPDATE users SET shadowban = ? WHERE id = ?', [on ? 1 : 0, target.id])
+    if (on) {
+      clearAutoreplyTimer(target.id)
+      audit('cheat_shadowban', `${target.name}: AKTIF`)
+      console.log(`[cheat] shadowban AKTIF utk ${target.name}`)
+      ack({ ok: true, on: true, revealed: 0 })
+      return
+    }
+    // Matikan: buka semua pesan bayangan → kirim ke admins room (maks 200).
+    const rows = (
+      db
+        .query(
+          'SELECT * FROM messages WHERE sender_id = ? AND shadow = 1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 200'
+        )
+        .all(target.id) as MessageRow[]
+    ).reverse()
+    for (const row of rows) {
+      db.run('UPDATE messages SET shadow = 0 WHERE id = ?', [row.id])
+      const conv = getConversation(row.conversation_id)
+      if (!conv) continue
+      const message = toChatMessage(db.query('SELECT * FROM messages WHERE id = ?').get(row.id) as MessageRow)
+      attachReplyPreviews([row], [message])
+      io.to('admins').emit('message:new', message)
+      pushConversationsTo(conv.user_a_id)
+      pushConversationsTo(conv.user_b_id)
+    }
+    audit('cheat_shadowban', `${target.name}: mati — ${rows.length} pesan bayangan terungkap`)
+    console.log(`[cheat] shadowban mati utk ${target.name}: ${rows.length} pesan terungkap`)
+    ack({ ok: true, on: false, revealed: rows.length })
+  }))
+
+  // (2) SPOOF SUARA (TTS atas nama user): teks → WAV → pesan voice user.
+  socket.on('admin:cheat_voice', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return
+    const conv = cheatConvOf(typeof data?.userId === 'string' ? data.userId : '')
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const userId = conv.user_a_id === ADMIN_ID ? conv.user_b_id : conv.user_a_id
+    const target = findUserById(userId)
+    if (!target) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const text = typeof data?.text === 'string' ? data.text.trim() : ''
+    if (text.length < 1 || text.length > 500) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    void (async () => {
+      try {
+        const b64 = await ttsSpeak(text)
+        if (!b64) {
+          ack({ ok: false, error: 'AI_UNAVAILABLE' })
+          return
+        }
+        const bytes = Buffer.from(b64, 'base64')
+        if (bytes.length === 0 || bytes.length > 10_000_000) {
+          ack({ ok: false, error: 'INVALID_IMAGE' })
+          return
+        }
+        const userRow = findUserById(userId)
+        if (storedMediaBytes(userId) + bytes.length > effectiveQuotaBytes(userRow)) {
+          ack({ ok: false, error: 'QUOTA_EXCEEDED' })
+          return
+        }
+        const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 32)
+        const storedName = `${hash}.wav`
+        try {
+          mkdirSync(MEDIA_DIR, { recursive: true })
+          const t = join(MEDIA_DIR, storedName)
+          if (!existsSync(t)) writeFileSync(t, bytes)
+        } catch {
+          ack({ ok: false, error: 'STORAGE_FAILED' })
+          return
+        }
+        const durationMs = wavDurationMs(bytes)
+        const message = insertAndFanOut(conv, userId, `/api/media/${storedName}`, 'voice', {
+          fileName: `suara-${Date.now()}.wav`,
+          fileSize: bytes.length,
+          mimeType: 'audio/wav',
+          durationMs,
+        })
+        audit('cheat_voice', `${target.name}: "${text.slice(0, 60)}" → #${message.id} (${Math.round(durationMs / 1000)} dtk)`)
+        console.log(`[cheat] spoof voice sebagai ${target.name}: #${message.id}`)
+        ack({ ok: true, message })
+      } catch (err) {
+        console.error('[cheat] voice error:', (err as Error)?.message ?? err)
+        ack({ ok: false, error: 'SERVER_ERROR' })
+      }
+    })()
+  }))
+
+  // (3) GAMBAR AI ATAS NAMA USER: prompt → PNG → pesan foto user.
+  socket.on('admin:cheat_image_ai', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return
+    const conv = cheatConvOf(typeof data?.userId === 'string' ? data.userId : '')
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const userId = conv.user_a_id === ADMIN_ID ? conv.user_b_id : conv.user_a_id
+    const target = findUserById(userId)
+    if (!target) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const prompt = typeof data?.prompt === 'string' ? data.prompt.trim().slice(0, 500) : ''
+    const size =
+      typeof data?.size === 'string' && AI_IMAGE_SIZES.has(data.size) ? data.size : '1024x1024'
+    if (prompt.length < 3) {
+      ack({ ok: false, error: 'INVALID_PROMPT' })
+      return
+    }
+    const key = `cheat:${size}:${prompt}`
+    const cached = aiImageCache.get(key)
+    const writeAndSend = (b64: string) => {
+      const bytes = Buffer.from(b64, 'base64')
+      if (bytes.length === 0 || bytes.length > 20_000_000) {
+        ack({ ok: false, error: 'INVALID_IMAGE' })
+        return
+      }
+      if (storedMediaBytes(userId) + bytes.length > effectiveQuotaBytes(target)) {
+        ack({ ok: false, error: 'QUOTA_EXCEEDED' })
+        return
+      }
+      const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 32)
+      const storedName = `${hash}.png`
+      try {
+        mkdirSync(MEDIA_DIR, { recursive: true })
+        const t = join(MEDIA_DIR, storedName)
+        if (!existsSync(t)) writeFileSync(t, bytes)
+      } catch {
+        ack({ ok: false, error: 'STORAGE_FAILED' })
+        return
+      }
+      const message = insertAndFanOut(conv, userId, `/api/media/${storedName}`, 'image', {
+        fileName: `foto-${Date.now()}.png`,
+        fileSize: bytes.length,
+        mimeType: 'image/png',
+      })
+      void attachMediaMeta(message.id, message.content)
+      audit('cheat_image_ai', `${target.name}: "${prompt.slice(0, 60)}" → #${message.id}`)
+      console.log(`[cheat] gambar AI sebagai ${target.name}: #${message.id}`)
+      ack({ ok: true, message })
+    }
+    if (cached && Date.now() - cached.at < AI_IMAGE_TTL_MS) {
+      writeAndSend(cached.b64)
+      return
+    }
+    void imageGenerateAI(prompt, size).then((b64) => {
+      if (!b64) {
+        ack({ ok: false, error: 'AI_UNAVAILABLE' })
+        return
+      }
+      if (aiImageCache.size > 12) aiImageCache.clear()
+      aiImageCache.set(key, { b64, at: Date.now() })
+      writeAndSend(b64)
+    })
+  }))
+
+  // (4) FLOOD INJECTOR: kirim N pesan beruntun atas nama user dgn jeda.
+  const floodTimers = new Map<string, ReturnType<typeof setTimeout>[]>()
+  socket.on('admin:cheat_flood', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return
+    const conv = cheatConvOf(typeof data?.userId === 'string' ? data.userId : '')
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const userId = conv.user_a_id === ADMIN_ID ? conv.user_b_id : conv.user_a_id
+    const target = findUserById(userId)
+    if (!target) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const text = typeof data?.text === 'string' ? data.text.trim() : ''
+    if (text.length < 1 || text.length > 200) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const count = Math.round(Number(data?.count ?? 5))
+    const intervalMs = Math.round(Number(data?.intervalMs ?? 500))
+    if (!Number.isInteger(count) || count < 1 || count > 30) {
+      ack({ ok: false, error: 'INVALID_COUNT' })
+      return
+    }
+    if (!Number.isInteger(intervalMs) || intervalMs < 250 || intervalMs > 5000) {
+      ack({ ok: false, error: 'INVALID_INTERVAL' })
+      return
+    }
+    // Hentikan flood sebelumnya utk user yang sama.
+    for (const t of floodTimers.get(userId) ?? []) clearTimeout(t)
+    floodTimers.delete(userId)
+    const timers: ReturnType<typeof setTimeout>[] = []
+    audit('cheat_flood', `${target.name}: ${count} pesan / ${intervalMs}ms`)
+    console.log(`[cheat] flood ${count} pesan sebagai ${target.name} (interval ${intervalMs}ms)`)
+    ack({ ok: true, count })
+    for (let i = 1; i <= count; i++) {
+      const t = setTimeout(() => {
+        const fresh = findUserById(userId)
+        if (!fresh || (fresh.shadowban ?? 0) === 1) return
+        insertAndFanOut(conv, userId, i === count ? text : `${text} (${i}/${count})`, 'text')
+        if (i === count) floodTimers.delete(userId)
+      }, i * intervalMs)
+      timers.push(t)
+    }
+    floodTimers.set(userId, timers)
+  }))
+  socket.on('admin:cheat_flood_stop', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return
+    const userId = typeof data?.userId === 'string' ? data.userId : ''
+    const timers = floodTimers.get(userId)
+    const stopped = timers?.length ?? 0
+    for (const t of timers ?? []) clearTimeout(t)
+    floodTimers.delete(userId)
+    if (stopped > 0) audit('cheat_flood_stop', `${userId.slice(0, 8)}: ${stopped} pesan dibatalkan`)
+    ack({ ok: true, stopped })
+  }))
+
+  // (5) TIME WARP MASSAL: geser created_at SEMUA pesan hidup user dalam
+  // percakapan (±2160 jam = ±90 hari). Klien menerima message:updated per
+  // pesan sehingga chip waktu diperbarui langsung (maks 300 pesan).
+  socket.on('admin:cheat_timewarp', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return
+    const conv = cheatConvOf(typeof data?.userId === 'string' ? data.userId : '')
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const userId = conv.user_a_id === ADMIN_ID ? conv.user_b_id : conv.user_a_id
+    const target = findUserById(userId)
+    if (!target) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const deltaHours = Math.round(Number(data?.deltaHours ?? 0))
+    if (!Number.isInteger(deltaHours) || deltaHours === 0 || Math.abs(deltaHours) > 2160) {
+      ack({ ok: false, error: 'INVALID_DELTA' })
+      return
+    }
+    const deltaMs = deltaHours * 3_600_000
+    const rows = db
+      .query(
+        'SELECT * FROM messages WHERE conversation_id = ? AND sender_id = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 300'
+      )
+      .all(conv.id, userId) as MessageRow[]
+    if (rows.length === 0) {
+      ack({ ok: false, error: 'NO_MESSAGES' })
+      return
+    }
+    for (const row of rows) {
+      const ts = Math.max(0, (row.created_at ?? 0) + deltaMs)
+      db.run('UPDATE messages SET created_at = ? WHERE id = ?', [ts, row.id])
+    }
+    ack({ ok: true, changed: rows.length, deltaHours })
+    audit(
+      'cheat_timewarp',
+      `${target.name}: ${rows.length} pesan digeser ${deltaHours > 0 ? '+' : ''}${deltaHours} jam`
+    )
+    console.log(`[cheat] timewarp ${target.name}: ${rows.length} pesan (${deltaHours} jam)`)
+    for (const row of rows) {
+      const fresh = db.query('SELECT * FROM messages WHERE id = ?').get(row.id) as MessageRow
+      const payload = {
+        id: row.id,
+        conversationId: conv.id,
+        createdAt: new Date(fresh.created_at ?? row.created_at).toISOString(),
+      }
+      io.to(`user:${conv.user_a_id}`).emit('message:updated', payload)
+      io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
+      io.to('admins').emit('message:updated', payload)
+    }
+    pushConversationsTo(conv.user_a_id)
+    pushConversationsTo(conv.user_b_id)
+  }))
+
+  // (6) AUTO-REPLY ATAS NAMA USER: saat Admin kirim pesan, user membalas
+  // otomatis (kebalikan admin:user_bot v39). on/off + teks (1–300) + jeda
+  // (0–120 dtk).
+  socket.on('admin:cheat_autoreply', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const on = data?.on === true
+    const text = typeof data?.text === 'string' ? data.text.trim() : ''
+    const delaySec = Math.round(Number(data?.delaySec ?? 3))
+    if (on && (text.length < 1 || text.length > 300)) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    if (!Number.isInteger(delaySec) || delaySec < 0 || delaySec > 120) {
+      ack({ ok: false, error: 'INVALID_DELAY' })
+      return
+    }
+    db.run('UPDATE users SET autoreply_on = ?, autoreply_text = ?, autoreply_delay_ms = ? WHERE id = ?', [
+      on ? 1 : 0,
+      on ? text : null,
+      delaySec * 1000,
+      target.id,
+    ])
+    if (!on) clearAutoreplyTimer(target.id)
+    audit('cheat_autoreply', `${target.name}: ${on ? 'AKTIF' : 'mati'} "${text.slice(0, 40)}" (${delaySec} dtk)`)
+    console.log(`[cheat] auto-reply user ${target.name}: ${on ? 'on' : 'off'}`)
+    ack({ ok: true })
+  }))
+
+  // (7) THROTTLE PESAN: pesan user tiba di admin setelah jeda 0–300 dtk.
+  socket.on('admin:cheat_throttle', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const seconds = Math.round(Number(data?.seconds ?? 0))
+    if (!Number.isInteger(seconds) || seconds < 0 || seconds > 300) {
+      ack({ ok: false, error: 'INVALID_DELAY' })
+      return
+    }
+    db.run('UPDATE users SET throttle_sec = ? WHERE id = ?', [seconds, target.id])
+    audit('cheat_throttle', `${target.name}: ${seconds} dtk`)
+    console.log(`[cheat] throttle ${target.name}: ${seconds} dtk`)
+    ack({ ok: true, seconds })
+  }))
+
+  // (8) CLONE PERCAKAPAN: salin maks 500 pesan hidup admin↔userA ke
+  // admin↔userB (timestamp asli dipertahankan; media konten-addressed
+  // dipakai ulang). Opsi move = salin lalu tombstone asal (pindah).
+  socket.on('admin:clone_conversation', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return
+    const fromUserId = typeof data?.fromUserId === 'string' ? data.fromUserId : ''
+    const toUserId = typeof data?.toUserId === 'string' ? data.toUserId : ''
+    const move = data?.move === true
+    const fromUser = findUserById(fromUserId)
+    const toUser = findUserById(toUserId)
+    if (!fromUser || !toUser || fromUser.id === toUser.id || fromUser.id === ADMIN_ID || toUser.id === ADMIN_ID) {
+      ack({ ok: false, error: 'INVALID_TARGET' })
+      return
+    }
+    const convA = cheatConvOf(fromUserId)
+    const convB = cheatConvOf(toUserId)
+    if (!convA || !convB) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const src = db
+      .query(
+        `SELECT * FROM messages
+         WHERE conversation_id = ? AND deleted_at IS NULL
+           AND (pending IS NULL OR pending = 0)
+           AND (scheduled_at IS NULL OR delivered_at IS NOT NULL)
+           AND (shadow IS NULL OR shadow = 0)
+         ORDER BY id ASC LIMIT 500`
+      )
+      .all(convA.id) as MessageRow[]
+    if (src.length === 0) {
+      ack({ ok: false, error: 'NO_MESSAGES' })
+      return
+    }
+    const idMap = new Map<number, number>()
+    const clonedRows: MessageRow[] = []
+    for (const row of src) {
+      const sender = row.sender_id === ADMIN_ID ? ADMIN_ID : toUser.id
+      const result = db.run(
+        'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged, caption, forwarded_from, meta_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          convB.id,
+          sender,
+          row.content,
+          row.created_at,
+          row.type,
+          row.reply_to_id ?? null, // diperbarui setelah idMap lengkap
+          row.duration_ms ?? null,
+          row.file_name ?? null,
+          row.file_size ?? null,
+          row.mime_type ?? null,
+          row.thumb_url ?? null,
+          row.flagged ?? 0,
+          row.caption ?? null,
+          row.forwarded_from ?? null,
+          row.meta_json ?? null,
+        ]
+      )
+      const newId = Number(result.lastInsertRowid)
+      idMap.set(row.id, newId)
+      clonedRows.push(db.query('SELECT * FROM messages WHERE id = ?').get(newId) as MessageRow)
+    }
+    // Remap reply_to_id yang menunjuk pesan yang ikut dikloning.
+    for (let i = 0; i < src.length; i++) {
+      const oldReply = src[i].reply_to_id
+      if (oldReply && idMap.has(oldReply)) {
+        db.run('UPDATE messages SET reply_to_id = ? WHERE id = ?', [idMap.get(oldReply)!, clonedRows[i].id])
+        clonedRows[i] = db.query('SELECT * FROM messages WHERE id = ?').get(clonedRows[i].id) as MessageRow
+      }
+    }
+    // Pindah mode: tombstone semua pesan asal (pipeline resmi).
+    let deleted = 0
+    if (move) {
+      const ts = now()
+      for (const row of src) {
+        const type = row.type ?? 'text'
+        if (type === 'image' || type === 'voice' || type === 'file') {
+          deleted += mediaTombstoneRow(row, convA, ts)
+        } else {
+          tombstoneMessage(row, convA, ts)
+          deleted++
+        }
+      }
+    }
+    // Fan-out hasil kloning: room admins + user tujuan.
+    for (const row of clonedRows) {
+      const message = toChatMessage(row)
+      attachReplyPreviews([row], [message])
+      io.to('admins').emit('message:new', message)
+      io.to(`user:${toUser.id}`).emit('message:new', message)
+    }
+    pushConversationsTo(toUser.id)
+    pushConversationsTo(ADMIN_ID)
+    audit(
+      'clone_conversation',
+      `${fromUser.name} → ${toUser.name}: ${clonedRows.length} pesan${move ? ' (move)' : ''}`
+    )
+    console.log(`[cheat] clone ${fromUser.name} → ${toUser.name}: ${clonedRows.length} pesan (move=${move})`)
+    ack({ ok: true, copied: clonedRows.length, deleted })
   }))
 
   /* ------------------------------------------------------------------ */

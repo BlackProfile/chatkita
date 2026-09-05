@@ -260,6 +260,21 @@
 - **E2E**: signaling via skrip socket 18/18 ✓ (ring→incoming→accept→answered→offer→answer_sdp→ICE dua arah→BUSY dua arah→end→ended→state bersih→reject path); UI: tombol call tampil, overlay "Memanggil…" dengan avatar peer + tombol akhiri bekerja (overlay tertutup), console 0 error. Catatan: media P2P butuh 2 browser asli dgn izin kamera/mikrofon — sandbox headless diuji sampai lapisan signaling + UI.
 - Verifikasi: verify-integrity seksi "v44" (16 cek; 2 cek versi v43 dipindah, total 316). Lint 0/0.
 
+### v45 — Cheat Lanjutan Per-User (Task 60-e)
+- **Permintaan**: "tambahkan lagi fitur cheat admin ke user yang banyak" → 8 fitur cheat baru per-user, semuanya di dialog **"🎭 Cheat"** (toolbar percakapan admin) seksi "Cheat lanjutan (v45)".
+- **Server — 9 event baru (semua adminGuard + adminGuardDestructive + audit) + migrasi 6 kolom** (`messages.shadow`, `users.shadowban/throttle_sec/autoreply_on/autoreply_text/autoreply_delay_ms`):
+  1. `admin:cheat_shadowban {userId, on}` — **shadowban**: pesan user tampak terkirim di sisinya (ack ok + bubble) tapi TIDAK PERNAH sampai ke admin (insert via `insertAndFanOut` opts `shadow:1` — tanpa emit ke admins room; hook AI moderasi/bot/intel di-skip). Matikan → semua pesan bayangan (maks 200 terbaru) langsung muncul ke admin via `message:new` massal. Filter `getMessagesPage` (shadowHide utk viewer admin) + `getConversationsFor` (last message + unread admin) → admin benar-benar buta selama aktif.
+  2. `admin:cheat_voice {userId, text}` — **spoof suara (TTS)**: teks → `ttsSpeak` (v41) → WAV → db/media (sha256, dedup) → pesan voice ATAS NAMA USER dgn durasi dari header RIFF (`wavDurationMs`, fallback estimasi 32 kB/dtk); kuota user dicek.
+  3. `admin:cheat_image_ai {userId, prompt, size?}` — **gambar AI atas nama user**: `imageGenerateAI` (cache 15 mnt, key `cheat:size:prompt`) → PNG → pesan foto user TANPA label AI (ilusi murni); kuota user dicek.
+  4. `admin:cheat_flood {userId, text, count 1-30, intervalMs 250-5000}` + `admin:cheat_flood_stop` — **flood injector**: timer server kirim N pesan beruntun atas nama user ("teks (i/N)"), bisa dihentikan; skip bila user di-shadowban.
+  5. `admin:cheat_timewarp {userId, deltaHours ±2160}` — **time warp massal**: geser `created_at` SEMUA pesan hidup user dalam percakapan (maks 300), broadcast `message:updated` per pesan (chip waktu ikut berganti).
+  6. `admin:cheat_autoreply {userId, on, text, delaySec 0-120}` — **auto-reply ATAS NAMA USER**: saat ADMIN mengirim pesan, server membalas otomatis atas nama user (`scheduleUserAutoReply` — kebalikan `admin:user_bot` v39); satu timer pending per user; skip bila shadowban aktif.
+  7. `admin:cheat_throttle {userId, seconds 0-300}` — **throttle pesan**: pesan user instan di sisinya, tiba di admin setelah jeda (`insertAndFanOut` opts `delayAdminMs` — room admins + daftar + web push admin ditunda).
+  8. `admin:clone_conversation {fromUserId, toUserId, move?}` — **clone percakapan**: salin maks 500 pesan hidup admin↔userA → admin↔userB (timestamp asli, media konten-addressed dipakai ulang, reply remapped, meta_json/poll ikut), fan-out `message:new` ke admins + user tujuan; `move: true` = salin + tombstone asal (pipeline resmi + bebaskan media).
+- **insertAndFanOut** kini menerima `shadow` (skip sisi admin total) & `delayAdminMs` (tunda sisi admin); pengiriman sisi user (room, daftar, web push) tetap instan. `admin:cheat_peek` cheatState diperluas: `shadowban`, `shadowCount`, `throttleSec`, `autoreply {on,text,delaySec}`.
+- **Klien**: user-cheat-dialog.tsx seksi "Cheat lanjutan (v45)" — Switch shadowban + badge jumlah pesan bayangan, form suara TTS (loading), prompt foto AI, flood (jumlah + jeda Select + Mulai/Stop), time warp (input jam ±), auto-reply (Switch + teks + jeda Select), throttle (Select 0–300 dtk), clone (Select target dari prop `partners` baru dari AdminPanel + checkbox mode pindah). chat-types: cheatState diperluas + 8 ack baru (Kategori C4).
+- Verifikasi: verify-integrity seksi "v45" (29 cek; 2 cek versi v44 dipindah, total 345). Lint 0/0.
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 
