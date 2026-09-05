@@ -22,6 +22,7 @@ import {
   MoreVertical,
   Music,
   Paperclip,
+  Phone,
   Pin,
   Plus,
   RotateCcw,
@@ -33,6 +34,7 @@ import {
   Sun,
   Trash2,
   Type,
+  Video,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -84,6 +86,12 @@ import { Label } from "@/components/ui/label";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import { PollCreateDialog } from "@/components/chat/poll-create-dialog";
+import {
+  CallOverlay,
+  formatCallDuration,
+  useWebRTC,
+  type CallState,
+} from "@/components/chat/call-overlay"; // v44 — call suara/video WebRTC
 import { useVoiceRecorder } from "@/hooks/use-voice-recorder";
 import { createChatSocket } from "@/lib/chat-socket";
 import { playBlip } from "@/lib/chat-notify";
@@ -99,6 +107,14 @@ import {
   type AppSettings,
   type AppSettingsUpdatePayload,
   type ArchiveSelfAck,
+  type CallAnswerAck,
+  type CallAnsweredPayload,
+  type CallEndedPayload,
+  type CallIncomingPayload,
+  type CallMedia,
+  type CallMissedPayload,
+  type CallRejectedPayload,
+  type CallRingAck,
   type ChatErrorAck,
   type ChatErrorCode,
   type ChatMessage,
@@ -157,6 +173,9 @@ interface StoredUser {
   userId: string;
   name: string;
 }
+
+/** v44 — tipe objek yang dikembalikan hook useWebRTC (call-overlay). */
+type WebRTCHook = ReturnType<typeof useWebRTC>;
 
 /** Read (and validate) the persisted login. Client-side only. */
 function readStoredUser(): StoredUser | null {
@@ -666,6 +685,25 @@ export function Messenger() {
   const [selfArchived, setSelfArchived] = useState(false);
   const { resolvedTheme, setTheme } = useTheme();
 
+  /* v44 — call suara/video WebRTC: satu state call + timer durasi mm:ss. */
+  const [call, setCall] = useState<CallState | null>(null);
+  const [callElapsed, setCallElapsed] = useState(0);
+  const callRef = useRef<CallState | null>(null);
+  const callDismissRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  /** Handler call terbaru utk listener socket (terdaftar sekali per epoch). */
+  const callHandlersRef = useRef({
+    startCall: (_media: CallMedia) => {},
+    acceptCall: () => {},
+    rejectCall: () => {},
+    endCall: () => {},
+    finishCall: () => {},
+  });
+  /** Instance hook WebRTC terbaru (dibaca listener socket & handler). */
+  const webrtcRef = useRef<WebRTCHook | null>(null);
+
   /** Bumped on logout to tear down + recreate the socket (fresh rooms). */
   const [epoch, setEpoch] = useState(0);
 
@@ -687,6 +725,46 @@ export function Messenger() {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  // v44 — cermin state call + instance hook WebRTC utk listener socket.
+  useEffect(() => {
+    callRef.current = call;
+  }, [call]);
+  useEffect(() => {
+    webrtcRef.current = webrtc;
+  });
+
+  /* v44 — hook WebRTC: fungsi kirim sinyal via socket (media P2P langsung). */
+  const webrtc = useWebRTC({
+    remoteVideoRef,
+    localVideoRef,
+    remoteAudioRef,
+    sendOffer: (sdp) => {
+      const c = callRef.current;
+      if (c) socketRef.current?.emit("call:offer", { callId: c.callId, sdp });
+    },
+    sendAnswer: (sdp) => {
+      const c = callRef.current;
+      if (c) socketRef.current?.emit("call:answer_sdp", { callId: c.callId, sdp });
+    },
+    sendIce: (candidate) => {
+      const c = callRef.current;
+      if (c) socketRef.current?.emit("call:ice", { callId: c.callId, candidate });
+    },
+    onConnected: () => {
+      // ICE tersambung → fase aktif (timer durasi jalan via effect call?.phase).
+      setCall((c) =>
+        c && c.phase !== "active" && c.phase !== "ended" ? { ...c, phase: "active" } : c
+      );
+    },
+    onMediaError: (message) => {
+      // Izin kamera/mikrofon ditolak dsb — akhiri call + beri tahu lawan.
+      const c = callRef.current;
+      toast.error(message);
+      if (c) socketRef.current?.emit("call:end", { callId: c.callId });
+      callHandlersRef.current.finishCall();
+    },
+  });
 
   const recorder = useVoiceRecorder();
 
@@ -1040,6 +1118,57 @@ export function Messenger() {
         );
       }
     );
+
+    // v44 — signaling call WebRTC (handler di callHandlersRef/webrtcRef —
+    // listener terdaftar sekali per epoch; media P2P tidak lewat socket).
+    socket.on("call:incoming", (p: CallIncomingPayload) => {
+      if (callRef.current) {
+        // Sudah ada call aktif — tolak otomatis supaya tidak overlay dobel.
+        socket.emit("call:answer", { callId: p.callId, accept: false });
+        return;
+      }
+      setCall({
+        callId: p.callId,
+        role: "callee",
+        peer: p.from,
+        media: p.media,
+        phase: "ringing",
+      });
+      setCallElapsed(0);
+    });
+    socket.on("call:answered", (p: CallAnsweredPayload) => {
+      const c = callRef.current;
+      if (!c || c.callId !== p.callId || c.role !== "caller") return;
+      setCall((prev) => (prev ? { ...prev, phase: "connecting" } : prev));
+      void webrtcRef.current?.beginCaller(p.media);
+    });
+    socket.on("call:offer", (p: { callId: string; sdp: string }) => {
+      if (callRef.current?.callId !== p.callId) return;
+      void webrtcRef.current?.handleOffer(p.sdp);
+    });
+    socket.on("call:answer_sdp", (p: { callId: string; sdp: string }) => {
+      if (callRef.current?.callId !== p.callId) return;
+      void webrtcRef.current?.handleAnswer(p.sdp);
+    });
+    socket.on("call:ice", (p: { callId: string; candidate: string }) => {
+      if (callRef.current?.callId !== p.callId) return;
+      void webrtcRef.current?.handleIce(p.candidate);
+    });
+    socket.on("call:ended", (p: CallEndedPayload) => {
+      if (callRef.current?.callId !== p.callId) return;
+      callHandlersRef.current.finishCall();
+      toast.info("Panggilan berakhir");
+    });
+    socket.on("call:missed", (p: CallMissedPayload) => {
+      if (callRef.current?.callId !== p.callId) return;
+      callHandlersRef.current.finishCall();
+      toast.info("Panggilan tidak dijawab");
+    });
+    socket.on("call:rejected", (p: CallRejectedPayload) => {
+      if (callRef.current?.callId !== p.callId) return;
+      callHandlersRef.current.finishCall();
+      toast.info("Panggilan ditolak");
+    });
 
     // Returning to the tab clears the unread title badge.
     const onVisible = () => {
@@ -1926,6 +2055,113 @@ export function Messenger() {
   };
 
   /* ---------------------------------------------------------------- */
+  /* v44 — aksi call suara/video (WebRTC)                              */
+  /* (didefinisikan SEBELUM early-return layar login agar hook di bawah */
+  /*  tidak menjadi conditional — aturan rules-of-hooks)                */
+  /* ---------------------------------------------------------------- */
+  /** Matikan timer durasi + tutup overlay call (tanpa emit). */
+  const finishCall = () => {
+    if (callDismissRef.current) clearTimeout(callDismissRef.current);
+    callDismissRef.current = null;
+    webrtcRef.current?.stop();
+    setCallElapsed(0);
+    setCall(null);
+  };
+  /** Mulai call ke admin (penelepon) — dilarang saat akun dibatasi. */
+  const startCall = (media: CallMedia) => {
+    const sock = socketRef.current;
+    if (!sock || !partner) return;
+    if (restricted?.frozen || mutedActive) {
+      // Akun dibekukan/dibisukan admin → tidak boleh memanggil.
+      toast.error(
+        restricted?.frozen
+          ? "Akun dibekukan admin — tidak bisa memanggil"
+          : "Akun dibisukan admin — tidak bisa memanggil"
+      );
+      return;
+    }
+    if (callRef.current) {
+      toast.error("Masih ada panggilan aktif");
+      return;
+    }
+    sock.emit(
+      "call:ring",
+      { toUserId: partner.id, media },
+      (res: AckOf<CallRingAck>) => {
+        if (res.ok && res.callId) {
+          setCall({
+            callId: res.callId,
+            role: "caller",
+            peer: { id: partner.id, name: partner.name },
+            media,
+            phase: "outgoing",
+          });
+        } else if (res.error === "BUSY") {
+          toast.error("Lawan sedang dalam panggilan lain");
+        } else {
+          toast.error("Gagal memulai panggilan");
+        }
+      }
+    );
+  };
+  /** Callee menerima: siapkan media dulu (dialog izin), lalu jawab ring. */
+  const acceptCall = async () => {
+    const c = callRef.current;
+    const sock = socketRef.current;
+    if (!c || !sock) return;
+    const ok = (await webrtcRef.current?.beginCallee(c.media)) ?? false;
+    if (!ok) return; // onMediaError sudah menutup call + toast
+    sock.emit(
+      "call:answer",
+      { callId: c.callId, accept: true },
+      (res: AckOf<CallAnswerAck>) => {
+        if (!res.ok) {
+          finishCall();
+          toast.error("Panggilan tidak bisa diterima");
+          return;
+        }
+        setCall((prev) => (prev ? { ...prev, phase: "connecting" } : prev));
+      }
+    );
+  };
+  /** Callee menolak call masuk. */
+  const rejectCall = () => {
+    const c = callRef.current;
+    if (!c) return;
+    socketRef.current?.emit("call:answer", { callId: c.callId, accept: false });
+    finishCall();
+  };
+  /** Lokal mengakhiri: emit call:end → fase 'ended' singkat → tutup. */
+  const endCall = () => {
+    const c = callRef.current;
+    if (!c || c.phase === "ended") return;
+    socketRef.current?.emit("call:end", { callId: c.callId });
+    webrtcRef.current?.stop();
+    setCall((prev) => (prev ? { ...prev, phase: "ended" } : prev));
+    if (callDismissRef.current) clearTimeout(callDismissRef.current);
+    callDismissRef.current = setTimeout(() => {
+      callDismissRef.current = null;
+      finishCall();
+    }, 1200);
+  };
+  // latest-ref: listener socket (terdaftar di effect epoch) memakai versi terbaru.
+  useEffect(() => {
+    callHandlersRef.current = { startCall, acceptCall, rejectCall, endCall, finishCall };
+  });
+
+  // v44 — timer durasi call (mm:ss) berjalan hanya saat fase aktif.
+  useEffect(() => {
+    if (call?.phase !== "active") return;
+    const startedAt = Date.now();
+    const t = setInterval(() => {
+      setCallElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => {
+      clearInterval(t);
+    };
+  }, [call?.phase]);
+
+  /* ---------------------------------------------------------------- */
   /* Render: login                                                     */
   /* ---------------------------------------------------------------- */
   if (!me) {
@@ -2359,6 +2595,31 @@ export function Messenger() {
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
+            {/* v44 — call suara/video ke admin (disembunyikan saat akun dibatasi) */}
+            {!sendBlocked ? (
+              <>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-9 text-muted-foreground hover:text-violet-600 dark:hover:text-violet-300"
+                  aria-label="Telepon admin"
+                  title="Telepon"
+                  onClick={() => startCall("audio")}
+                >
+                  <Phone className="size-4" aria-hidden="true" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-9 text-muted-foreground hover:text-teal-600 dark:hover:text-teal-300"
+                  aria-label="Video call admin"
+                  title="Video call"
+                  onClick={() => startCall("video")}
+                >
+                  <Video className="size-4" aria-hidden="true" />
+                </Button>
+              </>
+            ) : null}
             <Button
               variant="ghost"
               size="icon"
@@ -3332,6 +3593,24 @@ export function Messenger() {
 
       {/* v34 — popup pratinjau/pemutar tautan in-app (YouTube/TikTok embed) */}
       <LinkViewerDialog />
+
+      {/* v44 — overlay call suara/video full-screen (WebRTC P2P) */}
+      {call ? (
+        <CallOverlay
+          state={call}
+          remoteVideoRef={remoteVideoRef}
+          localVideoRef={localVideoRef}
+          remoteAudioRef={remoteAudioRef}
+          muted={webrtc.muted}
+          camOff={webrtc.camOff}
+          elapsedLabel={formatCallDuration(callElapsed)}
+          onAccept={() => void acceptCall()}
+          onReject={rejectCall}
+          onEnd={endCall}
+          onToggleMute={webrtc.toggleMute}
+          onToggleCamera={webrtc.toggleCamera}
+        />
+      ) : null}
     </div>
   );
 }
