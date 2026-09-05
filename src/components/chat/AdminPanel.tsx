@@ -1303,6 +1303,14 @@ export function AdminPanel() {
           setConversations(res.conversations);
           setTotpRequired(false);
           setTotpCode("");
+          // v43 — muat settings (logo/warna aksen/branding) langsung setelah login.
+          socket.emit(
+            "admin:settings:get",
+            {},
+            (sres: AckOf<AppSettingsAck> | ChatErrorAck) => {
+              if (sres.ok) setAppSettings(sres.settings);
+            }
+          );
           // v43 — moderator: info mode terbatas.
           if (res.actorRole === "moderator") {
             toast("Mode moderator — akses terbatas (lihat saja)");
