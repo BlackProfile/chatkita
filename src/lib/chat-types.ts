@@ -498,6 +498,11 @@ export interface AppSettings {
   allowReactions?: boolean;
   readReceipts?: boolean;
   slowmodeSeconds?: number;
+  /* v43 — branding kustom. */
+  /** URL logo kustom (/api/media/... atau http(s)); kosong = ikon bawaan. */
+  appLogo?: string;
+  /** Warna aksen global (hex #rrggbb); kosong = tema bawaan. */
+  accentColor?: string;
 }
 
 /** `public:settings` now also carries the public app settings (v10). */

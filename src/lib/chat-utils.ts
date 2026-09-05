@@ -513,3 +513,39 @@ export function exportChatPdf(messages: ChatMessage[], meta: ChatPdfMeta): boole
   }
   return true;
 }
+
+/**
+ * v43 — terapkan branding global (warna aksen) dari AppSettings.
+ * Men-set variabel CSS --primary / --ring / --sidebar-primary di :root dan
+ * memilih warna teks kontras utk --primary-foreground. Bila warna kosong /
+ * tidak valid, semua properti dihapus (kembali ke tema bawaan + dark mode).
+ */
+export function applyAccentColor(color?: string | null): void {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  const vars = ["--primary", "--ring", "--sidebar-primary", "--sidebar-ring"] as const;
+  const valid = typeof color === "string" && /^#[0-9a-fA-F]{6}$/.test(color);
+  if (!valid) {
+    vars.forEach((v) => root.style.removeProperty(v));
+    root.style.removeProperty("--primary-foreground");
+    return;
+  }
+  const hex = (color as string).slice(1);
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  // Luminansi relatif — warna sangat terang pakai teks gelap, lainnya putih.
+  const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  const fg = lum > 0.72 ? "#0b1220" : "#ffffff";
+  root.style.setProperty("--primary", color as string);
+  root.style.setProperty("--ring", color as string);
+  root.style.setProperty("--sidebar-primary", color as string);
+  root.style.setProperty("--sidebar-ring", color as string);
+  root.style.setProperty("--primary-foreground", fg);
+}
+
+/** v43 — URL logo aplikasi yang valid utk <img> (kosong → null). */
+export function appLogoUrl(settings?: { appLogo?: string } | null): string | null {
+  const v = settings?.appLogo?.trim() ?? "";
+  return v.length > 0 ? v : null;
+}

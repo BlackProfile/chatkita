@@ -62,7 +62,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -130,6 +130,8 @@ import {
   type UserStatusAck,
 } from "@/lib/chat-types";
 import {
+  applyAccentColor,
+  appLogoUrl,
   avatarColorClass,
   applySlashCommand,
   canEditMessage,
@@ -1087,6 +1089,11 @@ export function Messenger() {
     document.title = unread > 0 ? `(${unread}) ChatKita` : "ChatKita — Chat Sederhana";
   }, [unread]);
 
+  /* v43 — branding global: terapkan warna aksen dari settings (kosong = bawaan). */
+  useEffect(() => {
+    applyAccentColor(appSettings?.accentColor);
+  }, [appSettings?.accentColor]);
+
   /* v28 — cek nama pre-login (debounce 300 ms): akun sudah ada → sembunyikan
    * kolom kode undangan (kode hanya utk pendaftaran akun baru). Nama kosong
    * mengembalikan status netral (kolom tampil lagi). */
@@ -1947,12 +1954,21 @@ export function Messenger() {
         <div className="relative z-[1] w-full max-w-md">
           {/* Brand */}
           <div className="mb-5 flex flex-col items-center text-center">
-            <span
-              className="mb-3 flex size-16 items-center justify-center rounded-[1.4rem] bg-gradient-to-br from-emerald-400 via-emerald-600 to-emerald-800 text-white shadow-xl shadow-emerald-600/30 ring-1 ring-white/50 dark:ring-white/10"
-              aria-hidden="true"
-            >
-              <MessageCircleMore className="size-8" />
-            </span>
+            {appLogoUrl(appSettings) ? (
+              <span
+                className="mb-3 flex size-16 items-center justify-center overflow-hidden rounded-[1.4rem] bg-white/80 shadow-xl ring-1 ring-black/5 dark:bg-white/10 dark:ring-white/10"
+                aria-hidden="true"
+              >
+                <img src={appLogoUrl(appSettings) ?? ""} alt="" className="size-full object-contain" />
+              </span>
+            ) : (
+              <span
+                className="mb-3 flex size-16 items-center justify-center rounded-[1.4rem] bg-gradient-to-br from-emerald-400 via-emerald-600 to-emerald-800 text-white shadow-xl shadow-emerald-600/30 ring-1 ring-white/50 dark:ring-white/10"
+                aria-hidden="true"
+              >
+                <MessageCircleMore className="size-8" />
+              </span>
+            )}
             <h1 className="text-2xl font-bold tracking-tight text-emerald-950 dark:text-emerald-50">
               {appSettings?.appName || "ChatKita"}
             </h1>
@@ -2307,6 +2323,9 @@ export function Messenger() {
         <div className="z-10 flex shrink-0 items-center gap-2 border-b bg-card/85 px-3 py-2.5 backdrop-blur-md">
           <span className="relative shrink-0">
             <Avatar className="size-10">
+              {appLogoUrl(appSettings) ? (
+                <AvatarImage src={appLogoUrl(appSettings) ?? ""} alt="Logo aplikasi" />
+              ) : null}
               <AvatarFallback
                 className={cn(
                   "text-sm font-semibold text-white",

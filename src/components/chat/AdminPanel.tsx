@@ -112,7 +112,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -204,6 +204,8 @@ import {
   type VacuumAck,
 } from "@/lib/chat-types";
 import {
+  applyAccentColor,
+  appLogoUrl,
   applySlashCommand,
   avatarColorClass,
   canEditMessage,
@@ -1259,6 +1261,11 @@ export function AdminPanel() {
       unreadCount > 0 ? `(${unreadCount}) ChatKita Admin` : "ChatKita — Chat Sederhana";
   }, [unreadCount]);
 
+  // v43 — branding global: terapkan warna aksen dari settings (kosong = bawaan).
+  useEffect(() => {
+    applyAccentColor(appSettings?.accentColor);
+  }, [appSettings?.accentColor]);
+
   /* Jump to latest when switching conversation. */
   useEffect(() => {
     atBottomRef.current = true;
@@ -2234,12 +2241,21 @@ export function AdminPanel() {
         <div className="relative z-10 w-full max-w-md">
           {/* Brand di luar kartu — konsisten dengan login user */}
           <div className="mb-5 flex flex-col items-center gap-2.5 text-center">
-            <span
-              className="flex size-16 items-center justify-center rounded-[1.4rem] bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-lg shadow-emerald-600/30"
-              aria-hidden="true"
-            >
-              <ShieldCheck className="size-8" />
-            </span>
+            {appLogoUrl(appSettings) ? (
+              <span
+                className="flex size-16 items-center justify-center overflow-hidden rounded-[1.4rem] bg-white/70 shadow-lg ring-1 ring-black/5 dark:bg-white/10 dark:ring-white/10"
+                aria-hidden="true"
+              >
+                <img src={appLogoUrl(appSettings) ?? ""} alt="" className="size-full object-contain" />
+              </span>
+            ) : (
+              <span
+                className="flex size-16 items-center justify-center rounded-[1.4rem] bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-lg shadow-emerald-600/30"
+                aria-hidden="true"
+              >
+                <ShieldCheck className="size-8" />
+              </span>
+            )}
             <div>
               <h1 className="text-2xl font-bold tracking-tight">Panel Admin</h1>
               <p className="text-sm text-muted-foreground">
@@ -2396,6 +2412,9 @@ export function AdminPanel() {
               {/* Profile */}
               <div className="z-10 flex items-center gap-3 border-b bg-card/85 p-3 backdrop-blur-md">
                 <Avatar className="size-10">
+                  {appLogoUrl(appSettings) ? (
+                    <AvatarImage src={appLogoUrl(appSettings) ?? ""} alt="Logo aplikasi" />
+                  ) : null}
                   <AvatarFallback className="bg-gradient-to-br from-emerald-500 to-teal-600 text-sm font-semibold text-white">
                     {initials(ADMIN_NAME)}
                   </AvatarFallback>

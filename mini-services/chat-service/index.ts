@@ -834,6 +834,10 @@ interface AppSettingsApi {
   readReceipts: boolean
   /** Global minimum seconds between two user messages (0 = off; admin exempt). */
   slowmodeSeconds: number
+  /** v43 — URL logo kustom (hasil /api/upload, kosong = ikon bawaan). */
+  appLogo: string
+  /** v43 — warna aksen global (hex #rrggbb, kosong = tema bawaan). */
+  accentColor: string
 }
 
 const APP_SETTING_LIMITS = {
@@ -843,6 +847,7 @@ const APP_SETTING_LIMITS = {
   maxMessageLength: { min: 50, max: MAX_MESSAGE_LENGTH },
   maxUploadMb: { min: 1, max: 25 },
   slowmodeSeconds: { min: 0, max: 60 },
+  appLogo: 300,
 } as const
 
 /**
@@ -868,6 +873,8 @@ const APP_SETTING_RESET_KEYS = [
   'readReceipts',
   'slowmodeSeconds',
   'autoBackupAt',
+  'appLogo',
+  'accentColor',
 ] as const
 
 /* v43 — backup otomatis terjadwal (WIB). */
@@ -911,6 +918,8 @@ const getAppSettings = (): AppSettingsApi => ({
     min: APP_SETTING_LIMITS.slowmodeSeconds.min,
     max: APP_SETTING_LIMITS.slowmodeSeconds.max,
   }),
+  appLogo: getSetting('appLogo') ?? '',
+  accentColor: getSetting('accentColor') ?? '',
 })
 
 /** Fan out the freshest app settings to EVERY connected client. */
@@ -5644,6 +5653,29 @@ io.on('connection', (socket) => {
       setSetting('autoBackupAt', v === '' ? AUTO_BACKUP_DEFAULT_AT : v)
       touched += ' autoBackupAt'
     }
+    // v43 — branding: logo (URL relatif /api/media/... atau http(s)) + warna aksen (hex).
+    if (typeof data?.appLogo === 'string') {
+      const v = data.appLogo.trim()
+      if (v.length > APP_SETTING_LIMITS.appLogo) {
+        ack({ ok: false, error: 'INVALID_URL' })
+        return
+      }
+      if (v !== '' && !/^\/(api\/media\/|media\/)/.test(v) && !/^https?:\/\//.test(v)) {
+        ack({ ok: false, error: 'INVALID_URL' })
+        return
+      }
+      next.appLogo = v
+      touched += ' appLogo'
+    }
+    if (typeof data?.accentColor === 'string') {
+      const v = data.accentColor.trim()
+      if (v !== '' && !/^#[0-9a-fA-F]{6}$/.test(v)) {
+        ack({ ok: false, error: 'INVALID_COLOR' })
+        return
+      }
+      next.accentColor = v
+      touched += ' accentColor'
+    }
     setSetting('appName', next.appName)
     setSetting('welcomeMessage', next.welcomeMessage)
     setSetting('maintenanceMode', next.maintenanceMode ? '1' : '0')
@@ -5660,6 +5692,8 @@ io.on('connection', (socket) => {
     setSetting('allowReactions', next.allowReactions ? '1' : '0')
     setSetting('readReceipts', next.readReceipts ? '1' : '0')
     setSetting('slowmodeSeconds', String(next.slowmodeSeconds))
+    setSetting('appLogo', next.appLogo)
+    setSetting('accentColor', next.accentColor)
     broadcastAppSettings()
     // v11 — audit trail.
     audit('settings', `appName=${next.appName}; maintenance=${next.maintenanceMode};${touched}`)

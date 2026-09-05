@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Socket } from "socket.io-client";
 import {
   Activity,
@@ -27,6 +27,7 @@ import {
   Megaphone,
   Mic,
   MoreVertical,
+  Palette,
   Paperclip,
   PencilLine,
   RefreshCw,
@@ -43,6 +44,7 @@ import {
   Timer,
   Trash2,
   TrendingUp,
+  Upload,
   UserPlus,
   Users,
   Wand2,
@@ -78,6 +80,7 @@ import {
   formatFileSize,
   formatLastSeen,
   initials,
+  uploadMedia,
 } from "@/lib/chat-utils";
 import type {
   AckOf,
@@ -421,6 +424,9 @@ export function AdminDashboard({
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [settingsResetOpen, setSettingsResetOpen] = useState(false);
   const [settingsResetBusy, setSettingsResetBusy] = useState(false);
+  // v43 — branding: unggah logo + warna aksen.
+  const [logoBusy, setLogoBusy] = useState(false);
+  const logoInputRef = useRef<HTMLInputElement>(null);
 
   const fetchStats = useCallback(() => {
     if (!socket || !socket.connected) return;
@@ -727,10 +733,32 @@ export function AdminDashboard({
           setSettingsMsg("Tersimpan ✓");
           setTimeout(() => setSettingsMsg(null), 2000);
         } else {
-          setSettingsMsg("Gagal menyimpan");
+          setSettingsMsg(
+            res.error === "INVALID_URL"
+              ? "URL logo tidak valid"
+              : res.error === "INVALID_COLOR"
+                ? "Warna tidak valid"
+                : "Gagal menyimpan"
+          );
         }
       }
     );
+  };
+
+  /** v43 — unggah logo (POST /api/upload) lalu simpan URL-nya langsung. */
+  const uploadLogo = async (file: File | undefined | null) => {
+    if (!file || !socket) return;
+    setLogoBusy(true);
+    setSettingsMsg(null);
+    try {
+      const res = await uploadMedia(file);
+      saveSettings({ appLogo: res.url });
+    } catch {
+      setSettingsMsg("Gagal mengunggah logo");
+    } finally {
+      setLogoBusy(false);
+      if (logoInputRef.current) logoInputRef.current.value = "";
+    }
   };
 
   /** v23 — ganti password admin (verifikasi password lama di server, bcrypt). */
@@ -1537,6 +1565,108 @@ export function AdminDashboard({
                   <Save className="size-4" aria-hidden="true" />
                   Simpan identitas
                 </Button>
+              </div>
+
+              {/* v43 — Branding: logo + warna aksen */}
+              <div className="space-y-3 rounded-xl border bg-card p-3">
+                <div className="flex items-center gap-2">
+                  <Palette className="size-4 text-emerald-600" aria-hidden="true" />
+                  <p className="text-sm font-semibold">Logo & warna aksen</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span
+                    aria-hidden="true"
+                    className="flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-2xl border bg-muted/50"
+                  >
+                    {settings?.appLogo ? (
+                      <img
+                        src={settings.appLogo}
+                        alt="Pratinjau logo"
+                        className="size-full object-contain"
+                      />
+                    ) : (
+                      <ImageIcon className="size-6 text-muted-foreground" />
+                    )}
+                  </span>
+                  <div className="min-w-0 flex-1 space-y-1.5">
+                    <p className="text-[11px] leading-snug text-muted-foreground">
+                      Logo tampil di layar login, header user & header admin
+                      (PNG/JPG/SVG, disarankan persegi).
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        ref={logoInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => void uploadLogo(e.target.files?.[0])}
+                        aria-label="Pilih file logo"
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-8"
+                        disabled={logoBusy}
+                        onClick={() => logoInputRef.current?.click()}
+                      >
+                        {logoBusy ? (
+                          <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                        ) : (
+                          <Upload className="size-4" aria-hidden="true" />
+                        )}
+                        Unggah logo
+                      </Button>
+                      {settings?.appLogo ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          className="h-8 text-destructive hover:text-destructive"
+                          onClick={() => saveSettings({ appLogo: "" })}
+                        >
+                          <Trash2 className="size-4" aria-hidden="true" />
+                          Hapus logo
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="color"
+                      value={
+                        settings?.accentColor && /^#[0-9a-fA-F]{6}$/.test(settings.accentColor)
+                          ? settings.accentColor
+                          : "#10b981"
+                      }
+                      onChange={(e) =>
+                        setSettings((s) => (s ? { ...s, accentColor: e.target.value } : s))
+                      }
+                      onBlur={() => saveSettings({ accentColor: settings?.accentColor ?? "" })}
+                      className="size-9 cursor-pointer rounded-lg border bg-card p-1"
+                      aria-label="Warna aksen aplikasi"
+                    />
+                    <div>
+                      <p className="text-xs font-medium">Warna aksen</p>
+                      <p className="text-[11px] text-muted-foreground">
+                        {settings?.accentColor || "Bawaan (emerald)"}
+                      </p>
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8"
+                    onClick={() => saveSettings({ accentColor: "" })}
+                    disabled={!settings?.accentColor}
+                  >
+                    <RotateCcw className="size-4" aria-hidden="true" />
+                    Reset warna
+                  </Button>
+                </div>
               </div>
 
               {/* v23 — Custom login admin: ganti password (hash bcrypt di server). */}
