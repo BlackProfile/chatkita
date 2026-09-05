@@ -225,8 +225,27 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        getConversationsFor; (9) status custom user — kolom users
  *        .status_text (≤60), event user:status (bukan admin), broadcast
  *        user:status:update ke admins, statusText ikut di partner info;
- *        (10) export chat PDF — murni klien (window.print), tanpa event. */
-const SERVICE_VERSION = 'v42'
+ *        (10) export chat PDF — murni klien (window.print), tanpa event.
+ *
+ * v43 — 5 fitur Admin & Sistem (Task 60-c):
+ *        (1) notifikasi login perangkat baru — tiap perangkat baru terikat
+ *        ke akun (pendaftaran / login perangkat lain) → emit admin:new_login
+ *        ke room admins (userId, userName, deviceId[:6], ip, userAgent, at);
+ *        (2) backup otomatis terjadwal — runAutoBackup() dipanggil timer 60
+ *        dtk saat jam:menit WIB mencapai settings autoBackupAt (default
+ *        "03:07"), anti-dobel via lastAutoBackup (tanggal WIB), menjalankan
+ *        scripts/make-backup.sh fire-and-forget + audit + admin:auto_backup;
+ *        (3) branding kustom — settings appLogo (URL) + accentColor (hex)
+ *        di AppSettings, terkirim ke semua klien via app:settings:update;
+ *        (4) 2FA TOTP admin — RFC 6238 murni node:crypto (base32 sendiri,
+ *        30 dtk, 6 digit, toleransi ±1 langkah), event admin:totp_setup /
+ *        totp_enable / totp_disable / totp_state, gate di admin:auth
+ *        (TOTP_REQUIRED / TOTP_INVALID), default MATI;
+ *        (5) multi-admin moderator — role 'moderator' boleh baca semua via
+ *        admin:auth (password akun) tapi ditolak event destruktif
+ *        (adminGuardDestructive → FORBIDDEN), event admin:user_role
+ *        (admin penuh saja) mengubah role user↔moderator. */
+const SERVICE_VERSION = 'v43'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -2241,6 +2260,33 @@ const emitActivity = (userId: string, kind: 'login' | 'message' | 'read', detail
   }
 }
 
+/**
+ * v43 — notifikasi login perangkat baru: dipanggil tepat setelah perangkat
+ * BARU terikat ke akun (pendaftaran akun / login dari perangkat lain).
+ * Detail lengkap (IP/UA/UA-platform) tetap tercatat di login_events (v40);
+ * event ini hanya pintasan intel real-time untuk room admins.
+ */
+const notifyNewDeviceBound = (
+  socket: IoSocket,
+  userId: string,
+  userName: string,
+  deviceId: string
+) => {
+  try {
+    const uaHeader = socket.handshake.headers['user-agent']
+    io.to('admins').emit('admin:new_login', {
+      userId,
+      userName,
+      deviceId: deviceId.slice(0, 6),
+      ip: firstForwardedIp(socket),
+      userAgent: typeof uaHeader === 'string' ? uaHeader.slice(0, 120) : null,
+      at: now(),
+    })
+  } catch {
+    /* notifikasi tidak boleh menggagalkan login */
+  }
+}
+
 /** v40 — percakapan 1-on-1 admin↔user (dibuat bila belum ada). */
 const adminConversationWith = (userId: string): ConversationRow =>
   ensureConversationWithAdmin(userId)
@@ -3948,6 +3994,8 @@ io.on('connection', (socket) => {
           id,
           ts,
         ])
+        // v43 — pendaftaran = ikatan perangkat pertama → notif admin juga.
+        notifyNewDeviceBound(socket, id, name, deviceId)
         user = {
           id,
           name,
@@ -4028,6 +4076,8 @@ io.on('connection', (socket) => {
                 user.id,
                 now(),
               ])
+              // v43 — perangkat baru terikat ke akun lama → notif admin.
+              notifyNewDeviceBound(socket, user.id, user.name, deviceId)
             }
           }
         }

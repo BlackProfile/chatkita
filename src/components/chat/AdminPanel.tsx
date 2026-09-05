@@ -159,6 +159,7 @@ import {
   type AdminAITtsAck,
   type AdminFlaggedPayload,
   type AdminModerateAck,
+  type AdminNewLoginPayload,
   type AdminQuotaWarnPayload,
   type AdminUnlockAck,
   type AdminPeekAck,
@@ -999,6 +1000,10 @@ export function AdminPanel() {
           ? `🤖 Diblokir AI — ${p.senderName}: ${p.snippet.slice(0, 60)}`
           : `🤖 Disensor AI — ${p.senderName}: ${p.snippet.slice(0, 60)}`
       );
+    });
+    // v43 — perangkat baru terikat ke akun (login/pendaftaran dari perangkat lain).
+    socket.on("admin:new_login", (p: AdminNewLoginPayload) => {
+      showMenuNotice(`🔓 Login baru: ${p.userName} (perangkat baru)`);
     });
     // v40 — peringatan kuota media per-user (ambang 80% / 95%).
     socket.on("admin:quota_warn", (p: AdminQuotaWarnPayload) => {

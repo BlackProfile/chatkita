@@ -1196,6 +1196,24 @@ export interface SessionRevokedPayload {
   by: string;
 }
 
+/** v43 — server → admins: perangkat baru terikat ke akun (login/daftar). */
+export interface AdminNewLoginPayload {
+  userId: string;
+  userName: string;
+  /** 6 karakter pertama deviceId (penuh tidak diekspos). */
+  deviceId: string;
+  ip: string | null;
+  userAgent: string | null;
+  at: number;
+}
+
+/** v43 — server → admins: hasil backup otomatis terjadwal. */
+export interface AdminAutoBackupPayload {
+  ok: boolean;
+  at: string;
+  detail?: string;
+}
+
 /** v40 — server → user: pesan yang menunggu moderasi ditolak admin. */
 export interface ModerationRejectedPayload {
   messageId: number;
@@ -1745,6 +1763,14 @@ export interface ConversationResetPayload {
 //                           + moderation:rejected). Fail-open bila AI down.
 // server → admins: admin:ai_flag (AdminAIFlagPayload) — intel pesan tersensor/
 //           diblokir AI.
+//
+// Kategori C3 — Admin & Sistem (v43, Task 60-c):
+// server → admins: admin:new_login (AdminNewLoginPayload) — perangkat baru
+//           terikat ke akun (pendaftaran / login perangkat lain).
+// server → admins: admin:auto_backup (AdminAutoBackupPayload) — backup
+//           otomatis terjadwal selesai (ok/at/detail).
+// admin:auto_backup_now    {} → { ok, detail } (admin penuh) — jalankan
+//           backup sekarang tanpa menunggu jadwal (audit auto_backup).
 //
 // Kategori C — fake signals (stored as settings rows):
 // admin:fake_typing       { conversationId, on: boolean } → FakeTypingAck
