@@ -33,6 +33,8 @@ import type {
   AdminAutoBackupNowAck,
   AdminResetAllAck,
   AdminRestoreAck,
+  AdminTotpSetupAck,
+  AdminTotpStateAck,
   BackupAck,
 } from "@/lib/chat-types";
 import { formatFileSize } from "@/lib/chat-utils";
@@ -76,6 +78,15 @@ export function AdminPusat({
   const [autoAt, setAutoAt] = useState("");
   const [autoLast, setAutoLast] = useState<AdminAutoBackupGetAck["lastRun"]>(null);
 
+  /* v43 — 2FA TOTP admin. */
+  const [totpEnabled, setTotpEnabled] = useState<boolean | null>(null);
+  const [totpOpen, setTotpOpen] = useState(false);
+  const [totpSecret, setTotpSecret] = useState("");
+  const [totpUri, setTotpUri] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  const [totpBusy, setTotpBusy] = useState(false);
+  const [totpMsg, setTotpMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   useEffect(() => {
     if (!socket) return;
     const onAutoBackup = (p: { ok: boolean; at: string }) => {
@@ -107,6 +118,67 @@ export function AdminPusat({
       }
     });
   }, [socket]);
+
+  /* v43 — muat status 2FA saat tab dibuka. */
+  useEffect(() => {
+    if (!socket) return;
+    socket.emit("admin:totp_state", {}, (res: AckOf<AdminTotpStateAck>) => {
+      if (res.ok) setTotpEnabled(!!res.enabled);
+    });
+  }, [socket]);
+
+  /* v43 — mulai pemasangan 2FA (minta secret + otpauth). */
+  const startTotpSetup = () => {
+    if (!socket || totpBusy) return;
+    setTotpBusy(true);
+    setTotpMsg(null);
+    socket.emit("admin:totp_setup", {}, (res: AckOf<AdminTotpSetupAck>) => {
+      setTotpBusy(false);
+      if (res.ok && res.secret && res.otpauth) {
+        setTotpSecret(res.secret);
+        setTotpUri(res.otpauth);
+        setTotpOpen(true);
+        setTotpCode("");
+      } else {
+        setTotpMsg({ ok: false, text: res.error === "TOTP_ALREADY" ? "2FA sudah aktif." : "Gagal menyiapkan 2FA." });
+      }
+    });
+  };
+
+  /* v43 — konfirmasi kode → aktifkan 2FA. */
+  const confirmTotpEnable = () => {
+    if (!socket || totpBusy || totpCode.trim().length !== 6) return;
+    setTotpBusy(true);
+    socket.emit("admin:totp_enable", { code: totpCode.trim() }, (res: AckOf<{ ok: boolean; error?: string }>) => {
+      setTotpBusy(false);
+      if (res.ok) {
+        setTotpEnabled(true);
+        setTotpOpen(false);
+        setTotpSecret("");
+        setTotpUri("");
+        setTotpCode("");
+        setTotpMsg({ ok: true, text: "2FA aktif — login berikutnya butuh kode autentikator." });
+      } else {
+        setTotpMsg({ ok: false, text: res.error === "TOTP_INVALID" ? "Kode salah — coba lagi." : "Gagal mengaktifkan 2FA." });
+      }
+    });
+  };
+
+  /* v43 — matikan 2FA (butuh kode yang valid). */
+  const disableTotp = () => {
+    if (!socket || totpBusy || totpCode.trim().length !== 6) return;
+    setTotpBusy(true);
+    socket.emit("admin:totp_disable", { code: totpCode.trim() }, (res: AckOf<{ ok: boolean; error?: string }>) => {
+      setTotpBusy(false);
+      if (res.ok) {
+        setTotpEnabled(false);
+        setTotpCode("");
+        setTotpMsg({ ok: true, text: "2FA dimatikan." });
+      } else {
+        setTotpMsg({ ok: false, text: res.error === "TOTP_INVALID" ? "Kode salah — 2FA masih aktif." : "Gagal mematikan 2FA." });
+      }
+    });
+  };
 
   const downloadBackup = () => {
     if (!socket || busy) return;
@@ -327,6 +399,93 @@ export function AdminPusat({
           )}
           Jalankan backup sekarang
         </Button>
+      </div>
+
+      {/* v43 — Keamanan: 2FA TOTP admin */}
+      <div className="space-y-2.5 rounded-xl border bg-card p-3">
+        <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          <ShieldAlert className="size-3.5" aria-hidden="true" />
+          Keamanan — verifikasi 2 langkah (2FA)
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Kode 6 digit dari aplikasi autentikator (Google Authenticator, dll)
+          diminta setelah password saat login admin.
+        </p>
+        {totpEnabled === null ? (
+          <p className="text-xs text-muted-foreground">Memuat status…</p>
+        ) : totpEnabled ? (
+          <div className="space-y-2">
+            <Badge className="bg-emerald-600 text-white">2FA AKTIF</Badge>
+            <div className="flex items-end gap-2">
+              <div className="min-w-0 flex-1 space-y-1">
+                <Input
+                  value={totpCode}
+                  onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  placeholder="Kode saat ini"
+                  inputMode="numeric"
+                  maxLength={6}
+                  className="h-9"
+                  aria-label="Kode 2FA untuk mematikan"
+                />
+              </div>
+              <Button
+                size="sm"
+                variant="destructive"
+                className="h-9"
+                disabled={totpBusy || totpCode.trim().length !== 6}
+                onClick={disableTotp}
+              >
+                Matikan 2FA
+              </Button>
+            </div>
+          </div>
+        ) : totpOpen ? (
+          <div className="space-y-2">
+            <p className="text-xs">1. Masukkan secret ini ke aplikasi autentikator:</p>
+            <div className="flex items-center gap-1.5">
+              <code className="min-w-0 flex-1 truncate rounded-md border bg-muted/50 px-2 py-1.5 font-mono text-[11px]">{totpSecret}</code>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8"
+                onClick={() => {
+                  void navigator.clipboard.writeText(totpSecret);
+                  setTotpMsg({ ok: true, text: "Secret disalin." });
+                }}
+              >
+                Salin
+              </Button>
+            </div>
+            <p className="break-all font-mono text-[10px] text-muted-foreground">{totpUri}</p>
+            <p className="text-xs">2. Masukkan kode 6 digit yang muncul:</p>
+            <div className="flex items-end gap-2">
+              <Input
+                value={totpCode}
+                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                placeholder="123456"
+                inputMode="numeric"
+                maxLength={6}
+                className="h-9 tracking-[0.3em]"
+                aria-label="Kode konfirmasi 2FA"
+              />
+              <Button size="sm" className="h-9" disabled={totpBusy || totpCode.trim().length !== 6} onClick={confirmTotpEnable}>
+                {totpBusy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
+                Aktifkan
+              </Button>
+              <Button size="sm" variant="ghost" className="h-9" onClick={() => setTotpOpen(false)}>
+                Batal
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <Button size="sm" variant="outline" onClick={startTotpSetup} disabled={totpBusy}>
+            {totpBusy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
+            Aktifkan 2FA
+          </Button>
+        )}
+        {totpMsg ? (
+          <p className={cn("text-xs", totpMsg.ok ? "text-emerald-600 dark:text-emerald-400" : "text-destructive")}>{totpMsg.text}</p>
+        ) : null}
       </div>
 
       {/* Pemulihan */}

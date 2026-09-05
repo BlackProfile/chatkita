@@ -330,6 +330,9 @@ export function AdminPanel() {
   const [connected, setConnected] = useState(false);
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
+  /* v43 — gate 2FA pada login admin (TOTP_REQUIRED/TOTP_INVALID). */
+  const [totpRequired, setTotpRequired] = useState(false);
+  const [totpCode, setTotpCode] = useState("");
   // v24 — autologin: password benar (via admin:peek) → titik input jadi hijau
   // → jeda singkat "menyinkronkan database" → masuk otomatis tanpa tombol.
   const [pwCorrect, setPwCorrect] = useState(false);
@@ -1282,37 +1285,57 @@ export function AdminPanel() {
   /* ---------------------------------------------------------------- */
   /* Actions                                                           */
   /* ---------------------------------------------------------------- */
-  const handleLogin = () => {
+  /* v43 — kirim admin:auth (password + kode 2FA opsional) dan tangani gate
+   * TOTP_REQUIRED/TOTP_INVALID dengan tetap menyimpan password di memori. */
+  const emitAdminAuth = (pw: string, totp?: string) => {
     const socket = socketRef.current;
-    const trimmed = password.trim();
-    if (!socket || !connected || !trimmed) return;
+    if (!socket || !connected || !pw) return;
     setAuthError(null);
     socket.emit(
       "admin:auth",
-      { password: trimmed },
+      totp ? { password: pw, totp } : { password: pw },
       (res: AckOf<AdminAuthAck>) => {
         if (res.ok) {
-          passwordRef.current = trimmed;
+          passwordRef.current = pw;
           setAuthed(true);
           setUsingDefault(!!res.usingDefault);
           setActorRole(res.actorRole === "moderator" ? "moderator" : "admin");
           setConversations(res.conversations);
+          setTotpRequired(false);
+          setTotpCode("");
           // v43 — moderator: info mode terbatas.
           if (res.actorRole === "moderator") {
             toast("Mode moderator — akses terbatas (lihat saja)");
           }
         } else {
           setPwCorrect(false); // v24 — auth sungguhan gagal: hilangkan efek hijau
-          setAuthError(
-            res.error === "UNAUTHORIZED"
-              ? "Password salah."
-              : res.error === "RATE_LIMITED"
-                ? "Terlalu banyak percobaan — tunggu 1 menit."
-                : "Terjadi kesalahan, coba lagi."
-          );
+          if (res.error === "TOTP_REQUIRED") {
+            passwordRef.current = pw;
+            setTotpRequired(true);
+            setAuthError("Kode 2FA diperlukan — buka aplikasi autentikator Anda.");
+          } else if (res.error === "TOTP_INVALID") {
+            setTotpRequired(true);
+            setTotpCode("");
+            setAuthError("Kode 2FA salah — coba lagi.");
+          } else {
+            setAuthError(
+              res.error === "UNAUTHORIZED"
+                ? "Password salah."
+                : res.error === "RATE_LIMITED"
+                  ? "Terlalu banyak percobaan — tunggu 1 menit."
+                  : "Terjadi kesalahan, coba lagi."
+            );
+          }
         }
       }
     );
+  };
+
+  const handleLogin = () => {
+    const socket = socketRef.current;
+    const trimmed = password.trim();
+    if (!socket || !connected || !trimmed) return;
+    emitAdminAuth(trimmed);
   };
 
   // v24 — sinkronkan handleLogin terbaru untuk dipanggil timer autologin.
@@ -2298,6 +2321,30 @@ export function AdminPanel() {
                   }}
                 />
               </div>
+              {totpRequired ? (
+                <div className="space-y-2">
+                  <Label htmlFor="admin-totp">Kode 2FA (6 digit)</Label>
+                  <Input
+                    id="admin-totp"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    value={totpCode}
+                    placeholder="123456"
+                    className="h-12 rounded-xl text-center text-lg tracking-[0.4em]"
+                    autoFocus
+                    onChange={(e) => {
+                      const v = e.target.value.replace(/\D/g, "").slice(0, 6);
+                      setTotpCode(v);
+                      setAuthError(null);
+                      if (v.length === 6) {
+                        const pw = passwordRef.current ?? password.trim();
+                        if (pw) emitAdminAuth(pw, v);
+                      }
+                    }}
+                  />
+                </div>
+              ) : null}
               {authError ? <p className="text-sm text-destructive">{authError}</p> : null}
               {/* v24 — tanpa tombol Masuk: password benar → hijau → jeda
                   sinkronisasi database → autologin. Enter tetap berfungsi. */}

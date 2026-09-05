@@ -72,7 +72,7 @@
 
 import { createServer } from 'http'
 import { join, resolve } from 'path'
-import { createHash } from 'crypto'
+import { createHash, createHmac } from 'crypto'
 import {
   closeSync,
   existsSync,
@@ -740,6 +740,82 @@ const verifyAdminPassword = (password: string): Promise<boolean> => {
   if (storedHash) return Bun.password.verify(password, storedHash)
   return Promise.resolve(password === (process.env.ADMIN_PASSWORD || 'admin123'))
 }
+
+/* ---------------- v43 — 2FA TOTP admin (RFC 6238, murni crypto) ---------------- */
+/**
+ * v43 — TOTP standar (Google Authenticator compatible): HMAC-SHA1, periode
+ * 30 detik, 6 digit, toleransi ±1 langkah (±30 dtk). Secret base32 (RFC
+ * 4648, tanpa padding) 20 byte. Settings: totpSecret (aktif), totpSecretPending
+ * (belum dikonfirmasi), totpEnabled ('1'/'0'). Default MATI — autologin v23/v24
+ * tetap berfungsi tanpa 2FA.
+ */
+const TOTP_PERIOD = 30
+const TOTP_DIGITS = 6
+
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+
+const base32Encode = (bytes: Uint8Array): string => {
+  let bits = 0
+  let value = 0
+  let out = ''
+  for (const b of bytes) {
+    value = (value << 8) | b
+    bits += 8
+    while (bits >= 5) {
+      out += BASE32_ALPHABET[(value >>> (bits - 5)) & 31]
+      bits -= 5
+    }
+  }
+  if (bits > 0) out += BASE32_ALPHABET[(value << (5 - bits)) & 31]
+  return out
+}
+
+const base32Decode = (str: string): Buffer => {
+  const clean = str.toUpperCase().replace(/[^A-Z2-7]/g, '')
+  let bits = 0
+  let value = 0
+  const out: number[] = []
+  for (const ch of clean) {
+    value = (value << 5) | BASE32_ALPHABET.indexOf(ch)
+    bits += 5
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 0xff)
+      bits -= 8
+    }
+  }
+  return Buffer.from(out)
+}
+
+/** HOTP RFC 4226 pada counter tertentu (6 digit). */
+const totpCodeAt = (secretBuf: Buffer, counter: number): string => {
+  const msg = Buffer.alloc(8)
+  msg.writeUInt32BE(Math.floor(counter / 2 ** 32), 0)
+  msg.writeUInt32BE(counter >>> 0, 4)
+  const hmac = createHmac('sha1', secretBuf).update(msg).digest()
+  const off = hmac[hmac.length - 1] & 0xf
+  const code =
+    ((hmac[off] & 0x7f) << 24) | (hmac[off + 1] << 16) | (hmac[off + 2] << 8) | hmac[off + 3]
+  return String(code % 10 ** TOTP_DIGITS).padStart(TOTP_DIGITS, '0')
+}
+
+/** Verifikasi kode dengan jendela ±1 langkah (waktu server, detik). */
+const totpVerify = (secretBuf: Buffer, code: string, nowSec: number): boolean => {
+  if (!/^\d{6}$/.test(code)) return false
+  const counter = Math.floor(nowSec / TOTP_PERIOD)
+  for (const w of [-1, 0, 1]) {
+    if (totpCodeAt(secretBuf, counter + w) === code) return true
+  }
+  return false
+}
+
+const totpSecretNow = (): string => {
+  const bytes = new Uint8Array(20)
+  crypto.getRandomValues(bytes)
+  return base32Encode(bytes)
+}
+
+const totpUriFor = (secret: string): string =>
+  `otpauth://totp/ChatKita:Admin?secret=${secret}&issuer=ChatKita&algorithm=SHA1&digits=${TOTP_DIGITS}&period=${TOTP_PERIOD}`
 
 /** v23 — anti brute-force login admin: jendela global 60 dtk + batas per-socket. */
 const ADMIN_FAIL_WINDOW_MS = 60_000
@@ -4259,6 +4335,29 @@ io.on('connection', (socket) => {
         adminAuthFails.count = 0
         adminAuthSocketFails.delete(socket.id)
 
+        /* v43 — gate 2FA (hanya admin penuh): totpEnabled tanpa kode →
+         * TOTP_REQUIRED tanpa membuka sesi; kode salah → TOTP_INVALID dan
+         * dihitung ke counter gagal login. Autologin v23/v24 tetap berfungsi
+         * saat 2FA MATI (default). */
+        if (getBoolSetting('totpEnabled')) {
+          const totp = typeof data?.totp === 'string' ? data.totp.trim() : ''
+          const secret = getSetting('totpSecret')
+          if (!totp) {
+            ack({ ok: false, error: 'TOTP_REQUIRED' })
+            return
+          }
+          const okCode = secret
+            ? totpVerify(base32Decode(secret), totp, Math.floor(Date.now() / 1000))
+            : false
+          if (!okCode) {
+            adminAuthFails.count += 1
+            adminAuthSocketFails.set(socket.id, socketFails + 1)
+            console.log(`Rejected admin login (invalid TOTP, socket ${socket.id})`)
+            ack({ ok: false, error: 'TOTP_INVALID' })
+            return
+          }
+        }
+
         socket.data.userId = ADMIN_ID
         socket.data.actorRole = 'admin'
         socket.join('admins')
@@ -5641,6 +5740,79 @@ io.on('connection', (socket) => {
     }
     return true
   }
+
+  /* ---------------- v43 — 2FA TOTP admin ---------------- */
+
+  /* v43 — setup 2FA: buat secret base32 + otpauth URI. Secret PENDING tidak
+   * ditimpa bila sudah ada (anti regenerasi saat dialog dibuka ulang) dan
+   * belum aktif sampai admin:totp_enable berhasil. */
+  socket.on('admin:totp_setup', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
+    if (getBoolSetting('totpEnabled')) {
+      ack({ ok: false, error: 'TOTP_ALREADY' })
+      return
+    }
+    let secret = getSetting('totpSecretPending')
+    if (!secret) {
+      secret = totpSecretNow()
+      setSetting('totpSecretPending', secret)
+    }
+    audit('totp_setup', 'secret pending dibuat/diulang')
+    ack({ ok: true, secret, otpauth: totpUriFor(secret) })
+  }))
+
+  /* v43 — aktifkan 2FA: verifikasi kode terhadap secret PENDING → pindah ke
+   * secret aktif + totpEnabled=1. Setelah ini admin:auth wajib totp. */
+  socket.on('admin:totp_enable', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
+    const code = typeof data?.code === 'string' ? data.code.trim() : ''
+    const pending = getSetting('totpSecretPending')
+    if (!pending) {
+      ack({ ok: false, error: 'TOTP_NO_PENDING' })
+      return
+    }
+    if (!totpVerify(base32Decode(pending), code, Math.floor(Date.now() / 1000))) {
+      console.log(`Rejected TOTP enable (invalid code, socket ${socket.id})`)
+      ack({ ok: false, error: 'TOTP_INVALID' })
+      return
+    }
+    setSetting('totpSecret', pending)
+    setSetting('totpEnabled', '1')
+    setSetting('totpSecretPending', '')
+    audit('totp_enable', '2FA admin diaktifkan')
+    console.log(`2FA admin enabled (socket ${socket.id})`)
+    ack({ ok: true })
+  }))
+
+  /* v43 — matikan 2FA: wajib kode valid terhadap secret aktif. */
+  socket.on('admin:totp_disable', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    if (!adminGuardDestructive(ack)) return // v43 — moderator ditolak
+    const code = typeof data?.code === 'string' ? data.code.trim() : ''
+    if (!getBoolSetting('totpEnabled')) {
+      ack({ ok: false, error: 'TOTP_OFF' })
+      return
+    }
+    const secret = getSetting('totpSecret')
+    const valid = secret ? totpVerify(base32Decode(secret), code, Math.floor(Date.now() / 1000)) : false
+    if (!valid) {
+      ack({ ok: false, error: 'TOTP_INVALID' })
+      return
+    }
+    setSetting('totpEnabled', '0')
+    setSetting('totpSecret', '')
+    audit('totp_disable', '2FA admin dimatikan')
+    console.log(`2FA admin disabled (socket ${socket.id})`)
+    ack({ ok: true })
+  }))
+
+  /* v43 — status 2FA (baca). */
+  socket.on('admin:totp_state', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    ack({ ok: true, enabled: getBoolSetting('totpEnabled') })
+  }))
 
   /* v43 — kelola role moderator (hanya admin penuh; ADMIN_ID & role='admin'
    * tidak boleh disentuh). role 'moderator' = lihat semua, tanpa aksi merusak. */

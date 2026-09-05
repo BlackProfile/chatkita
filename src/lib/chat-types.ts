@@ -2214,3 +2214,42 @@ export interface UserStatusUpdatePayload {
   userId: string;
   statusText: string;
 }
+
+/* ------------------------------------------------------------------ */
+/* v43 — 2FA TOTP admin (Kategori C4)                                 */
+/* ------------------------------------------------------------------ */
+
+export interface AdminTotpStateAck {
+  ok: boolean;
+  enabled?: boolean;
+  error?: string;
+}
+
+export interface AdminTotpSetupAck {
+  ok: boolean;
+  /** Secret base32 untuk dimasukkan ke aplikasi autentikator. */
+  secret?: string;
+  /** URI otpauth:// (bisa dirender sebagai QR atau disalin). */
+  otpauth?: string;
+  error?: string;
+}
+
+export interface AdminTotpEnableAck {
+  ok: boolean;
+  error?: "TOTP_INVALID" | string;
+}
+
+export interface AdminTotpDisableAck {
+  ok: boolean;
+  error?: "TOTP_INVALID" | string;
+}
+
+// Kategori C4 — 2FA TOTP admin (v43, seksi Keamanan di tab Pusat):
+// admin:totp_state    {} → AdminTotpStateAck
+// admin:totp_setup    {} → AdminTotpSetupAck — secret pending + otpauth URI
+// admin:totp_enable   {code} → AdminTotpEnableAck — verifikasi kode lalu aktif
+// admin:totp_disable  {code} → AdminTotpDisableAck
+// admin:auth gate: totpEnabled tanpa {totp} → {ok:false,error:'TOTP_REQUIRED'};
+//                  kode salah → {ok:false,error:'TOTP_INVALID'}.
+// server → admins: admin:new_login (v43 — perangkat baru terikat ke akun),
+//           admin:auto_backup {ok, at} (v43 — hasil backup terjadwal).
