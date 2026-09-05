@@ -347,3 +347,169 @@ export async function videoPosterBlob(file: File): Promise<Blob | null> {
     URL.revokeObjectURL(url);
   }
 }
+
+/* ----------------------- v42 — slash commands ----------------------- */
+
+/** Hasil parsing slash command (v42). */
+export interface SlashResult {
+  /** true bila input dikenali sebagai perintah (tidak dikirim mentah). */
+  handled: boolean;
+  /** Teks hasil transformasi (null bila tidak layak dikirim, mis. /me kosong). */
+  text: string | null;
+}
+
+/**
+ * v42 — slash commands diparse di KLIEN sebelum kirim (tanpa event server):
+ *   /dadu          → "🎲 Dadu: N (1–6)"
+ *   /koin          → "🪙 Koin: Kepala/Ekor"
+ *   /me <teks>     → "✦ <nama> <teks>"
+ *   /shrug <teks>  → "<teks> ¯\_(ツ)_/¯"
+ * Nama pengirim diambil dari konteks pemanggil (admin → "Admin").
+ */
+export function applySlashCommand(raw: string, senderName: string): SlashResult {
+  const content = raw.trim();
+  if (!content.startsWith("/")) return { handled: false, text: null };
+  const spaceIdx = content.indexOf(" ");
+  const cmd = (spaceIdx === -1 ? content : content.slice(0, spaceIdx)).toLowerCase();
+  const rest = spaceIdx === -1 ? "" : content.slice(spaceIdx + 1).trim();
+  switch (cmd) {
+    case "/dadu":
+      return { handled: true, text: `🎲 Dadu: ${1 + Math.floor(Math.random() * 6)} (1–6)` };
+    case "/koin":
+      return { handled: true, text: `🪙 Koin: ${Math.random() < 0.5 ? "Kepala" : "Ekor"}` };
+    case "/me":
+      return { handled: true, text: rest ? `✦ ${senderName} ${rest}` : null };
+    case "/shrug":
+      return { handled: true, text: `${rest} ¯\\_(ツ)_/¯`.trim() };
+    default:
+      return { handled: false, text: null };
+  }
+}
+
+/* ------------------------- v42 — export PDF ------------------------- */
+
+/** Metadata percakapan untuk ekspor PDF (v42). */
+export interface ChatPdfMeta {
+  /** Judul dokumen (mis. "Chat dengan Admin" / nama partner). */
+  title: string;
+  /** Baris kecil di bawah judul (mis. "13 pesan"). */
+  subtitle?: string;
+  /** ID viewer → bubble kanan = pesan milik viewer. */
+  viewerId: string;
+  /** Nama tampilan viewer (label bubble kanan). */
+  viewerName: string;
+  /** Nama tampilan partner (label bubble kiri). */
+  partnerName: string;
+}
+
+/**
+ * v42 — ekspor chat ke PDF MURNI DI KLIEN (0 dependensi baru): buka tab
+ * baru, tulis HTML bergaya rapi (bubble kiri/kanan ala chat), lalu
+ * window.print() — browser menyediakan dialog Save-as-PDF. Data diambil
+ * dari messagesMap/daftar pesan yang sudah ada. Return false bila popup
+ * diblokir browser.
+ */
+export function exportChatPdf(messages: ChatMessage[], meta: ChatPdfMeta): boolean {
+  const win = window.open("", "_blank");
+  if (!win) return false;
+  const esc = (s: string) =>
+    s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  const fmtTime = (iso: string) =>
+    new Date(iso).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+  let lastDay = "";
+  const rows: string[] = [];
+  for (const m of messages) {
+    // Pesan terjadwal yang BELUM terkirim tidak ikut ke PDF.
+    if (m.scheduledAt) continue;
+    const day = new Date(m.createdAt).toLocaleDateString("id-ID", {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    });
+    if (day !== lastDay) {
+      lastDay = day;
+      rows.push(`<div class="day">${day}</div>`);
+    }
+    const mine = m.senderId === meta.viewerId;
+    const deleted = !!m.deletedAt;
+    let inner: string;
+    if (m.type === "system") {
+      rows.push(`<div class="sysnote">${esc(m.content)}</div>`);
+      continue;
+    } else if (deleted) {
+      inner = "<em>Pesan ini dihapus</em>";
+    } else if (m.poll) {
+      const counts = m.poll.counts ?? [];
+      const total = m.poll.total ?? 0;
+      const opts = m.poll.options
+        .map((o, i) => {
+          const pct = total > 0 ? Math.round(((counts[i] ?? 0) / total) * 100) : 0;
+          return `<li>${esc(o)}${total > 0 ? ` — <b>${pct}%</b>` : ""}</li>`;
+        })
+        .join("");
+      inner = `${esc(m.poll.q)}<ul class="poll">${opts}</ul>${
+        total > 0 ? `<span class="pollmeta">${total} suara</span>` : ""
+      }`;
+    } else if (m.type === "image") {
+      inner = `📷 Foto${m.caption ? `: ${esc(m.caption)}` : ""}`;
+    } else if (m.type === "voice") {
+      const dur = m.durationMs ? ` (${Math.max(1, Math.round(m.durationMs / 1000))} dtk)` : "";
+      const tr = m.transcript ? `<br/><small>📝 ${esc(m.transcript)}</small>` : "";
+      inner = `🎤 Pesan suara${dur}${tr}`;
+    } else if (m.type === "file") {
+      inner = `📎 ${esc(m.fileName ?? "File")}${m.caption ? `: ${esc(m.caption)}` : ""}`;
+    } else {
+      inner = esc(m.content).replace(/\n/g, "<br/>");
+    }
+    const who = `<span class="who">${esc(mine ? meta.viewerName : meta.partnerName)}</span>`;
+    const meta2 = `<span class="time">${fmtTime(m.createdAt)}${m.editedAt ? " · diedit" : ""}</span>`;
+    rows.push(
+      `<div class="row ${mine ? "right" : "left"}"><div class="bubble ${mine ? "mine" : "theirs"}">${who}${inner}${meta2}</div></div>`
+    );
+  }
+  const html = `<!doctype html><html lang="id"><head><meta charset="utf-8"/>
+<title>ChatKita — ${esc(meta.title)}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background: #f4f6f5; color: #111; }
+  header { padding: 18px 24px 10px; border-bottom: 2px solid #059669; background: #fff; }
+  header h1 { margin: 0; font-size: 18px; color: #047857; }
+  header p { margin: 4px 0 0; font-size: 12px; color: #666; }
+  main { padding: 16px 24px 8px; }
+  .day { text-align: center; font-size: 11px; color: #888; margin: 14px 0 8px; }
+  .row { display: flex; margin: 6px 0; }
+  .row.left { justify-content: flex-start; }
+  .row.right { justify-content: flex-end; }
+  .bubble { max-width: 72%; border-radius: 14px; padding: 7px 11px; font-size: 13px; line-height: 1.45; box-shadow: 0 1px 1px rgba(0,0,0,.06); }
+  .bubble.theirs { background: #fff; border: 1px solid #e5e7eb; border-bottom-left-radius: 4px; }
+  .bubble.mine { background: #059669; color: #fff; border-bottom-right-radius: 4px; }
+  .bubble.mine .who { color: #d1fae5; }
+  .who { display: block; font-size: 10px; font-weight: 700; color: #059669; margin-bottom: 2px; }
+  .time { display: block; text-align: right; font-size: 9px; opacity: .65; margin-top: 2px; }
+  .poll { margin: 6px 0 2px; padding-left: 18px; }
+  .poll li { margin: 2px 0; }
+  .pollmeta { font-size: 10px; opacity: .7; }
+  .sysnote { text-align: center; font-size: 11px; color: #888; margin: 8px 0; }
+  footer { padding: 10px 24px 16px; text-align: center; font-size: 10px; color: #999; }
+  @media print { body { background: #fff; } .bubble { box-shadow: none; } }
+</style></head>
+<body>
+<header><h1>${esc(meta.title)}</h1><p>${esc(meta.subtitle ?? "")}</p></header>
+<main>${rows.join("")}</main>
+<footer>Dihasilkan ChatKita · ${esc(new Date().toLocaleString("id-ID"))}</footer>
+</body></html>`;
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  try {
+    win.print();
+  } catch {
+    /* headless/browser tanpa dialog print — tab tetap terbuka */
+  }
+  return true;
+}

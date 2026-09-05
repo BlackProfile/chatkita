@@ -200,8 +200,33 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        menahan pengiriman: mode sensor mengganti konten jadi versi
  *        bersih (message:updated), mode block mem-tombstone pesan
  *        (moderation:rejected ke user). Fail-open bila AI tidak bisa
- *        dihubungi. Intel ke room admins: admin:ai_flag. */
-const SERVICE_VERSION = 'v41'
+ *        dihubungi. Intel ke room admins: admin:ai_flag.
+ *  v42 — 10 FITUR CHAT BARU (Task 60-b): (1) statistik personal user —
+ *        event user:mystats memakai helper buildUserInsight v37 yang sudah
+ *        ada; (2) streak harian 🔥 ikut di-pipe ke dialog Statistikku;
+ *        (3) slash commands /dadu /koin /me /shrug diparse di KLIEN
+ *        (tanpa event server baru); (4) POLLING dalam chat — pesan teks
+ *        dgn meta_json {poll:{q,options}}, tabel poll_votes, event
+ *        messages:poll_create + messages:poll_vote, broadcast poll:update,
+ *        riwayat membawa counts + suara viewer; (5) pesan menghilang —
+ *        kolom messages.expires_at + setting per percakapan "ttl:<id>"
+ *        (jam 0/1/24/168) via event conversation:ttl (admin), broadcast
+ *        conversation:ttl:update, sweeper 60 dtk mem-tombstone pesan
+ *        kedaluwarsa via pipeline resmi; (6) pesan terjadwal BERULANG —
+ *        kolom messages.repeat_rule ('daily'|'weekly'), param repeat di
+ *        messages:send (jalur terjadwal) & admin:schedule_message,
+ *        deliverDueScheduled membuat kembaran baru setelah kirim,
+ *        schedule_list memuat label berulang; (7) reminder pesan — tabel
+ *        reminders, event messages:remind / messages:remind_cancel
+ *        (maks 50 aktif/user), sweeper 30 dtk memancarkan reminder:due
+ *        ke room pembuat; (8) arsip percakapan sisi USER — tabel
+ *        conversation_prefs (per user+percakapan), event
+ *        conversation:archive_self, field archivedSelf di
+ *        getConversationsFor; (9) status custom user — kolom users
+ *        .status_text (≤60), event user:status (bukan admin), broadcast
+ *        user:status:update ke admins, statusText ikut di partner info;
+ *        (10) export chat PDF — murni klien (window.print), tanpa event. */
+const SERVICE_VERSION = 'v42'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -381,6 +406,44 @@ addColumn('users', 'auto_clean_days', 'INTEGER DEFAULT 0')
 addColumn('users', 'pin_lock', 'TEXT')
 /* v40 — moderasi pra-kirim: pesan user menunggu persetujuan admin. */
 addColumn('messages', 'pending', 'INTEGER DEFAULT 0')
+/* v42 — pesan menghilang (self-destruct per percakapan): epoch ms bila
+ * pesan harus di-tombstone saat lewat; NULL = selamanya. */
+addColumn('messages', 'expires_at', 'INTEGER')
+/* v42 — pesan terjadwal berulang: 'daily' | 'weekly' | NULL. */
+addColumn('messages', 'repeat_rule', 'TEXT')
+/* v42 — status custom user (emoji + teks, ≤60 char; NULL = kosong). */
+addColumn('users', 'status_text', 'TEXT')
+/* v42 — suara polling per pesan (satu user satu suara per poll). */
+db.run(`
+  CREATE TABLE IF NOT EXISTS poll_votes (
+    message_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    option_idx INTEGER NOT NULL,
+    PRIMARY KEY (message_id, user_id)
+  )
+`)
+/* v42 — reminder pesan per-user (sweeper memancarkan reminder:due). */
+db.run(`
+  CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    conversation_id TEXT NOT NULL,
+    remind_at INTEGER NOT NULL,
+    done INTEGER DEFAULT 0
+  )
+`)
+db.run('CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(done, remind_at)')
+/* v42 — preferensi percakapan per-user (arsip sisi USER, terpisah dari
+ * arsip admin yang lama di conversations.archived_at). */
+db.run(`
+  CREATE TABLE IF NOT EXISTS conversation_prefs (
+    user_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    archived_at INTEGER,
+    PRIMARY KEY (user_id, conversation_id)
+  )
+`)
 db.run(`
   CREATE TABLE IF NOT EXISTS login_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -478,6 +541,8 @@ interface UserRow {
   nudge_last_at?: number | null
   auto_clean_days?: number | null
   pin_lock?: string | null
+  /* v42 — status custom user (emoji + teks, ≤60 char). */
+  status_text?: string | null
 }
 
 interface ConversationRow {
@@ -542,6 +607,10 @@ interface MessageRow {
   meta_json?: string | null
   /* v40 — 1 = pesan menunggu persetujuan admin (moderasi pra-kirim). */
   pending?: number | null
+  /* v42 — pesan menghilang: epoch ms kedaluwarsa (NULL = selamanya). */
+  expires_at?: number | null
+  /* v42 — pesan terjadwal berulang: 'daily' | 'weekly' | NULL. */
+  repeat_rule?: string | null
 }
 
 /* ------------------------------ API types ------------------------------ */
@@ -582,6 +651,9 @@ interface ChatMessageApi {
   forwardedFrom?: string
   /** v40 — true saat menunggu persetujuan admin (moderasi pra-kirim). */
   pending?: boolean
+  /** v42 — kartu polling (dari meta_json): pertanyaan + opsi. counts/total/
+   *  myVote diisi attachPollData saat memuat riwayat / memilih. */
+  poll?: { q: string; options: string[]; counts?: number[]; total?: number; myVote?: number | null }
 }
 
 interface PartnerInfoApi {
@@ -589,6 +661,8 @@ interface PartnerInfoApi {
   name: string
   online: boolean
   lastSeenAt: string | null
+  /** v42 — status custom partner (emoji + teks; null/undefined = kosong). */
+  statusText?: string | null
 }
 
 interface ConversationOverviewApi {
@@ -614,6 +688,8 @@ interface ConversationOverviewApi {
   partnerLastReadId: number
   /** v5 — archive state (admin side). */
   archived?: boolean
+  /** v42 — arsip sisi PEMANGGIL (conversation_prefs per user+percakapan). */
+  archivedSelf?: boolean
   /** v5 — pinned message (banner on both sides). */
   pinnedMessageId?: number | null
   pinned?: { id: number; senderId: string; snippet: string; type: string } | null
@@ -1264,6 +1340,35 @@ const starredByOf = (raw: string | null | undefined): string[] => {
   }
 }
 
+/** v42 — parse meta_json pesan polling → { q, options } (null bila bukan poll). */
+const pollOfRow = (raw: string | null | undefined): { q: string; options: string[] } | null => {
+  if (!raw) return null
+  try {
+    const meta = JSON.parse(raw) as { poll?: unknown }
+    const p = meta?.poll as { q?: unknown; options?: unknown } | undefined
+    if (!p || typeof p.q !== 'string' || !Array.isArray(p.options)) return null
+    const options = p.options.filter((o): o is string => typeof o === 'string')
+    if (options.length < 2) return null
+    return { q: p.q, options }
+  } catch {
+    return null
+  }
+}
+
+/** v42 — jumlah suara per opsi untuk satu pesan polling (urut indeks opsi). */
+const pollCountsFor = (messageId: number, optionCount: number): number[] => {
+  const counts = Array.from({ length: optionCount }, () => 0)
+  const rows = db
+    .query(
+      'SELECT option_idx, COUNT(*) AS c FROM poll_votes WHERE message_id = ? GROUP BY option_idx'
+    )
+    .all(messageId) as Array<{ option_idx: number; c: number }>
+  for (const r of rows) {
+    if (r.option_idx >= 0 && r.option_idx < optionCount) counts[r.option_idx] = Number(r.c)
+  }
+  return counts
+}
+
 const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   id: row.id,
   conversationId: row.conversation_id,
@@ -1299,6 +1404,9 @@ const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   ...(row.media_expired_at && !row.deleted_at
     ? { mediaExpiredAt: new Date(row.media_expired_at).toISOString() }
     : {}),
+  // v42 — kartu polling disimpan di meta_json (pertanyaan + opsi saja;
+  // counts/total/myVote dilampirkan attachPollData per viewer).
+  ...(row.meta_json && !row.deleted_at ? { poll: pollOfRow(row.meta_json) ?? undefined } : {}),
 })
 
 /** Human-readable one-liner for previews and reply quotes. */
@@ -1361,6 +1469,48 @@ const attachReactions = (rows: MessageRow[], messages: ChatMessageApi[]) => {
   }
 }
 
+/**
+ * v42 — lampirkan hasil polling (counts/total/myVote) ke pesan bermeta poll
+ * dalam satu halaman riwayat. Semua suara diambil SEKALI (batch per halaman)
+ * lalu diagregasi di memori — ringan, tanpa query per pesan.
+ */
+const attachPollData = (rows: MessageRow[], messages: ChatMessageApi[], viewerId?: string) => {
+  const pollIdx: number[] = []
+  for (let i = 0; i < rows.length; i += 1) {
+    if (messages[i].poll && !rows[i].deleted_at) pollIdx.push(i)
+  }
+  if (pollIdx.length === 0) return
+  const ids = pollIdx.map((i) => rows[i].id)
+  const placeholders = ids.map(() => '?').join(',')
+  const voteRows = db
+    .query(
+      `SELECT message_id, user_id, option_idx FROM poll_votes WHERE message_id IN (${placeholders})`
+    )
+    .all(...ids) as Array<{ message_id: number; user_id: string; option_idx: number }>
+  const byMsg = new Map<number, Array<{ user_id: string; option_idx: number }>>()
+  for (const v of voteRows) {
+    const list = byMsg.get(v.message_id) ?? []
+    list.push({ user_id: v.user_id, option_idx: v.option_idx })
+    byMsg.set(v.message_id, list)
+  }
+  for (const i of pollIdx) {
+    const poll = messages[i].poll!
+    const votes = byMsg.get(rows[i].id) ?? []
+    const counts = Array.from({ length: poll.options.length }, () => 0)
+    let myVote: number | null = null
+    for (const v of votes) {
+      if (v.option_idx >= 0 && v.option_idx < counts.length) counts[v.option_idx] += 1
+      if (viewerId && v.user_id === viewerId) myVote = v.option_idx
+    }
+    messages[i].poll = {
+      ...poll,
+      counts,
+      total: votes.length,
+      ...(viewerId ? { myVote } : {}),
+    }
+  }
+}
+
 /** Snapshot of the conversation's pinned message (or null). */
 const pinnedSnapshotOf = (conversation: ConversationRow) => {
   const pid = conversation.pinned_message_id
@@ -1403,6 +1553,8 @@ const toPartnerInfo = (user: UserRow, viewerId?: string): PartnerInfoApi => ({
   online: isOnline(user.id),
   // v11 — users may see a fake last-seen for the admin (fake_last_seen).
   lastSeenAt: lastSeenFor(viewerId ?? user.id, user.id, new Date(user.last_seen_at).toISOString()),
+  // v42 — status custom user (emoji + teks) ikut di payload partner.
+  statusText: (user.status_text ?? '').trim() || null,
 })
 
 /** Ordered pair so a conversation between two users is unique. */
@@ -1505,6 +1657,8 @@ const getMessagesPage = (
   const messages = rows.map(toChatMessage)
   attachReplyPreviews(rows, messages)
   attachReactions(rows, messages)
+  // v42 — hasil polling (counts + suara viewer) untuk halaman ini.
+  attachPollData(rows, messages, viewerId)
   return { messages, hasMore }
 }
 
@@ -1575,6 +1729,8 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         pm.deleted_at AS pin_deleted,
         pm.file_name AS pin_file_name,
         pu.name AS pin_sender_name,
+        p.status_text AS partner_status,
+        cp.archived_at AS self_archived,
         (SELECT r.last_read_message_id FROM reads r
           WHERE r.conversation_id = c.id
             AND r.user_id = (CASE WHEN c.user_a_id = $me THEN c.user_b_id ELSE c.user_a_id END)
@@ -1602,6 +1758,9 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         ON pm.id = c.pinned_message_id
       LEFT JOIN users pu
         ON pu.id = pm.sender_id
+      /* v42 — preferensi per-user (arsip sisi USER) + status custom partner. */
+      LEFT JOIN conversation_prefs cp
+        ON cp.conversation_id = c.id AND cp.user_id = $me
       WHERE c.user_a_id = $me OR c.user_b_id = $me
       ORDER BY c.last_message_at DESC`
     )
@@ -1629,6 +1788,8 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     pin_deleted: number | null
     pin_file_name: string | null
     pin_sender_name: string | null
+    partner_status: string | null
+    self_archived: number | null
     partner_read: number | null
     unread: number
   }>
@@ -1641,6 +1802,8 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
       online: isOnline(r.partner_id),
       // v11 — a user viewer may get the admin's fake last-seen here.
       lastSeenAt: lastSeenFor(userId, r.partner_id, new Date(r.partner_last_seen).toISOString()),
+      // v42 — status custom partner (emoji + teks).
+      statusText: (r.partner_status ?? '').trim() || null,
     },
     lastMessage:
       r.last_id != null
@@ -1664,6 +1827,8 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     unread: r.unread,
     partnerLastReadId: r.partner_read ?? 0,
     archived: r.archived_at != null,
+    // v42 — arsip sisi PEMANGGIL (per user+percakapan, terpisah dari arsip admin).
+    archivedSelf: r.self_archived != null,
     pinnedMessageId: r.pinned_message_id ?? null,
     pinned:
       r.pin_id != null
@@ -3149,6 +3314,8 @@ const buildXrayProfile = (userId: string) => {
     /* v40 — pusat kendali per-user. */
     adminNote: (user.admin_note ?? '').trim() || null,
     tag: ['vip', 'attention', 'problem'].includes(user.tag ?? '') ? (user.tag as string) : '',
+    /* v42 — status custom user (emoji + teks). */
+    statusText: (user.status_text ?? '').trim() || null,
     wordFilter: (user.word_filter ?? '').trim() || null,
     wordFilterAction: user.word_filter_action === 'censor' ? 'censor' : 'block',
     approvalMode: (user.approval_mode ?? 0) === 1,
@@ -3912,7 +4079,9 @@ io.on('connection', (socket) => {
       }
       emitActivity(user.id, 'login', sessionRestore ? 'sesi dipulihkan' : 'login baru')
       const admin = findUserById(ADMIN_ID) // seeded on boot — always exists
-      const page = getMessagesPage(conversation.id)
+      // v42 — viewerId disertakan agar pesan pending/terjadwal disembunyikan
+      // dan suara polling viewer dilampirkan pada halaman pertama.
+      const page = getMessagesPage(conversation.id, undefined, HISTORY_PAGE_SIZE, user.id)
       ack({
         ok: true,
         user: { id: user.id, name: user.name, hasPin: !!user.pin_hash },
@@ -3936,6 +4105,9 @@ io.on('connection', (socket) => {
 
       // A (newly registered) user must immediately appear in the admin sidebar.
       pushConversationsTo(ADMIN_ID)
+      // v42 — dorong daftar percakapan milik user juga: memuat archivedSelf
+      // (arsip sisi user) sehingga UI bisa menandai percakapan terarsip sejak awal.
+      pushConversationsTo(user.id)
       // v11 — a restricted user learns their restriction state right after
       // login (only sent when at least one restriction is active).
       pushRestrictedTo(user.id, true)
@@ -4317,6 +4489,9 @@ io.on('connection', (socket) => {
         }
         scheduledAtMs = Math.round(t)
       }
+      // v42 — pengulangan pesan terjadwal opsional: 'daily' | 'weekly'.
+      const repeatRule =
+        data?.repeat === 'daily' || data?.repeat === 'weekly' ? (data.repeat as string) : null
 
       // Optional reply target must belong to the same conversation.
       let replyToId: number | undefined
@@ -4392,7 +4567,7 @@ io.on('connection', (socket) => {
       // (chip ⏰), lalu dipancarkan ke semua pihak saat waktunya tiba.
       if (scheduledAtMs) {
         const result = db.run(
-          'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged, caption, scheduled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged, caption, scheduled_at, repeat_rule) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           [
             conversation.id,
             me,
@@ -4408,6 +4583,7 @@ io.on('connection', (socket) => {
             flagKeyword ? 1 : 0,
             captionRef ?? null,
             scheduledAtMs,
+            repeatRule,
           ]
         )
         const row = db
@@ -4473,6 +4649,15 @@ io.on('connection', (socket) => {
       // v26 — baca metadata media (dimensi/durasi/halaman) dari file di disk.
       if (type === 'image' || type === 'file') {
         void attachMediaMeta(message.id, message.content)
+      }
+      // v42 — pesan menghilang: bila percakapan punya TTL aktif (jam), set
+      // kedaluwarsa pada pesan baru; sweeper 60 dtk yang mem-tombstone nanti.
+      const ttlHours = Number(getSetting(`ttl:${conversation.id}`) ?? 0)
+      if (Number.isFinite(ttlHours) && ttlHours > 0) {
+        db.run('UPDATE messages SET expires_at = ? WHERE id = ?', [
+          now() + ttlHours * 3_600_000,
+          message.id,
+        ])
       }
       ack({ ok: true, message })
 
@@ -5003,6 +5188,295 @@ io.on('connection', (socket) => {
       console.log(`Conversation ${conversation.id.slice(0, 8)} ${archived ? 'archived' : 'unarchived'}`)
     })
   )
+
+  /* ------------------------------------------------------------------ */
+  /* v42 — 10 fitur chat baru: statistik personal, polling, TTL,         */
+  /*       berulang, reminder, arsip self, status custom                 */
+  /* ------------------------------------------------------------------ */
+
+  // v42 — (1) statistik personal: payload sama dengan admin:user_insight
+  // (buildUserInsight v37) tapi untuk USER sendiri, bukan admin.
+  socket.on('user:mystats', handler(socket, (_data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const insight = buildUserInsight(me)
+    if (!insight) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    ack({ ok: true, insight })
+  }))
+
+  // v42 — (4) polling: buat pesan poll (type text + meta_json). Tidak lewat
+  // insertAndFanOut karena helper itu belum mendukung meta_json.
+  socket.on('messages:poll_create', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    if (!isParticipant(conversation, me)) {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    const question = typeof data?.question === 'string' ? data.question.trim() : ''
+    const rawOptions = Array.isArray(data?.options) ? data.options : null
+    if (question.length < 1 || question.length > 200 || !rawOptions) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const options: string[] = []
+    for (const o of rawOptions) {
+      if (typeof o !== 'string') {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const v = o.trim()
+      if (v.length < 1 || v.length > 60) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      options.push(v)
+    }
+    if (options.length < 2 || options.length > 6) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const result = db.run(
+      "INSERT INTO messages (conversation_id, sender_id, content, created_at, type, flagged, meta_json) VALUES (?, ?, ?, ?, 'text', 0, ?)",
+      [conversation.id, me, question, now(), JSON.stringify({ poll: { q: question, options } })]
+    )
+    const id = Number(result.lastInsertRowid)
+    db.run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [now(), conversation.id])
+    markRead(conversation.id, me, id)
+    const row = db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow
+    const message = toChatMessage(row)
+    attachReplyPreviews([row], [message])
+    io.to(`user:${conversation.user_a_id}`).emit('message:new', message)
+    io.to(`user:${conversation.user_b_id}`).emit('message:new', message)
+    io.to('admins').emit('message:new', message)
+    pushConversationsTo(conversation.user_a_id)
+    pushConversationsTo(conversation.user_b_id)
+    ack({ ok: true, message })
+    console.log(`[poll] #${id} dibuat oleh ${me.slice(0, 8)} (${options.length} opsi)`)
+  }))
+
+  // v42 — (4) polling: pilih satu opsi (ganti pilihan = ganti suara).
+  socket.on('messages:poll_vote', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const id = Number(data?.messageId)
+    const optionIdx = Number(data?.optionIdx)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row || row.deleted_at) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const conversation = getConversation(row.conversation_id)
+    if (!conversation || !isParticipant(conversation, me)) {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    const poll = pollOfRow(row.meta_json)
+    if (!poll) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    if (!Number.isInteger(optionIdx) || optionIdx < 0 || optionIdx >= poll.options.length) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    db.run(
+      'INSERT OR REPLACE INTO poll_votes (message_id, user_id, option_idx) VALUES (?, ?, ?)',
+      [row.id, me, optionIdx]
+    )
+    const counts = pollCountsFor(row.id, poll.options.length)
+    const total = counts.reduce((s, v) => s + v, 0)
+    const payload = { messageId: row.id, conversationId: conversation.id, counts, total }
+    io.to(`user:${conversation.user_a_id}`).emit('poll:update', payload)
+    io.to(`user:${conversation.user_b_id}`).emit('poll:update', payload)
+    io.to('admins').emit('poll:update', payload)
+    ack({ ok: true, counts, total, myVote: optionIdx })
+  }))
+
+  // v42 — (5) pesan menghilang: admin memasang TTL per percakapan
+  // (0 = mati, 1/24/168 jam). Ter-audit + broadcast ke kedua sisi.
+  socket.on('conversation:ttl', handler(socket, (data, ack) => {
+    if (authedUserId(socket) !== ADMIN_ID) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const hours = Number(data?.hours)
+    if (![0, 1, 24, 168].includes(hours)) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    setSetting(`ttl:${conversation.id}`, String(hours))
+    const payload = { conversationId: conversation.id, hours }
+    for (const uid of [conversation.user_a_id, conversation.user_b_id]) {
+      io.to(`user:${uid}`).emit('conversation:ttl:update', payload)
+    }
+    io.to('admins').emit('conversation:ttl:update', payload)
+    audit('conversation_ttl', `${conversation.id.slice(0, 8)} → ${hours === 0 ? 'mati' : `${hours} jam`}`)
+    ack({ ok: true, hours })
+    console.log(`[ttl] ${conversation.id.slice(0, 8)} = ${hours} jam`)
+  }))
+
+  // v42 — (5) baca TTL percakapan (semua peserta; dipakai chip header user).
+  socket.on('conversation:ttl_get', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation || !isParticipant(conversation, me)) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const hours = Number(getSetting(`ttl:${conversation.id}`) ?? 0)
+    ack({ ok: true, hours: Number.isFinite(hours) && hours > 0 ? hours : 0 })
+  }))
+
+  // v42 — (7) reminder pesan: ingatkan saya pada waktu tertentu.
+  socket.on('messages:remind', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const id = Number(data?.messageId)
+    const remindAtMs = Number(data?.remindAtMs)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const conversation = getConversation(row.conversation_id)
+    if (!conversation || !isParticipant(conversation, me)) {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    if (!Number.isFinite(remindAtMs) || remindAtMs < now() || remindAtMs > now() + 365 * 86_400_000) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const active = db
+      .query('SELECT COUNT(*) AS c FROM reminders WHERE user_id = ? AND done = 0')
+      .get(me) as { c: number }
+    if (Number(active.c) >= 50) {
+      ack({ ok: false, error: 'RATE_LIMITED' })
+      return
+    }
+    db.run(
+      'DELETE FROM reminders WHERE user_id = ? AND message_id = ?',
+      [me, row.id]
+    )
+    db.run(
+      'INSERT INTO reminders (user_id, message_id, conversation_id, remind_at) VALUES (?, ?, ?, ?)',
+      [me, row.id, conversation.id, Math.round(remindAtMs)]
+    )
+    ack({ ok: true })
+    console.log(`[reminder] ${me.slice(0, 8)} → pesan #${row.id} @ ${new Date(Math.round(remindAtMs)).toISOString()}`)
+  }))
+
+  // v42 — (7) batalkan reminder milik saya untuk satu pesan.
+  socket.on('messages:remind_cancel', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const id = Number(data?.messageId)
+    if (!Number.isInteger(id) || id <= 0) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    db.run('DELETE FROM reminders WHERE user_id = ? AND message_id = ?', [me, id])
+    ack({ ok: true })
+  }))
+
+  // v42 — (8) arsip percakapan sisi USER (per user+percakapan, terpisah
+  // dari arsip admin v5). Menyimpan/menghapus baris conversation_prefs.
+  socket.on('conversation:archive_self', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation || !isParticipant(conversation, me)) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const archived = data?.archived !== false
+    if (archived) {
+      db.run(
+        `INSERT INTO conversation_prefs (user_id, conversation_id, archived_at) VALUES (?, ?, ?)
+         ON CONFLICT(user_id, conversation_id) DO UPDATE SET archived_at = excluded.archived_at`,
+        [me, conversation.id, now()]
+      )
+    } else {
+      db.run('DELETE FROM conversation_prefs WHERE user_id = ? AND conversation_id = ?', [
+        me,
+        conversation.id,
+      ])
+    }
+    pushConversationsTo(me)
+    ack({ ok: true, archived })
+    console.log(`[arsip-self] ${me.slice(0, 8)} ${archived ? 'mengarsipkan' : 'membuka'} ${conversation.id.slice(0, 8)}`)
+  }))
+
+  // v42 — (9) status custom user (emoji + teks ≤60). Khusus akun user,
+  // bukan admin. Admin menerima conversations + broadcast status:update.
+  socket.on('user:status', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    if (me === ADMIN_ID) {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    const text = typeof data?.text === 'string' ? data.text.trim() : ''
+    if (text.length > 60) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    db.run('UPDATE users SET status_text = ? WHERE id = ?', [text || null, me])
+    const payload = { userId: me, statusText: text }
+    io.to('admins').emit('user:status:update', payload)
+    pushConversationsTo(ADMIN_ID)
+    ack({ ok: true, statusText: text })
+    console.log(`[status] ${me.slice(0, 8)} → "${text.slice(0, 60)}"`)
+  }))
 
   /* ------------------------- v5: web push ------------------------- */
 
@@ -6986,12 +7460,18 @@ io.on('connection', (socket) => {
 
   // v40 — pesan terjadwal admin ke user (reuse kolom scheduled_at v22 —
   // deliverDueScheduled yang sudah ada yang mengirimkannya tepat waktu).
+  // v42 — param opsional repeat ('daily'|'weekly') → pesan berulang.
   socket.on('admin:schedule_message', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
     const target = restrictionTarget(data, ack)
     if (!target) return
     const text = typeof data?.text === 'string' ? data.text.trim() : ''
     const sendAtMs = Number(data?.sendAtMs)
+    if (data?.repeat != null && data.repeat !== 'daily' && data.repeat !== 'weekly') {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const repeatRule = data?.repeat === 'daily' || data?.repeat === 'weekly' ? data.repeat : null
     if (
       text.length < 1 ||
       text.length > 1000 ||
@@ -7004,10 +7484,13 @@ io.on('connection', (socket) => {
     }
     const conv = adminConversationWith(target.id)
     const result = db.run(
-      "INSERT INTO messages (conversation_id, sender_id, content, created_at, type, flagged, scheduled_at) VALUES (?, ?, ?, ?, 'text', 0, ?)",
-      [conv.id, ADMIN_ID, text, now(), Math.round(sendAtMs)]
+      "INSERT INTO messages (conversation_id, sender_id, content, created_at, type, flagged, scheduled_at, repeat_rule) VALUES (?, ?, ?, ?, 'text', 0, ?, ?)",
+      [conv.id, ADMIN_ID, text, now(), Math.round(sendAtMs), repeatRule]
     )
-    audit('schedule_message', `${target.name} @ ${new Date(Math.round(sendAtMs)).toISOString()}`)
+    audit(
+      'schedule_message',
+      `${target.name} @ ${new Date(Math.round(sendAtMs)).toISOString()}${repeatRule ? ` (berulang ${repeatRule})` : ''}`
+    )
     ack({ ok: true, id: Number(result.lastInsertRowid), sendAtMs: Math.round(sendAtMs) })
   }))
 
@@ -7019,12 +7502,18 @@ io.on('connection', (socket) => {
     const conv = adminConversationWith(target.id)
     const rows = db
       .query(
-        'SELECT id, content, scheduled_at FROM messages WHERE conversation_id = ? AND scheduled_at IS NOT NULL AND delivered_at IS NULL AND deleted_at IS NULL ORDER BY scheduled_at ASC'
+        'SELECT id, content, scheduled_at, repeat_rule FROM messages WHERE conversation_id = ? AND scheduled_at IS NOT NULL AND delivered_at IS NULL AND deleted_at IS NULL ORDER BY scheduled_at ASC'
       )
-      .all(conv.id) as Array<{ id: number; content: string; scheduled_at: number }>
+      .all(conv.id) as Array<{ id: number; content: string; scheduled_at: number; repeat_rule: string | null }>
     ack({
       ok: true,
-      items: rows.map((r) => ({ id: r.id, text: r.content, sendAtMs: r.scheduled_at })),
+      items: rows.map((r) => ({
+        id: r.id,
+        text: r.content,
+        sendAtMs: r.scheduled_at,
+        // v42 — label pengulangan utk antrean terjadwal.
+        repeat: r.repeat_rule === 'daily' || r.repeat_rule === 'weekly' ? r.repeat_rule : null,
+      })),
     })
   }))
 
@@ -7998,6 +8487,38 @@ const deliverDueScheduled = () => {
       }
       if ((row.type ?? 'text') === 'voice')
         void transcribeVoice(row.id, conversation.id, row.content)
+      // v42 — pesan terjadwal BERULANG: setelah terkirim, buat kembaran baru
+      // dgn jadwal berikutnya (harian +24 jam / mingguan +7 hari), id baru,
+      // delivered_at NULL — deliverDueScheduled berikutnya yang mengirimkannya.
+      if (row.repeat_rule === 'daily' || row.repeat_rule === 'weekly') {
+        const stepMs = row.repeat_rule === 'daily' ? 86_400_000 : 7 * 86_400_000
+        const nextAt = (row.scheduled_at ?? now()) + stepMs
+        db.run(
+          `INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged, caption, meta_json, scheduled_at, repeat_rule)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            row.conversation_id,
+            row.sender_id,
+            row.content,
+            now(),
+            row.type ?? 'text',
+            row.reply_to_id ?? null,
+            row.duration_ms ?? null,
+            row.file_name ?? null,
+            row.file_size ?? null,
+            row.mime_type ?? null,
+            row.thumb_url ?? null,
+            row.flagged ?? 0,
+            row.caption ?? null,
+            row.meta_json ?? null,
+            nextAt,
+            row.repeat_rule,
+          ]
+        )
+        console.log(
+          `[terjadwal] #${row.id} berulang ${row.repeat_rule} → jadwal baru ${new Date(nextAt).toISOString()}`
+        )
+      }
     }
     if (due.length > 0) console.log(`[terjadwal] ${due.length} pesan terkirim otomatis`)
   } catch (err) {
@@ -8076,6 +8597,61 @@ const sweepAutoClean = () => {
 }
 setTimeout(sweepAutoClean, 40_000)
 setInterval(sweepAutoClean, 6 * 60 * 60_000)
+
+/* v42 — pesan menghilang: sweeper tiap 60 detik mem-tombstone pesan yang
+ * expires_at-nya lewat via pipeline resmi (tombstoneMessage) — klien menerima
+ * message:updated {deletedAt} sehingga bubble berubah "Pesan ini dihapus". */
+const sweepExpiredMessages = () => {
+  try {
+    const stale = db
+      .query(
+        'SELECT * FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ? AND deleted_at IS NULL'
+      )
+      .all(now()) as MessageRow[]
+    if (stale.length === 0) return
+    for (const row of stale) {
+      const conversation = getConversation(row.conversation_id)
+      if (!conversation) continue
+      tombstoneMessage(row, conversation, now())
+    }
+    console.log(`[self-destruct] ${stale.length} pesan menghilang (TTL habis)`)
+  } catch (err) {
+    console.error('[self-destruct] error:', (err as Error)?.message ?? err)
+  }
+}
+setTimeout(sweepExpiredMessages, 20_000)
+setInterval(sweepExpiredMessages, 60_000)
+
+/* v42 — reminder pesan: sweeper tiap 30 detik memancarkan reminder:due ke
+ * room pembuat (user:<id> atau admins) lalu menandai done=1 (sekali saja). */
+const sweepReminders = () => {
+  try {
+    const due = db
+      .query('SELECT * FROM reminders WHERE done = 0 AND remind_at <= ?')
+      .all(now()) as Array<{
+      id: number
+      user_id: string
+      message_id: number
+      conversation_id: string
+      remind_at: number
+    }>
+    if (due.length === 0) return
+    for (const r of due) {
+      db.run('UPDATE reminders SET done = 1 WHERE id = ?', [r.id])
+      const room = r.user_id === ADMIN_ID ? 'admins' : `user:${r.user_id}`
+      io.to(room).emit('reminder:due', {
+        messageId: r.message_id,
+        conversationId: r.conversation_id,
+      })
+    }
+    audit('reminder_due', `${due.length} pengingat jatuh tempo`)
+    console.log(`[reminder] ${due.length} pengingat jatuh tempo`)
+  } catch (err) {
+    console.error('[reminder] error:', (err as Error)?.message ?? err)
+  }
+}
+setTimeout(sweepReminders, 15_000)
+setInterval(sweepReminders, 30_000)
 
 httpServer.listen(PORT, () => {
   console.log(

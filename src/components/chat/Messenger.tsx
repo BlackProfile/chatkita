@@ -2,11 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Archive,
+  ArchiveRestore,
   ArrowDown,
   ArrowLeft,
   ArrowRight,
+  BarChart3,
   ChevronUp,
   Clock,
+  FileDown,
   Film,
   Image as ImageIcon,
   Leaf,
@@ -37,6 +41,7 @@ import type { Socket } from "socket.io-client";
 import { ChatBubble } from "@/components/chat/ChatBubble";
 import { DaySeparator, dayKey } from "@/components/chat/day-separator";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
+import { MyStatsDialog } from "@/components/chat/my-stats-dialog";
 import {
   MediaViewer,
   FileKindIcon,
@@ -78,6 +83,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
+import { PollCreateDialog } from "@/components/chat/poll-create-dialog";
 import { useVoiceRecorder } from "@/hooks/use-voice-recorder";
 import { createChatSocket } from "@/lib/chat-socket";
 import { playBlip } from "@/lib/chat-notify";
@@ -92,6 +98,7 @@ import {
   type AckOf,
   type AppSettings,
   type AppSettingsUpdatePayload,
+  type ArchiveSelfAck,
   type ChatErrorAck,
   type ChatErrorCode,
   type ChatMessage,
@@ -105,20 +112,29 @@ import {
   type OlderMessagesAck,
   type PartnerInfo,
   type PinUpdatePayload,
+  type PollUpdatePayload,
+  type PollVoteAck,
   type PublicCheckNameAck,
   type PublicSettingsAck,
+  type ReminderDuePayload,
+  type RemindAck,
   type ScheduleCancelAllAck,
   type SetPinAck,
   type TranslateAck,
+  type TtlGetAck,
+  type TtlUpdatePayload,
   type UnstarAllAck,
   type UserAuthAck,
   type UserRestrictedPayload,
   type UserSetPasswordAck,
+  type UserStatusAck,
 } from "@/lib/chat-types";
 import {
   avatarColorClass,
+  applySlashCommand,
   canEditMessage,
   compressImageToBlobs,
+  exportChatPdf,
   FONT_SCALES,
   formatChatTime,
   formatFileSize,
@@ -202,6 +218,16 @@ function saveDraft(scope: string, id: string, value: string): void {
     else window.localStorage.removeItem(draftKey(scope, id));
   } catch {
     /* ignore */
+  }
+}
+
+/* v42 — status custom user dipersist secara lokal agar input "Status"
+ * terisi ulang saat dialog dibuka lagi (server menyimpan versi resminya). */
+function readMyStatus(): string {
+  try {
+    return window.localStorage.getItem("chatkita:statusText") ?? "";
+  } catch {
+    return "";
   }
 }
 
@@ -532,6 +558,8 @@ export function Messenger() {
   const [hasPin, setHasPin] = useState(false);
   const [pinOpen, setPinOpen] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
+  /* v42 — dialog buat polling. */
+  const [pollOpen, setPollOpen] = useState(false);
   const [partner, setPartner] = useState<PartnerInfo | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [partnerTyping, setPartnerTyping] = useState(false);
@@ -628,6 +656,12 @@ export function Messenger() {
   const [schedOpen, setSchedOpen] = useState(false);
   const [schedValue, setSchedValue] = useState("");
   const [cancelSchedId, setCancelSchedId] = useState<number | null>(null);
+  // v42 — statistikku + status custom + TTL pesan menghilang + arsip self.
+  const [statsOpen, setStatsOpen] = useState(false);
+  const [statusOpen, setStatusOpen] = useState(false);
+  const [statusInput, setStatusInput] = useState("");
+  const [ttlHours, setTtlHours] = useState(0);
+  const [selfArchived, setSelfArchived] = useState(false);
   const { resolvedTheme, setTheme } = useTheme();
 
   /** Bumped on logout to tear down + recreate the socket (fresh rooms). */
@@ -644,6 +678,13 @@ export function Messenger() {
   const translatingIdRef = useRef<number | null>(null);
   // v28 — penanda urutan respons cek nama (buang respons kedaluwarsa).
   const nameCheckSeqRef = useRef(0);
+  // v42 — cermin daftar pesan utk toast pengingat (tanpa setState di listener).
+  const messagesRef = useRef<ChatMessage[]>([]);
+
+  // v42 — sinkronkan cermin pesan setiap kali daftar berubah.
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   const recorder = useVoiceRecorder();
 
@@ -738,6 +779,14 @@ export function Messenger() {
             );
             setInput(readDraft("user", res.user.id));
             void subscribeToPush(socket, res.pushPublicKey);
+            // v42 — seed TTL pesan menghilang utk chip header.
+            socket.emit(
+              "conversation:ttl_get",
+              { conversationId: res.conversationId },
+              (ttl: AckOf<TtlGetAck>) => {
+                if (ttl.ok) setTtlHours(ttl.hours);
+              }
+            );
           } else {
             // Stored login no longer valid — drop it, back to the form.
             window.localStorage.removeItem(CHAT_SESSION_KEY);
@@ -775,6 +824,9 @@ export function Messenger() {
     // (e.g. database reset), hop to the one conversation we do have.
     socket.on("conversations:update", (list: ConversationOverview[]) => {
       const current = conversationIdRef.current;
+      // v42 — arsip sisi user: ikuti status archivedSelf percakapan aktif.
+      const mine = current ? list.find((c) => c.id === current) : undefined;
+      if (mine) setSelfArchived(!!mine.archivedSelf);
       if (current && !list.some((c) => c.id === current) && list.length > 0) {
         const next = list[0];
         conversationIdRef.current = next.id;
@@ -897,6 +949,47 @@ export function Messenger() {
     // v22 — pesan terjadwal dibatalkan (pengirim atau admin) → hapus dr daftar.
     socket.on("message:scheduled_cancelled", (p: { id: number; conversationId: string }) => {
       setMessages((prev) => prev.filter((m) => m.id !== p.id));
+    });
+
+    // v42 — hasil polling live: perbarui counts/total kartu poll.
+    socket.on("poll:update", (p: PollUpdatePayload) => {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === p.messageId && m.poll
+            ? { ...m, poll: { ...m.poll, counts: p.counts, total: p.total } }
+            : m
+        )
+      );
+    });
+
+    // v42 — pengingat pesan jatuh tempo: toast + lompat ke pesan.
+    socket.on("reminder:due", (p: ReminderDuePayload) => {
+      const target = messagesRef.current.find((m) => m.id === p.messageId);
+      const snippet = target
+        ? target.type === "image"
+          ? target.caption || "foto"
+          : target.type === "voice"
+            ? "pesan suara"
+            : target.type === "file"
+              ? (target.fileName ?? "file")
+              : target.content.slice(0, 60)
+        : `pesan #${p.messageId}`;
+      toast.info(`⏰ Pengingat: ${snippet}`);
+      const el = scrollRef.current?.querySelector(`[data-mid="${p.messageId}"]`);
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+
+    // v42 — TTL percakapan diubah admin → perbarui chip header.
+    socket.on("conversation:ttl:update", (p: TtlUpdatePayload) => {
+      if (p.conversationId !== conversationIdRef.current) return;
+      setTtlHours(p.hours);
+      if (p.hours > 0) {
+        toast.info(
+          `⏳ Pesan menghilang aktif: ${p.hours === 1 ? "1 jam" : p.hours === 24 ? "24 jam" : "7 hari"}`
+        );
+      } else {
+        toast.info("Pesan menghilang dimatikan.");
+      }
     });
 
     // Live ✓✓: the admin read up to `lastReadMessageId`.
@@ -1250,6 +1343,23 @@ export function Messenger() {
     return true;
   };
 
+  /* v42 — buat polling di percakapan aktif (ack menentukan tutup dialog). */
+  const createPoll = async (question: string, options: string[]) => {
+    const sock = socketRef.current;
+    const convId = conversationIdRef.current;
+    if (!sock || !convId) return false;
+    return await new Promise<boolean>((resolve) => {
+      sock.emit(
+        "messages:poll_create",
+        { conversationId: convId, question, options },
+        (res: { ok: boolean }) => {
+          if (res.ok) toast.success("Polling dibuat");
+          resolve(!!res.ok);
+        }
+      );
+    });
+  };
+
   const handleSend = () => {
     // v31 — lampiran yang menunggu dikirim duluan (teks composer ikut sebagai
     // caption di pesan media yang sama).
@@ -1275,6 +1385,14 @@ export function Messenger() {
       );
       setEditing(null);
       setInput("");
+      return;
+    }
+    // v42 — slash commands diparse di klien: /dadu /koin /me /shrug.
+    const slash = applySlashCommand(content, meRef.current?.name ?? "Anda");
+    if (slash.handled) {
+      setInput("");
+      setSendError(false);
+      if (slash.text && !emitMessage(slash.text, "text")) setInput(content);
       return;
     }
     setInput("");
@@ -1369,6 +1487,111 @@ export function Messenger() {
         }
       }
     );
+  };
+
+  /* v42 — polling: pilih opsi (optimistis myVote; ack + broadcast mengoreksi). */
+  const handlePollVote = (messageId: number, optionIdx: number) => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === messageId && m.poll ? { ...m, poll: { ...m.poll, myVote: optionIdx } } : m
+      )
+    );
+    socket.emit(
+      "messages:poll_vote",
+      { messageId, optionIdx },
+      (res: AckOf<PollVoteAck>) => {
+        if (!res.ok) {
+          toast.error("Gagal menyimpan suara.");
+          return;
+        }
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId && m.poll
+              ? {
+                  ...m,
+                  poll: { ...m.poll, counts: res.counts, total: res.total, myVote: res.myVote },
+                }
+              : m
+          )
+        );
+      }
+    );
+  };
+
+  /* v42 — pengingat pesan: preset "1 jam" / "Besok 09.00" / "Pekan depan". */
+  const remindAtFor = (preset: "1h" | "besok" | "pekan"): number => {
+    if (preset === "1h") return Date.now() + 3_600_000;
+    const d = new Date();
+    d.setDate(d.getDate() + (preset === "besok" ? 1 : 7));
+    d.setHours(9, 0, 0, 0);
+    return d.getTime();
+  };
+
+  const handleRemind = (msg: ChatMessage, preset: "1h" | "besok" | "pekan") => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    socket.emit(
+      "messages:remind",
+      { messageId: msg.id, remindAtMs: remindAtFor(preset) },
+      (res: AckOf<RemindAck>) => {
+        if (res.ok) toast.success("⏰ Pengingat dipasang.");
+        else toast.error("Gagal memasang pengingat (maks 50 aktif).");
+      }
+    );
+  };
+
+  /* v42 — arsip percakapan sisi user (menu lainnya). */
+  const toggleArchiveSelf = () => {
+    const id = conversationIdRef.current;
+    const socket = socketRef.current;
+    if (!id || !socket) return;
+    const next = !selfArchived;
+    socket.emit(
+      "conversation:archive_self",
+      { conversationId: id, archived: next },
+      (res: AckOf<ArchiveSelfAck>) => {
+        if (res.ok) {
+          setSelfArchived(res.archived);
+          toast.success(res.archived ? "Percakapan diarsipkan." : "Dikeluarkan dari arsip.");
+        } else {
+          toast.error("Gagal mengubah arsip.");
+        }
+      }
+    );
+  };
+
+  /* v42 — simpan status custom user (emoji + teks ≤60). */
+  const saveStatus = () => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    const text = statusInput.trim().slice(0, 60);
+    socket.emit("user:status", { text }, (res: AckOf<UserStatusAck>) => {
+      if (res.ok) {
+        try {
+          window.localStorage.setItem("chatkita:statusText", text);
+        } catch {
+          /* abaikan */
+        }
+        setStatusOpen(false);
+        toast.success(res.statusText ? "Status tersimpan ✓" : "Status dihapus.");
+      } else {
+        toast.error("Gagal menyimpan status (maks 60 karakter).");
+      }
+    });
+  };
+
+  /* v42 — unduh PDF (murni klien via window.print). */
+  const downloadPdf = () => {
+    const ok = exportChatPdf(messages, {
+      title: `Chat dengan ${partner?.name ?? "Admin"}`,
+      subtitle: `${messages.length} pesan`,
+      viewerId: meRef.current?.userId ?? "",
+      viewerName: meRef.current?.name ?? "Saya",
+      partnerName: partner?.name ?? "Admin",
+    });
+    if (!ok) toast.error("Popup diblokir — izinkan popup untuk mengunduh PDF.");
   };
 
   /* v29 — lepas SEMUA bintang milik saya (panel pesan berbintang). Perubahan
@@ -2143,6 +2366,36 @@ export function Messenger() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-60">
+                {/* v42 — statistik personal user (event user:mystats) */}
+                <DropdownMenuItem onClick={() => setStatsOpen(true)}>
+                  <BarChart3 className="mr-2 size-4" aria-hidden="true" />
+                  Statistikku
+                </DropdownMenuItem>
+                {/* v42 — status custom user (emoji + teks) */}
+                <DropdownMenuItem
+                  onClick={() => {
+                    setStatusInput(readMyStatus());
+                    setStatusOpen(true);
+                  }}
+                >
+                  <Smile className="mr-2 size-4" aria-hidden="true" />
+                  Status…
+                </DropdownMenuItem>
+                {/* v42 — arsip percakapan sisi user */}
+                <DropdownMenuItem onClick={toggleArchiveSelf}>
+                  {selfArchived ? (
+                    <ArchiveRestore className="mr-2 size-4" aria-hidden="true" />
+                  ) : (
+                    <Archive className="mr-2 size-4" aria-hidden="true" />
+                  )}
+                  {selfArchived ? "Keluarkan dari arsip" : "Arsipkan percakapan"}
+                </DropdownMenuItem>
+                {/* v42 — unduh PDF (window.print) */}
+                <DropdownMenuItem onClick={downloadPdf}>
+                  <FileDown className="mr-2 size-4" aria-hidden="true" />
+                  Unduh PDF
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onClick={() => {
                     setStarredOpen(true);
@@ -2204,6 +2457,21 @@ export function Messenger() {
             </DropdownMenu>
           </div>
         </div>
+
+        {/* v42 — chip pesan menghilang + penanda arsip (bila aktif) */}
+        {ttlHours > 0 || selfArchived ? (
+          <div
+            className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-0.5 border-b bg-muted/30 px-3 py-1 text-[11px] text-muted-foreground"
+            role="status"
+          >
+            {ttlHours > 0 ? (
+              <span title="Pesan baru otomatis menghilang setelah jangka waktu ini">
+                ⏳ Pesan menghilang: {ttlHours === 1 ? "1 jam" : ttlHours === 24 ? "24 jam" : "7 hari"}
+              </span>
+            ) : null}
+            {selfArchived ? <span title="Arsip sisi Anda">📁 Diarsipkan</span> : null}
+          </div>
+        ) : null}
 
         {/* Search bar */}
         {searchOpen ? (
@@ -2394,6 +2662,13 @@ export function Messenger() {
                   pinned={pinnedMsg?.id === m.id}
                   starred={!!m.starredBy?.includes(me.userId)}
                   scheduledAt={m.scheduledAt}
+                  poll={m.poll}
+                  onPollVote={
+                    !m.deletedAt && m.poll ? (idx) => handlePollVote(m.id, idx) : undefined
+                  }
+                  onRemind={
+                    !m.deletedAt && m.type !== "system" ? (preset) => handleRemind(m, preset) : undefined
+                  }
                   onToggleStar={
                     !m.deletedAt && m.type !== "system" ? () => toggleStar(m.id) : undefined
                   }
@@ -2723,6 +2998,14 @@ export function Messenger() {
                       File
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
+                    {/* v42 — buat polling */}
+                    <DropdownMenuItem
+                      disabled={!connected || sendBlocked || !!editing || !conversationId}
+                      onClick={() => setPollOpen(true)}
+                    >
+                      <BarChart3 className="mr-2 size-4" aria-hidden="true" />
+                      Buat polling
+                    </DropdownMenuItem>
                     <DropdownMenuItem
                       disabled={!connected || sendBlocked || !!editing}
                       onClick={() => {
@@ -2819,6 +3102,60 @@ export function Messenger() {
       {pwModalOpen ? (
         <PasswordSetupDialog onClose={() => setPwModalOpen(false)} socketRef={socketRef} />
       ) : null}
+
+      {/* v42 — dialog "Statistikku" (user:mystats) */}
+      <MyStatsDialog
+        open={statsOpen}
+        myName={me?.name ?? ""}
+        socket={socketRef.current}
+        onClose={() => setStatsOpen(false)}
+      />
+
+      {/* v42 — dialog status custom user */}
+      <Dialog open={statusOpen} onOpenChange={setStatusOpen}>
+        <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Smile className="size-4 text-emerald-600" aria-hidden="true" />
+              Status
+            </DialogTitle>
+            <DialogDescription>
+              Emoji + teks singkat (maks 60 karakter) — tampil di panel admin.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Input
+              value={statusInput}
+              maxLength={60}
+              placeholder="😊 Sedang mengerjakan tugas"
+              aria-label="Status"
+              onChange={(e) => setStatusInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") saveStatus();
+              }}
+            />
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setStatusInput("")}>
+                Bersihkan
+              </Button>
+              <Button
+                className="bg-emerald-600 text-white hover:bg-emerald-600/90"
+                onClick={saveStatus}
+              >
+                Simpan
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* v42 — dialog buat polling */}
+      <PollCreateDialog
+        key={pollOpen ? "poll-open" : "poll-closed"}
+        open={pollOpen}
+        onClose={() => setPollOpen(false)}
+        onConfirm={createPoll}
+      />
 
       {/* v22+ — dialog kirim terjadwal (dibuka dari menu lampiran composer) */}
       <Dialog open={schedOpen} onOpenChange={setSchedOpen}>

@@ -14,13 +14,16 @@ import {
   DatabaseBackup,
   EyeOff,
   Film,
+  FileDown,
   FileJson,
   FileText,
   Flag,
   Forward,
+  Hourglass,
   Image as ImageIcon,
   GaugeCircle,
   Leaf,
+  ListChecks,
   Loader2,
   Lock,
   LockKeyhole,
@@ -98,6 +101,7 @@ import {
   AISuggestChips,
   type AdminAIMediaHit,
 } from "@/components/chat/admin-ai";
+import { PollCreateDialog } from "@/components/chat/poll-create-dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -183,16 +187,26 @@ import {
   type MirrorAck,
   type OlderMessagesAck,
   type PinUpdatePayload,
+  type PollUpdatePayload,
+  type PollVoteAck,
   type PublicSettingsAck,
   type QuickRepliesAck,
+  type ReminderDuePayload,
+  type RemindAck,
   type ResetConversationAck,
   type TranslateAck,
+  type TtlGetAck,
+  type TtlSetAck,
+  type TtlUpdatePayload,
+  type UserStatusUpdatePayload,
   type VacuumAck,
 } from "@/lib/chat-types";
 import {
+  applySlashCommand,
   avatarColorClass,
   canEditMessage,
   compressImageToBlobs,
+  exportChatPdf,
   FONT_SCALES,
   formatChatTime,
   formatFileSize,
@@ -258,6 +272,18 @@ const FONT_SCALE_LABELS: { key: FontScale; label: string }[] = [
   { key: "md", label: "Sedang" },
   { key: "lg", label: "Besar" },
 ];
+
+/** v42 — pilihan pesan menghilang per percakapan (jam; 0 = mati). */
+const TTL_OPTIONS: { hours: number; label: string }[] = [
+  { hours: 0, label: "Mati" },
+  { hours: 1, label: "1 jam" },
+  { hours: 24, label: "24 jam" },
+  { hours: 168, label: "7 hari" },
+];
+
+/** v42 — label pendek TTL untuk pill toolbar. */
+const ttlLabel = (hours: number) =>
+  hours <= 0 ? "Mati" : hours === 1 ? "1 jam" : hours === 24 ? "24 jam" : "7 hari";
 
 function readDraft(scope: string, id: string): string {
   try {
@@ -342,6 +368,8 @@ export function AdminPanel() {
   const [aiTranscribing, setAiTranscribing] = useState<number | null>(null);
   const [speakingId, setSpeakingId] = useState<number | null>(null);
   const speakAudioRef = useRef<HTMLAudioElement | null>(null);
+  /* v42 — dialog buat polling. */
+  const [pollOpen, setPollOpen] = useState(false);
   const mediaGallery = useMemo(
     () => buildMediaGallery(activeId ? messagesMap[activeId] ?? [] : []),
     [messagesMap, activeId]
@@ -442,6 +470,22 @@ export function AdminPanel() {
     );
   };
 
+  /* v42 — buat polling di percakapan aktif. */
+  const createPoll = async (question: string, options: string[]) => {
+    const sock = socketRef.current;
+    if (!sock || !activeConversation) return false;
+    return await new Promise<boolean>((resolve) => {
+      sock.emit(
+        "messages:poll_create",
+        { conversationId: activeConversation.id, question, options },
+        (res: { ok: boolean }) => {
+          if (res.ok) toast.success("Polling dibuat");
+          resolve(!!res.ok);
+        }
+      );
+    });
+  };
+
   // v5 — font / pinned / edit / translate / archive / QR
   const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
   const [pinnedMap, setPinnedMap] = useState<
@@ -503,6 +547,9 @@ export function AdminPanel() {
   const [schedOpen, setSchedOpen] = useState(false);
   const [schedValue, setSchedValue] = useState("");
   const [cancelSchedId, setCancelSchedId] = useState<number | null>(null);
+  // v42 — TTL pesan menghilang per percakapan + pilihan pengulangan terjadwal.
+  const [ttlMap, setTtlMap] = useState<Record<string, number>>({});
+  const [schedRepeat, setSchedRepeat] = useState<"" | "daily" | "weekly">("");
 
   const socketRef = useRef<Socket | null>(null);
   const passwordRef = useRef<string | null>(null);
@@ -1037,6 +1084,55 @@ export function AdminPanel() {
       });
     });
 
+    // v42 — hasil polling live: perbarui counts/total kartu poll.
+    socket.on("poll:update", (p: PollUpdatePayload) => {
+      setMessagesMap((prev) => {
+        const list = prev[p.conversationId];
+        if (!list) return prev;
+        return {
+          ...prev,
+          [p.conversationId]: list.map((m) =>
+            m.id === p.messageId && m.poll
+              ? { ...m, poll: { ...m.poll, counts: p.counts, total: p.total } }
+              : m
+          ),
+        };
+      });
+    });
+
+    // v42 — pengingat pesan jatuh tempo (reminder yang dibuat admin).
+    socket.on("reminder:due", (p: ReminderDuePayload) => {
+      toast.info(`⏰ Pengingat: pesan #${p.messageId}`);
+      if (p.conversationId === activeIdRef.current) {
+        const el = scrollRef.current?.querySelector(`[data-mid="${p.messageId}"]`);
+        el?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    });
+
+    // v42 — TTL pesan menghilang diubah → simpan utk label pill.
+    socket.on("conversation:ttl:update", (p: TtlUpdatePayload) => {
+      setTtlMap((prev) => ({ ...prev, [p.conversationId]: p.hours }));
+      showMenuNotice(
+        p.hours > 0
+          ? `⏳ Pesan menghilang: ${ttlLabel(p.hours)} — pesan baru otomatis terhapus`
+          : "⏳ Pesan menghilang dimatikan"
+      );
+    });
+
+    // v42 — status custom user berubah → perbarui daftar percakapan.
+    socket.on("user:status:update", (p: UserStatusUpdatePayload) => {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.partner.id === p.userId
+            ? { ...c, partner: { ...c.partner, statusText: p.statusText || null } }
+            : c
+        )
+      );
+      showMenuNotice(
+        p.statusText ? `🪪 Status diperbarui: "${p.statusText.slice(0, 50)}"` : "🪪 Status dihapus user"
+      );
+    });
+
     // Live ✓✓: a user read up to `lastReadMessageId` of the admin's bubbles.
     socket.on(
       "read:update",
@@ -1315,6 +1411,10 @@ export function AdminPanel() {
         : null,
     }));
     setInput(readDraft("admin", id));
+    // v42 — seed TTL pesan menghilang percakapan ini (utk label pill).
+    socket.emit("conversation:ttl_get", { conversationId: id }, (res: AckOf<TtlGetAck>) => {
+      if (res.ok) setTtlMap((prev) => ({ ...prev, [id]: res.hours }));
+    });
     socket.emit("messages:history", { conversationId: id }, (res: AckOf<HistoryAck>) => {
       if (res.ok) {
         setMessagesMap((prev) => ({ ...prev, [id]: res.messages }));
@@ -1378,7 +1478,9 @@ export function AdminPanel() {
           setPinPrompt(null);
           setPinValue("");
           setPinError(null);
-          openConversation(convId);
+          // v42 — fix: sebelumnya memanggil openConversation() yang tidak ada
+          // (bug latent Task 59) → pakai handleSelectConversation.
+          handleSelectConversation(convId);
         } else if ((res as { error?: string }).error === "INVALID_PIN") {
           setPinError("PIN salah — coba lagi.");
         } else setPinError("Gagal membuka kunci.");
@@ -1458,6 +1560,14 @@ export function AdminPanel() {
     }
     setInput("");
     setSendError(false);
+    // v42 — slash commands diparse di klien: /dadu /koin /me /shrug.
+    const slash = applySlashCommand(content, ADMIN_NAME);
+    if (slash.handled) {
+      setInput("");
+      setSendError(false);
+      if (slash.text && !emitMessage(slash.text, "text")) setInput(content);
+      return;
+    }
     if (!emitMessage(content, "text")) setInput(content);
   };
 
@@ -1657,6 +1767,8 @@ export function AdminPanel() {
         type: "text",
         replyToId: replyTo?.id,
         scheduledAt: ms,
+        // v42 — pengulangan opsional: harian / mingguan.
+        ...(schedRepeat ? { repeat: schedRepeat } : {}),
       },
       (res: SendAckV22) => {
         if (res.ok) {
@@ -1664,11 +1776,18 @@ export function AdminPanel() {
             hour: "2-digit",
             minute: "2-digit",
           });
-          toast.success(`Pesan dijadwalkan pukul ${jam}`);
+          toast.success(
+            schedRepeat === "daily"
+              ? `Pesan dijadwalkan pukul ${jam} (berulang harian)`
+              : schedRepeat === "weekly"
+                ? `Pesan dijadwalkan pukul ${jam} (berulang mingguan)`
+                : `Pesan dijadwalkan pukul ${jam}`
+          );
           setReplyTo(null);
           setInput("");
           saveDraft("admin", convId, "");
           setSchedOpen(false);
+          setSchedRepeat("");
         } else if (res.error === "INVALID_SCHEDULE") {
           toast.error("Jadwal tidak valid — pilih waktu antara 10 detik dan 30 hari dari sekarang.");
         } else if (res.error === "RATE_LIMITED") {
@@ -1716,6 +1835,106 @@ export function AdminPanel() {
       conversationId,
       archived: !currentlyArchived,
     });
+  };
+
+  /* v42 — pasang pesan menghilang (TTL) utk percakapan (admin saja). */
+  const setTtl = (conversationId: string, hours: number) => {
+    socketRef.current?.emit(
+      "conversation:ttl",
+      { conversationId, hours },
+      (res: AckOf<TtlSetAck>) => {
+        if (res.ok) {
+          setTtlMap((prev) => ({ ...prev, [conversationId]: res.hours }));
+          toast.success(
+            res.hours > 0
+              ? `Pesan menghilang: ${ttlLabel(res.hours)} — pesan baru otomatis terhapus.`
+              : "Pesan menghilang dimatikan."
+          );
+        } else toast.error("Gagal mengatur pesan menghilang.");
+      }
+    );
+  };
+
+  /* v42 — polling: admin memilih opsi (optimistis myVote; ack mengoreksi). */
+  const handlePollVote = (conversationId: string, messageId: number, optionIdx: number) => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    setMessagesMap((prev) => {
+      const list = prev[conversationId];
+      if (!list) return prev;
+      return {
+        ...prev,
+        [conversationId]: list.map((m) =>
+          m.id === messageId && m.poll ? { ...m, poll: { ...m.poll, myVote: optionIdx } } : m
+        ),
+      };
+    });
+    socket.emit(
+      "messages:poll_vote",
+      { messageId, optionIdx },
+      (res: AckOf<PollVoteAck>) => {
+        if (!res.ok) {
+          toast.error("Gagal menyimpan suara.");
+          return;
+        }
+        setMessagesMap((prev) => {
+          const list = prev[conversationId];
+          if (!list) return prev;
+          return {
+            ...prev,
+            [conversationId]: list.map((m) =>
+              m.id === messageId && m.poll
+                ? {
+                    ...m,
+                    poll: {
+                      ...m.poll,
+                      counts: res.counts,
+                      total: res.total,
+                      myVote: res.myVote,
+                    },
+                  }
+                : m
+            ),
+          };
+        });
+      }
+    );
+  };
+
+  /* v42 — pengingat pesan: preset "1 jam" / "Besok 09.00" / "Pekan depan". */
+  const remindAtFor = (preset: "1h" | "besok" | "pekan"): number => {
+    if (preset === "1h") return Date.now() + 3_600_000;
+    const d = new Date();
+    d.setDate(d.getDate() + (preset === "besok" ? 1 : 7));
+    d.setHours(9, 0, 0, 0);
+    return d.getTime();
+  };
+
+  const handleRemind = (msg: ChatMessage, preset: "1h" | "besok" | "pekan") => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    socket.emit(
+      "messages:remind",
+      { messageId: msg.id, remindAtMs: remindAtFor(preset) },
+      (res: AckOf<RemindAck>) => {
+        if (res.ok) toast.success("⏰ Pengingat dipasang.");
+        else toast.error("Gagal memasang pengingat (maks 50 aktif).");
+      }
+    );
+  };
+
+  /* v42 — unduh PDF percakapan aktif (murni klien via window.print). */
+  const exportPdf = () => {
+    const conv = conversations.find((c) => c.id === activeIdRef.current);
+    const list = activeIdRef.current ? messagesMap[activeIdRef.current] ?? [] : [];
+    const ok = exportChatPdf(list, {
+      title: `Chat dengan ${conv?.partner.name ?? "Pengguna"}`,
+      subtitle: `${list.length} pesan`,
+      viewerId: ADMIN_ID,
+      viewerName: "Admin",
+      partnerName: conv?.partner.name ?? "Pengguna",
+    });
+    if (!ok) toast.error("Popup diblokir — izinkan popup untuk mengunduh PDF.");
   };
 
   /* v5 — QR / share dialog. */
@@ -2080,9 +2299,11 @@ export function AdminPanel() {
 
   const partnerStatus = activeTyping
     ? "sedang mengetik…"
-    : activeConversation?.partner.online
-      ? "Online"
-      : formatLastSeen(activeConversation?.partner.lastSeenAt);
+    : activeConversation?.partner.statusText
+      ? activeConversation.partner.statusText
+      : activeConversation?.partner.online
+        ? "Online"
+        : formatLastSeen(activeConversation?.partner.lastSeenAt);
 
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col">
@@ -2666,6 +2887,39 @@ export function AdminPanel() {
                   >
                     🤖 AI
                   </button>
+                  {/* v42 — pesan menghilang (TTL per percakapan) */}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        className={cn(
+                          "flex h-7 shrink-0 items-center gap-1 rounded-full border px-2.5 text-[11px] font-medium transition-colors",
+                          (ttlMap[activeConversation.id] ?? 0) > 0
+                            ? "border-amber-500 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                            : "bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
+                        )}
+                      >
+                        <Hourglass className="size-3" aria-hidden="true" />
+                        Menghilang: {ttlLabel(ttlMap[activeConversation.id] ?? 0)}
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start">
+                      <DropdownMenuLabel className="text-xs">
+                        Pesan menghilang
+                      </DropdownMenuLabel>
+                      {TTL_OPTIONS.map((o) => (
+                        <DropdownMenuItem
+                          key={o.hours}
+                          className={cn(
+                            (ttlMap[activeConversation.id] ?? 0) === o.hours && "bg-accent"
+                          )}
+                          onClick={() => setTtl(activeConversation.id, o.hours)}
+                        >
+                          {o.label}
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <button
@@ -2681,6 +2935,11 @@ export function AdminPanel() {
                       </DropdownMenuItem>
                       <DropdownMenuItem onClick={() => exportChat("json")}>
                         Ekspor JSON
+                      </DropdownMenuItem>
+                      {/* v42 — unduh PDF via window.print (murni klien) */}
+                      <DropdownMenuItem onClick={exportPdf}>
+                        <FileDown className="mr-2 size-3.5" aria-hidden="true" />
+                        Unduh PDF
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
@@ -2890,6 +3149,17 @@ export function AdminPanel() {
                           starred={!!m.starredBy?.includes(ADMIN_ID)}
                           onToggleStar={() => toggleStar(m.id)}
                           scheduledAt={m.scheduledAt}
+                          poll={m.poll}
+                          onPollVote={
+                            !m.deletedAt && m.poll
+                              ? (idx) => handlePollVote(activeConversation.id, m.id, idx)
+                              : undefined
+                          }
+                          onRemind={
+                            !m.deletedAt && m.type !== "system"
+                              ? (preset) => handleRemind(m, preset)
+                              : undefined
+                          }
                           forwardedFrom={m.forwardedFrom}
                           onCancelScheduled={
                             m.senderId === ADMIN_ID && m.scheduledAt
@@ -3261,6 +3531,14 @@ export function AdminPanel() {
                               File
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
+                            {/* v42 — buat polling */}
+                            <DropdownMenuItem
+                              disabled={!connected || !!editing}
+                              onClick={() => setPollOpen(true)}
+                            >
+                              <ListChecks className="mr-2 size-4" aria-hidden="true" />
+                              Buat polling
+                            </DropdownMenuItem>
                             <DropdownMenuItem
                               disabled={!connected || !!editing}
                               onClick={() => handleSchedOpenChange(true)}
@@ -3427,6 +3705,14 @@ export function AdminPanel() {
         socket={socketRef.current}
         initialUserId={umTarget}
         onNotice={showMenuNotice}
+      />
+
+      {/* v42 — dialog buat polling */}
+      <PollCreateDialog
+        key={pollOpen ? "poll-open" : "poll-closed"}
+        open={pollOpen}
+        onClose={() => setPollOpen(false)}
+        onConfirm={createPoll}
       />
 
       {/* v41 — dialog pusat AI admin */}
@@ -3662,6 +3948,34 @@ export function AdminPanel() {
                   Minimal 1 menit, maksimal 30 hari dari sekarang. Pesan tampil dengan chip jam
                   sampai waktunya tiba.
                 </p>
+                {/* v42 — pengulangan pesan terjadwal */}
+                <div className="space-y-1.5">
+                  <Label htmlFor="schedule-repeat" className="text-xs font-medium">
+                    Berulang
+                  </Label>
+                  <div className="flex gap-1.5" role="group" aria-label="Pengulangan pesan terjadwal">
+                    {([
+                      { key: "", label: "Tidak" },
+                      { key: "daily", label: "Harian" },
+                      { key: "weekly", label: "Mingguan" },
+                    ] as const).map((o) => (
+                      <button
+                        key={o.key}
+                        type="button"
+                        aria-pressed={schedRepeat === o.key}
+                        className={cn(
+                          "flex h-8 flex-1 items-center justify-center rounded-lg border text-xs font-medium transition-colors",
+                          schedRepeat === o.key
+                            ? "border-emerald-600 bg-emerald-600 text-white"
+                            : "bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
+                        )}
+                        onClick={() => setSchedRepeat(o.key)}
+                      >
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
               <Button
                 className="btn-gradient h-9 w-full rounded-lg text-sm font-semibold text-white"

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
+  Bell,
   Check,
   CheckCheck,
   Clock,
@@ -28,7 +29,7 @@ import {
   X,
 } from "lucide-react";
 
-import type { MessageReaction, ReplyPreview } from "@/lib/chat-types";
+import type { ChatPoll, MessageReaction, ReplyPreview } from "@/lib/chat-types";
 import { formatChatTime, formatFileSize, resolveFileKind } from "@/lib/chat-utils";
 import { cn } from "@/lib/utils";
 import { FileKindIcon } from "@/components/chat/media-viewer";
@@ -37,6 +38,103 @@ import { VoicePlayer } from "@/components/chat/voice-player";
 
 /** Fixed reaction palette (mirrors the server). */
 const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"] as const;
+
+/** v42 — preset cepat pengingat pesan ("Ingatkan saya" di baris aksi). */
+const REMIND_PRESETS: { key: "1h" | "besok" | "pekan"; label: string }[] = [
+  { key: "1h", label: "1 jam" },
+  { key: "besok", label: "Besok 09.00" },
+  { key: "pekan", label: "Pekan depan" },
+];
+
+/**
+ * v42 — kartu polling: pertanyaan sudah dirender sebagai teks pesan biasa;
+ * kartu ini menampilkan opsi (tombol) + bar persentase + total suara.
+ * Klik opsi memilih/mengganti suara viewer (stopPropagation supaya bubble
+ * tidak ikut membuka baris aksi).
+ */
+function PollCard({
+  poll,
+  dark,
+  onVote,
+}: {
+  poll: ChatPoll;
+  dark: boolean;
+  onVote?: (idx: number) => void;
+}) {
+  const counts = poll.counts ?? [];
+  const total = poll.total ?? counts.reduce((s, v) => s + v, 0);
+  return (
+    <div
+      className="mt-1.5 space-y-1.5"
+      role="group"
+      aria-label="Polling"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {poll.options.map((opt, i) => {
+        const c = counts[i] ?? 0;
+        const pct = total > 0 ? Math.round((c / total) * 100) : 0;
+        const mine = poll.myVote === i;
+        return (
+          <button
+            key={i}
+            type="button"
+            aria-pressed={mine}
+            aria-label={`Opsi ${i + 1}: ${opt}${total > 0 ? ` — ${pct}% (${c} suara)` : ""}`}
+            className={cn(
+              "relative block w-full overflow-hidden rounded-lg border px-2.5 py-1.5 text-left text-sm transition-colors",
+              dark
+                ? mine
+                  ? "border-white/80 bg-white/25"
+                  : "border-white/30 bg-white/10 hover:bg-white/20"
+                : mine
+                  ? "border-emerald-600 bg-emerald-600/10"
+                  : "border-border bg-background/70 hover:bg-accent"
+            )}
+            onClick={() => onVote?.(i)}
+          >
+            {total > 0 ? (
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "absolute inset-y-0 left-0 transition-all",
+                  dark ? "bg-white/15" : "bg-emerald-500/15"
+                )}
+                style={{ width: `${pct}%` }}
+              />
+            ) : null}
+            <span className="relative flex items-center justify-between gap-2">
+              <span className="min-w-0 truncate">
+                <span aria-hidden="true" className="mr-1">
+                  {mine ? "●" : "○"}
+                </span>
+                {opt}
+              </span>
+              {total > 0 ? (
+                <span
+                  className={cn(
+                    "shrink-0 text-[11px] font-semibold tabular-nums",
+                    dark ? "text-white/85" : "text-emerald-700 dark:text-emerald-300"
+                  )}
+                >
+                  {pct}%
+                </span>
+              ) : null}
+            </span>
+          </button>
+        );
+      })}
+      <p
+        className={cn(
+          "text-[11px] tabular-nums",
+          dark ? "text-white/70" : "text-muted-foreground"
+        )}
+      >
+        {total > 0 ? `${total} suara` : "Belum ada suara — ketuk opsi untuk memilih"}
+        {poll.myVote != null && poll.myVote >= 0 ? " · pilihanmu tersimpan" : ""}
+      </p>
+    </div>
+  );
+}
 
 /** Media yang dibuka di viewer full-screen (foto/PDF; URL + metadata). */
 export interface BubbleMedia {
@@ -124,6 +222,12 @@ interface ChatBubbleProps {
   onTranscribe?: () => void;
   /** v41 — transkripsi AI sedang berjalan. */
   transcribing?: boolean;
+  /** v42 — kartu polling (pertanyaan + opsi + hasil). */
+  poll?: ChatPoll;
+  /** v42 — viewer memilih opsi polling (indeks). */
+  onPollVote?: (optionIdx: number) => void;
+  /** v42 — pilih preset pengingat pesan ("1h" | "besok" | "pekan"). */
+  onRemind?: (preset: "1h" | "besok" | "pekan") => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -185,9 +289,13 @@ export function ChatBubble({
   speaking = false,
   onTranscribe,
   transcribing = false,
+  poll,
+  onPollVote,
+  onRemind,
 }: ChatBubbleProps) {
   const [actionsOpen, setActionsOpen] = useState(false);
   const [reactOpen, setReactOpen] = useState(false);
+  const [remindOpen, setRemindOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [mediaRevealed, setMediaRevealed] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -202,6 +310,7 @@ export function ChatBubble({
   const closeActions = () => {
     setActionsOpen(false);
     setReactOpen(false);
+    setRemindOpen(false);
   };
 
   /* System notices: centered pill, no side, no actions. */
@@ -566,6 +675,9 @@ export function ChatBubble({
             </p>
           ) : null}
 
+          {/* v42 — kartu polling (opsi + bar persentase + total suara). */}
+          {!deleted && poll ? <PollCard poll={poll} dark={isRight} onVote={onPollVote} /> : null}
+
           {/* Time + read receipts */}
           <span
             className={cn(
@@ -809,6 +921,33 @@ export function ChatBubble({
               )}
               {speaking ? "Sedang diputar…" : "Bacakan AI"}
             </button>
+          ) : null}
+          {onRemind ? (
+            remindOpen ? (
+              REMIND_PRESETS.map((p) => (
+                <button
+                  key={p.key}
+                  type="button"
+                  className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
+                  onClick={() => {
+                    closeActions();
+                    onRemind(p.key);
+                  }}
+                >
+                  <Clock className="size-3.5" aria-hidden="true" />
+                  {p.label}
+                </button>
+              ))
+            ) : (
+              <button
+                type="button"
+                className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
+                onClick={() => setRemindOpen(true)}
+              >
+                <Bell className="size-3.5" aria-hidden="true" />
+                Ingatkan saya
+              </button>
+            )
           ) : null}
           {onModerate ? (
             <button

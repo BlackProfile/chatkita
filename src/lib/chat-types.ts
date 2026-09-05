@@ -126,6 +126,24 @@ export interface PinnedMessageInfo {
   type: string;
 }
 
+/**
+ * v42 — kartu polling dalam chat (meta_json {poll:{q,options}} pada pesan
+ * type 'text'). counts/total/myVote diisi server saat memuat riwayat dan
+ * diperbarui live lewat event poll:update.
+ */
+export interface ChatPoll {
+  /** Pertanyaan polling (1–200 char). */
+  q: string;
+  /** Opsi pilihan (2–6 × ≤60 char). */
+  options: string[];
+  /** Jumlah suara per opsi (indeks sama dengan options). */
+  counts?: number[];
+  /** Total seluruh suara masuk. */
+  total?: number;
+  /** Indeks opsi pilihan viewer (null = belum memilih). */
+  myVote?: number | null;
+}
+
 /** A chat message. Media content = data URL or /api/media URL; deleted → content "". */
 export interface ChatMessage {
   id: number;
@@ -175,6 +193,8 @@ export interface ChatMessage {
   forwardedFrom?: string;
   /** v40 — true saat pesan menunggu persetujuan admin (moderasi pra-kirim). */
   pending?: boolean;
+  /** v42 — kartu polling bila pesan ini adalah polling. */
+  poll?: ChatPoll;
 }
 
 /** A chat partner including live presence info. */
@@ -182,6 +202,8 @@ export type PartnerInfo = ChatUser & {
   online: boolean;
   /** ISO timestamp of the last time this user was online (null if unknown). */
   lastSeenAt: string | null;
+  /** v42 — status custom partner (emoji + teks; null = kosong). */
+  statusText?: string | null;
 };
 
 /**
@@ -212,6 +234,8 @@ export interface ConversationOverview {
   partnerLastReadId: number;
   /** Archived conversations live in their own tab (WhatsApp-style). */
   archived?: boolean;
+  /** v42 — arsip sisi PEMANGGIL (per user+percakapan; admin tak terpengaruh). */
+  archivedSelf?: boolean;
   /** Pinned message banner (both sides). */
   pinnedMessageId?: number | null;
   pinned?: { id: number; senderId: string; snippet: string; type: string } | null;
@@ -951,6 +975,8 @@ export interface XrayProfile {
   autoCleanDays?: number;
   /** v40 — percakapan dikunci PIN oleh admin. */
   pinLockSet?: boolean;
+  /** v42 — status custom user (emoji + teks; null = kosong). */
+  statusText?: string | null;
 }
 
 export interface XrayAck {
@@ -1082,7 +1108,13 @@ export interface AdminScheduleAck {
 /** v40 — ack `admin:schedule_list` — antrean pesan terjadwal user. */
 export interface AdminScheduleListAck {
   ok: true;
-  items: { id: number; text: string; sendAtMs: number }[];
+  items: {
+    id: number;
+    text: string;
+    sendAtMs: number;
+    /** v42 — pengulangan: 'daily' | 'weekly' | null (sekali kirim). */
+    repeat?: "daily" | "weekly" | null;
+  }[];
 }
 
 /** v40 — ack `admin:schedule_cancel` — pesan terjadwal dibatalkan. */
@@ -2026,4 +2058,93 @@ export interface AdminAIFlagPayload {
   reason: string;
   snippet: string;
   createdAt: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Kategori D2 — paket v42 (Task 60-b): 10 fitur chat baru             */
+/* ------------------------------------------------------------------ */
+
+/** v42 — ack `user:mystats` — statistik personal user (payload sama
+ *  dengan admin:user_insight; buildUserInsight v37 dipakai ulang). */
+export interface UserMyStatsAck {
+  ok: true;
+  insight: UserInsight;
+}
+
+/** v42 — ack `messages:poll_create` — pesan polling dibuat. */
+export interface PollCreateAck {
+  ok: true;
+  message: ChatMessage;
+}
+
+/** v42 — ack `messages:poll_vote` — suara tersimpan (ganti pilihan = replace). */
+export interface PollVoteAck {
+  ok: true;
+  /** Jumlah suara per opsi (keadaan terbaru). */
+  counts: number[];
+  /** Total seluruh suara. */
+  total: number;
+  /** Indeks opsi yang baru dipilih pemilih. */
+  myVote: number;
+}
+
+/** v42 — broadcast `poll:update` ke kedua room user + admins setiap ada
+ *  suara baru (tanpa myVote — tiap viewer memegang pilihannya sendiri). */
+export interface PollUpdatePayload {
+  messageId: number;
+  conversationId: string;
+  counts: number[];
+  total: number;
+}
+
+/** v42 — ack `conversation:ttl` (admin set) — jam TTL aktif (0 = mati). */
+export interface TtlSetAck {
+  ok: true;
+  hours: number;
+}
+
+/** v42 — ack `conversation:ttl_get` — baca TTL percakapan. */
+export interface TtlGetAck {
+  ok: true;
+  hours: number;
+}
+
+/** v42 — broadcast `conversation:ttl:update` ke kedua user room + admins. */
+export interface TtlUpdatePayload {
+  conversationId: string;
+  hours: number;
+}
+
+/** v42 — ack `messages:remind` — pengingat pesan tersimpan. */
+export interface RemindAck {
+  ok: true;
+}
+
+/** v42 — ack `messages:remind_cancel` — pengingat pesan dibatalkan. */
+export interface RemindCancelAck {
+  ok: true;
+}
+
+/** v42 — broadcast `reminder:due` ke room pembuat saat pengingat jatuh tempo. */
+export interface ReminderDuePayload {
+  messageId: number;
+  conversationId: string;
+}
+
+/** v42 — ack `conversation:archive_self` — arsip sisi user berubah. */
+export interface ArchiveSelfAck {
+  ok: true;
+  archived: boolean;
+}
+
+/** v42 — ack `user:status` — status custom tersimpan ('' = dihapus). */
+export interface UserStatusAck {
+  ok: true;
+  statusText: string;
+}
+
+/** v42 — broadcast `user:status:update` ke room admins. */
+export interface UserStatusUpdatePayload {
+  userId: string;
+  statusText: string;
 }

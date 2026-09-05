@@ -124,7 +124,10 @@ export function UserControlsV40({
   /* Pesan terjadwal */
   const [schedText, setSchedText] = useState("");
   const [schedAt, setSchedAt] = useState("");
-  const [schedItems, setSchedItems] = useState<{ id: number; text: string; sendAtMs: number }[]>([]);
+  const [schedRepeat, setSchedRepeat] = useState<"" | "daily" | "weekly">("");
+  const [schedItems, setSchedItems] = useState<
+    { id: number; text: string; sendAtMs: number; repeat?: "daily" | "weekly" | null }[]
+  >([]);
   /* Pengingat otomatis */
   const [nudgeDays, setNudgeDays] = useState(String(profile.nudgeDays ?? 0));
   const [nudgeText, setNudgeText] = useState(profile.nudgeText ?? "");
@@ -274,14 +277,26 @@ export function UserControlsV40({
     setBusy("sched");
     socket.emit(
       "admin:schedule_message",
-      { userId: guard, text: schedText.trim(), sendAtMs: ms },
+      {
+        userId: guard,
+        text: schedText.trim(),
+        sendAtMs: ms,
+        // v42 — pengulangan opsional: harian / mingguan.
+        ...(schedRepeat ? { repeat: schedRepeat } : {}),
+      },
       (res: AckOf<AdminScheduleAck>) => {
         setBusy(null);
         if (res.ok) {
-          setSchedItems((prev) => [...prev, { id: res.id, text: schedText.trim(), sendAtMs: res.sendAtMs }]);
+          setSchedItems((prev) => [
+            ...prev,
+            { id: res.id, text: schedText.trim(), sendAtMs: res.sendAtMs, repeat: schedRepeat || null },
+          ]);
           setSchedText("");
           setSchedAt("");
-          onNotice?.(`Pesan dijadwalkan ${fmtDateTime(res.sendAtMs)} ✓`);
+          setSchedRepeat("");
+          onNotice?.(
+            `Pesan dijadwalkan ${fmtDateTime(res.sendAtMs)}${schedRepeat ? ` (berulang ${schedRepeat === "daily" ? "harian" : "mingguan"})` : ""} ✓`
+          );
         } else onNotice?.("Gagal menjadwalkan (maks 30 hari ke depan)");
       }
     );
@@ -552,6 +567,12 @@ export function UserControlsV40({
               <li key={s.id} className="flex items-center gap-1.5 rounded-lg bg-accent px-2 py-1">
                 <span className="min-w-0 flex-1 truncate text-[11px]" title={s.text}>
                   ⏰ {fmtDateTime(s.sendAtMs)} — {s.text}
+                  {/* v42 — label pengulangan pada antrean terjadwal */}
+                  {s.repeat ? (
+                    <span className="ml-1 font-medium text-emerald-700 dark:text-emerald-300">
+                      🔁 {s.repeat === "daily" ? "harian" : "mingguan"}
+                    </span>
+                  ) : null}
                 </span>
                 <Button
                   size="icon"
@@ -586,6 +607,29 @@ export function UserControlsV40({
           <Button size="sm" variant="outline" className="h-8 shrink-0" disabled={!schedText.trim() || !schedAt || busy === "sched"} onClick={doSchedule}>
             {busy === "sched" ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : "Jadwalkan"}
           </Button>
+        </div>
+        {/* v42 — pengulangan: tidak / harian / mingguan */}
+        <div className="flex gap-1.5" role="group" aria-label="Pengulangan pesan terjadwal">
+          {([
+            { key: "", label: "Tidak" },
+            { key: "daily", label: "Harian" },
+            { key: "weekly", label: "Mingguan" },
+          ] as const).map((o) => (
+            <button
+              key={o.key}
+              type="button"
+              aria-pressed={schedRepeat === o.key}
+              className={cn(
+                "flex h-7 flex-1 items-center justify-center rounded-lg border text-[11px] font-medium transition-colors",
+                schedRepeat === o.key
+                  ? "border-emerald-600 bg-emerald-600 text-white"
+                  : "bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
+              )}
+              onClick={() => setSchedRepeat(o.key)}
+            >
+              {o.label}
+            </button>
+          ))}
         </div>
       </div>
 
