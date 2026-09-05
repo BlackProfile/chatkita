@@ -13,6 +13,7 @@ import {
   Image as ImageIcon,
   Info,
   Languages,
+  Loader2,
   Music,
   Pause,
   Pencil,
@@ -20,8 +21,10 @@ import {
   Play,
   Reply,
   SmilePlus,
+  Sparkles,
   Star,
   Trash2,
+  Volume2,
   X,
 } from "lucide-react";
 
@@ -113,6 +116,14 @@ interface ChatBubbleProps {
   onToggleStar?: () => void;
   /** v22 — batalkan pesan terjadwal milik sendiri (belum terkirim). */
   onCancelScheduled?: () => void;
+  /** v41 — admin: bacakan pesan teks dengan suara AI (TTS). */
+  onSpeak?: () => void;
+  /** v41 — TTS pesan ini sedang diputar. */
+  speaking?: boolean;
+  /** v41 — admin: transkrip ulang pesan suara dengan AI (ASR). */
+  onTranscribe?: () => void;
+  /** v41 — transkripsi AI sedang berjalan. */
+  transcribing?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -352,6 +363,25 @@ export function ChatBubble({
                 >
                   📝 {transcript}
                 </p>
+              ) : onTranscribe ? (
+                <button
+                  type="button"
+                  className={cn(
+                    "mt-1.5 flex items-center gap-1 text-[11px] font-medium text-emerald-700 hover:text-emerald-600 dark:text-emerald-300",
+                    isRight && "text-white/90 hover:text-white"
+                  )}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onTranscribe();
+                  }}
+                >
+                  {transcribing ? (
+                    <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Sparkles className="size-3" aria-hidden="true" />
+                  )}
+                  {transcribing ? "AI mendengarkan…" : "Transkrip AI"}
+                </button>
               ) : null}
             </div>
           ) : type === "file" && fileKind === "video" ? (
@@ -757,6 +787,23 @@ export function ChatBubble({
             >
               <Info className="size-3.5" aria-hidden="true" />
               Metadata
+            </button>
+          ) : null}
+          {onSpeak ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-xs text-emerald-700 hover:bg-emerald-600/10 dark:text-emerald-300"
+              onClick={() => {
+                closeActions();
+                onSpeak();
+              }}
+            >
+              {speaking ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+              ) : (
+                <Volume2 className="size-3.5" aria-hidden="true" />
+              )}
+              {speaking ? "Sedang diputar…" : "Bacakan AI"}
             </button>
           ) : null}
           {onModerate ? (

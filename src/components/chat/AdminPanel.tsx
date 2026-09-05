@@ -94,6 +94,11 @@ import {
 } from "@/components/chat/user-media-dialog";
 import { UserInsightDialog } from "@/components/chat/user-insight-dialog";
 import {
+  AdminAIDialog,
+  AISuggestChips,
+  type AdminAIMediaHit,
+} from "@/components/chat/admin-ai";
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -145,6 +150,9 @@ import {
   draftKey,
   type AckOf,
   type AdminAuthAck,
+  type AdminAIFlagPayload,
+  type AdminAITranscribeAck,
+  type AdminAITtsAck,
   type AdminFlaggedPayload,
   type AdminModerateAck,
   type AdminQuotaWarnPayload,
@@ -329,6 +337,11 @@ export function AdminPanel() {
   // Viewer media full-screen — Task 19: bawa galeri media (foto+video)
   // percakapan aktif + index item yang dibuka (geser-gesir di viewer).
   const [viewer, setViewer] = useState<ViewerState | null>(null);
+  /* v41 — paket AI admin: dialog pusat + TTS + transkrip per-pesan. */
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiTranscribing, setAiTranscribing] = useState<number | null>(null);
+  const [speakingId, setSpeakingId] = useState<number | null>(null);
+  const speakAudioRef = useRef<HTMLAudioElement | null>(null);
   const mediaGallery = useMemo(
     () => buildMediaGallery(activeId ? messagesMap[activeId] ?? [] : []),
     [messagesMap, activeId]
@@ -360,6 +373,74 @@ export function AdminPanel() {
     },
     []
   );
+
+  /* v41 — bacakan pesan teks dengan suara AI (TTS via chat-service). */
+  const handleAiSpeak = (m: ChatMessage) => {
+    const sock = socketRef.current;
+    if (!sock || speakingId === m.id) return;
+    if (speakAudioRef.current) {
+      speakAudioRef.current.pause();
+      speakAudioRef.current = null;
+    }
+    setSpeakingId(m.id);
+    sock.emit("admin:ai_tts", { messageId: m.id }, (res: AdminAITtsAck) => {
+      if (!res.ok || !res.audioBase64) {
+        setSpeakingId(null);
+        toast.error(
+          res.error === "AI_UNAVAILABLE"
+            ? "Layanan AI sedang tidak tersedia"
+            : "Gagal membacakan pesan"
+        );
+        return;
+      }
+      const audio = new Audio(`data:audio/wav;base64,${res.audioBase64}`);
+      speakAudioRef.current = audio;
+      audio.onended = () => {
+        setSpeakingId(null);
+        speakAudioRef.current = null;
+      };
+      audio.onerror = () => {
+        setSpeakingId(null);
+        speakAudioRef.current = null;
+      };
+      void audio.play().catch(() => setSpeakingId(null));
+    });
+  };
+
+  /* v41 — transkrip ulang pesan suara dengan AI (hasilnya masuk via
+   * message:updated broadcast dari server, sama seperti transkrip otomatis). */
+  const handleAiTranscribe = (m: ChatMessage) => {
+    const sock = socketRef.current;
+    if (!sock || aiTranscribing !== null) return;
+    setAiTranscribing(m.id);
+    sock.emit("admin:ai_transcribe", { messageId: m.id }, (res: AdminAITranscribeAck) => {
+      setAiTranscribing(null);
+      if (res.ok && res.transcript) toast.success("Transkrip AI siap");
+      else toast.error("AI tidak bisa mendengarkan pesan ini");
+    });
+  };
+
+  /* v41 — buka MediaViewer dari hasil pencarian media AI (galeri 1 item). */
+  const openAiMediaViewer = (hit: AdminAIMediaHit) => {
+    const galleryItem = {
+      id: hit.messageId,
+      type: "image" as const,
+      content: hit.mediaUrl,
+      fileName: hit.fileName,
+      fileSize: undefined,
+      mimeType: "image/jpeg",
+    };
+    setViewer(
+      viewerStateForMessage([galleryItem], {
+        id: hit.messageId,
+        type: "image",
+        content: hit.mediaUrl,
+        fileName: hit.fileName,
+        fileSize: undefined,
+        mimeType: "image/jpeg",
+      })
+    );
+  };
 
   // v5 — font / pinned / edit / translate / archive / QR
   const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
@@ -863,6 +944,14 @@ export function AdminPanel() {
     // v11 — pesan cocok kata terlarang (diam-diam, hanya ke room admins).
     socket.on("admin:flagged", (p: AdminFlaggedPayload) => {
       showMenuNotice(`🚩 "${p.keyword}" dari ${p.senderName}: ${p.snippet.slice(0, 60)}`);
+    });
+    // v41 — intel moderasi otomatis AI (pesan disensor/diblokir).
+    socket.on("admin:ai_flag", (p: AdminAIFlagPayload) => {
+      showMenuNotice(
+        p.action === "block"
+          ? `🤖 Diblokir AI — ${p.senderName}: ${p.snippet.slice(0, 60)}`
+          : `🤖 Disensor AI — ${p.senderName}: ${p.snippet.slice(0, 60)}`
+      );
     });
     // v40 — peringatan kuota media per-user (ambang 80% / 95%).
     socket.on("admin:quota_warn", (p: AdminQuotaWarnPayload) => {
@@ -2569,6 +2658,14 @@ export function AdminPanel() {
                   >
                     💡 Insight
                   </button>
+                  {/* v41 — pusat AI admin (ringkasan/asisten/media/gambar/moderasi) */}
+                  <button
+                    type="button"
+                    className="flex h-7 shrink-0 items-center gap-1 rounded-full border bg-background px-2.5 text-[11px] font-medium text-emerald-700 transition-colors hover:bg-emerald-600 hover:text-white dark:text-emerald-300"
+                    onClick={() => setAiOpen(true)}
+                  >
+                    🤖 AI
+                  </button>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <button
@@ -2759,6 +2856,18 @@ export function AdminPanel() {
                           replyAuthor={m.replyTo?.senderId === ADMIN_ID ? "Anda" : activeConversation.partner.name}
                           durationMs={m.durationMs}
                           transcript={m.transcript}
+                          onSpeak={
+                            m.type === "text" && !m.deletedAt && !m.scheduledAt
+                              ? () => handleAiSpeak(m)
+                              : undefined
+                          }
+                          speaking={speakingId === m.id}
+                          onTranscribe={
+                            m.type === "voice" && !m.deletedAt && !m.mediaExpiredAt
+                              ? () => handleAiTranscribe(m)
+                              : undefined
+                          }
+                          transcribing={aiTranscribing === m.id}
                           reactions={m.reactions}
                           myUserId={ADMIN_ID}
                           edited={!!m.editedAt}
@@ -3045,6 +3154,14 @@ export function AdminPanel() {
                   </div>
                 ) : null}
 
+                {/* v41 — saran balasan AI di atas composer */}
+                <AISuggestChips
+                  socket={socketRef.current}
+                  conversationId={activeConversation?.id ?? null}
+                  connected={connected}
+                  onPick={(text) => setInput(text.slice(0, MAX_MESSAGE_LENGTH))}
+                />
+
                 {/* Input row (or recording bar) */}
                 <div className="relative shrink-0 border-t bg-card/85 px-3 pt-2.5 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md">
                   {emojiOpen ? (
@@ -3310,6 +3427,16 @@ export function AdminPanel() {
         socket={socketRef.current}
         initialUserId={umTarget}
         onNotice={showMenuNotice}
+      />
+
+      {/* v41 — dialog pusat AI admin */}
+      <AdminAIDialog
+        open={aiOpen}
+        onClose={() => setAiOpen(false)}
+        socket={socketRef.current}
+        conversationId={activeConversation?.id ?? null}
+        partnerName={activeConversation?.partner.name ?? ""}
+        onOpenMedia={openAiMediaViewer}
       />
 
       {/* v38 — pusat cheat PER-USER dari toolbar percakapan */}

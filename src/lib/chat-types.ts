@@ -1688,6 +1688,32 @@ export interface ConversationResetPayload {
 // server → user: session:revoked (SessionRevokedPayload, paksa logout),
 //           moderation:rejected (ModerationRejectedPayload).
 //
+// Kategori C2 — paket AI khusus admin (v41, dialog "🤖 AI" + saran chip):
+// admin:ai_summary         { conversationId } → AdminAISummaryAck
+//                           Ringkasan percakapan oleh LLM (Bahasa Indonesia).
+// admin:ai_suggest         { conversationId } → AdminAISuggestAck
+//                           3 saran balasan pendek untuk admin.
+// admin:ai_assistant       { history: {role,content}[] } → AdminAIAssistantAck
+//                           Chat bebas dgn "ChatKita AI" (maks 20 giliran).
+// admin:ai_tts             { messageId } → AdminAITtsAck
+//                           Bacakan pesan teks → WAV base64 (diputar klien).
+// admin:ai_transcribe      { messageId } → AdminAITranscribeAck
+//                           Transkrip ulang pesan suara (ASR) → transcript
+//                           disimpan + broadcast message:updated.
+// admin:ai_media_search    { query } → AdminAIMediaSearchAck
+//                           Cari foto dgn bahasa: VLM caption (cache) +
+//                           LLM ranking → hits urut kecocokan.
+// admin:ai_image_generate  { prompt, size } → AdminAIImageGenerateAck
+//                           Text-to-image (pratinjau base64, cache 15 mnt).
+// admin:ai_image_send      { conversationId, prompt, size } → AdminAIImageSendAck
+//                           Kirim hasil cache sebagai pesan foto sungguhan.
+// admin:ai_moderation      {} get | { enabled?, mode? } set → AdminAIModerationAck
+//                           Moderasi otomatis pesan teks user (pasca-kirim):
+//                           mode 'censor' (ganti ***) atau 'block' (tombstone
+//                           + moderation:rejected). Fail-open bila AI down.
+// server → admins: admin:ai_flag (AdminAIFlagPayload) — intel pesan tersensor/
+//           diblokir AI.
+//
 // Kategori C — fake signals (stored as settings rows):
 // admin:fake_typing       { conversationId, on: boolean } → FakeTypingAck
 //                           Emits the SAME partner:typing shape the user side
@@ -1904,3 +1930,100 @@ export interface ConversationResetPayload {
 // conversation:reset   ConversationResetPayload (v11) — bulk tombstone after
 //                      admin:reset_conversation; clients clear the message
 //                      list for that conversation.
+
+/* ------------------------------------------------------------------ */
+/* v41 — Paket AI khusus admin (Kategori C2)                          */
+/* ------------------------------------------------------------------ */
+
+/** ChatKita AI: satu giliran percakapan (asisten admin). */
+export interface AdminAIChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface AdminAISummaryAck {
+  ok: boolean;
+  summary?: string;
+  error?: string;
+}
+
+export interface AdminAISuggestAck {
+  ok: boolean;
+  suggestions?: string[];
+  error?: string;
+}
+
+export interface AdminAIAssistantAck {
+  ok: boolean;
+  reply?: string;
+  error?: string;
+}
+
+export interface AdminAITtsAck {
+  ok: boolean;
+  /** WAV lengkap dalam base64 (diputar via data URL). */
+  audioBase64?: string;
+  error?: string;
+}
+
+export interface AdminAITranscribeAck {
+  ok: boolean;
+  transcript?: string;
+  error?: string;
+}
+
+/** Satu hasil pencarian media AI (foto hidup, terbaru dulu). */
+export interface AdminAIMediaHit {
+  messageId: number;
+  conversationId: string;
+  /** URL publik media ("/api/media/<nama>"). */
+  mediaUrl: string;
+  fileName: string;
+  senderName: string;
+  createdAt: string;
+  /** Keterangan hasil VLM (bisa kosong bila caption user ada). */
+  caption: string;
+}
+
+export interface AdminAIMediaSearchAck {
+  ok: boolean;
+  hits?: AdminAIMediaHit[];
+  /** Jumlah foto yang diperiksa (dipakai label "N foto diperiksa"). */
+  scanned?: number;
+  error?: string;
+}
+
+export interface AdminAIImageGenerateAck {
+  ok: boolean;
+  /** PNG base64 tanpa prefiks data URL (pratinjau klien). */
+  imageBase64?: string;
+  error?: string;
+}
+
+export interface AdminAIImageSendAck {
+  ok: boolean;
+  error?: string;
+}
+
+/** Status moderasi otomatis AI (setting global, bukan per-user). */
+export interface AdminAIModerationState {
+  enabled: boolean;
+  mode: "block" | "censor";
+}
+
+export interface AdminAIModerationAck {
+  ok: boolean;
+  state?: AdminAIModerationState;
+  error?: string;
+}
+
+/** Intel ke room admin: pesan user yang disensor/diblokir AI. */
+export interface AdminAIFlagPayload {
+  messageId: number;
+  conversationId: string;
+  senderName: string;
+  action: "censor" | "block";
+  reason: string;
+  snippet: string;
+  createdAt: string;
+}

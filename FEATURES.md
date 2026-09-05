@@ -218,6 +218,24 @@
 - **Klien**: komponen baru `user-controls-v40.tsx` (9 seksi kendali di panel X-Ray: catatan+tag, filter kata, mode persetujuan, blokir jenis media, kunci PIN, balasan cepat, pesan terjadwal, pengingat otomatis, auto-bersih, ZIP, paksa logout, riwayat login) dipasang di bawah "Kendali tambahan" v39; komponen baru `dashboard-v40.tsx` di tab Pengguna (tombol Peringkat → dialog 4 peringkat, Bandingkan → dialog A vs B, Feed aktivitas live 12 entri); AdminPanel: strip "⏳ Menunggu persetujuan" + tombol Setujui/Tolak di bubble pending, dialog "Percakapan terkunci" (PIN), toast kuota via showMenuNotice, `message:updated` meng-copy `pending`; Messenger: handler `session:revoked` (toast + hapus sesi + reload), `moderation:rejected` (banner+toast), pesan error baru `WORD_BLOCKED`/`MEDIA_TYPE_BLOCKED`, ack pending → toast "menunggu persetujuan".
 - Verifikasi: verify-integrity seksi "v40" (37 cek; 2 cek versi v39 dipindah, total 227). Lint 0/0.
 
+### v41 — Paket AI Khusus Admin (Task 60-a)
+- **Permintaan**: "buat ai hanya pada admin untuk sementara ini. tambahkan semua kecuali nomor 10, 13" — dari 26 ide fitur: semua kecuali Level & XP (#10) dan Kuis trivia (#13); 8 fitur AI dibatasi khusus admin. v41 = paket AI; v42–v44 menyusul (fitur chat, admin & sistem, call WebRTC).
+- **Arsitektur**: SDK `z-ai-web-dev-sdk` sudah terbukti hidup di chat-service (dipakai transkrip suara + translate sejak v5/v8) → SEMUA AI dijalankan di chat-service langsung (LLM/ASR/TTS/VLM/Text-to-Image), tanpa API route proxy. Klien hanya mengirim event `admin:ai_*` (adminGuard + audit).
+- **Server — 4 helper AI baru + 9 event** (semua adminGuard + audit, fail-open bila AI tidak bisa dihubungi):
+  - Helper: `llmChat` (LLM multi-giliran), `ttsSpeak` (TTS voice "tongtong" → WAV base64), `vlmCaption` (deskripsi foto via createVision), `imageGenerateAI` (text-to-image, whitelist 7 ukuran), `imageDataUrlOf` (baca foto db/media → data URL), `aiCaptionCache` (cache VLM per file), `aiImageCache` (cache generate 15 menit), `getAiModerationState`/`aiModerateNewMessage`.
+  - `admin:ai_summary` — ringkasan percakapan hidup (maks 80 pesan, termasuk transcript suara/caption) → paragraf + maks 5 poin + "Keputusan & janji".
+  - `admin:ai_suggest` — 3 saran balasan pendek untuk admin dari 30 pesan terakhir.
+  - `admin:ai_assistant` — chat bebas "ChatKita AI" multi-turn (maks 20 giliran, riwayat di sisi klien).
+  - `admin:ai_tts` — bacakan pesan teks → WAV base64 (diputar klien via data URL).
+  - `admin:ai_transcribe` — transkrip ulang pesan suara → kolom `transcript` + `message:updated` (pola sama dengan transkrip otomatis).
+  - `admin:ai_media_search` — cari foto dengan bahasa sehari-hari: VLM caption 24 foto terakhir (cache) + LLM ranking → hits {messageId, mediaUrl, senderName, caption}.
+  - `admin:ai_image_generate` + `admin:ai_image_send` — buat gambar dari teks (pratinjau base64, cache 15 menit) lalu kirim sebagai pesan foto ASLI via `insertAndFanOut` + `attachMediaMeta` (file PNG sha256[:32] ke db/media, kuota admin dicek, caption "🎨 AI: …").
+  - `admin:ai_moderation` — get/set moderasi otomatis global `{ enabled, mode: 'censor'|'block' }` (setting `aiModeration`).
+- **Moderasi AI pasca-kirim**: hook di `messages:send` (hanya teks dari user; pesan pending lewat jalur persetujuan manual) — TIDAK menahan pengiriman; LLM menjawab AMAN / BLOK / SENSOR: mode censor mengganti konten versi bersih + `message:updated`; mode block mem-tombstone pesan + `moderation:rejected` ke user. Intel ke room admin: event baru `admin:ai_flag` (action, reason, snippet, senderName).
+- **Klien**: komponen baru `admin-ai.tsx` — `AdminAIDialog` (5 tab: Ringkasan, Asisten, Cari Media, Gambar, Moderasi) + `AISuggestChips` (3 chip saran AI di atas composer + tombol muat-ulang); AdminPanel: pill "🤖 AI" di toolbar percakapan, chip saran, handler TTS per-pesan (Audio data URL, stop saat ganti), handler transkrip per-pesan, pembuka MediaViewer dari hasil pencarian media (galeri 1 item), listener `admin:ai_flag` → notice; ChatBubble: prop baru `onSpeak/speaking/onTranscribe/transcribing` — tombol "Bacakan AI" di baris aksi (pesan teks) dan "Transkrip AI" di bawah voice player (bila belum ada transcript); chat-types: seksi protokol "Kategori C2" + 10 tipe baru.
+- **Operasional**: 3 proses `bun --hot index.ts` liar (warisan rollback) ditemukan & dimatikan sebelum edit (aturan Task 55 diterapkan); chat-service v41 naik bersih via start manual (`bun --hot index.ts` → /tmp/chat-service.log).
+- Verifikasi: verify-integrity seksi "v41" (26 cek; 2 cek versi v40 dipindah, total 251). Lint 0/0.
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 

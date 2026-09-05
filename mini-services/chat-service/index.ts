@@ -73,7 +73,18 @@
 import { createServer } from 'http'
 import { join, resolve } from 'path'
 import { createHash } from 'crypto'
-import { closeSync, openSync, readFileSync, readdirSync, readSync, statSync, unlinkSync } from 'node:fs'
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { Database } from 'bun:sqlite'
 import { Server, type Socket as IoSocket } from 'socket.io'
 import ZAI from 'z-ai-web-dev-sdk'
@@ -170,8 +181,27 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        per-user (tombstone pesan > X hari). MEDIA & KEAMANAN — unduh ZIP
  *        semua media user (fflate), peringatan kuota 80%/95% ke admin,
  *        kunci percakapan dgn PIN per-user (admin harus buka kunci sekali
- *        per socket). Semua event adminGuard + audit. */
-const SERVICE_VERSION = 'v40'
+ *        per socket). Semua event adminGuard + audit.
+ *  v41 — PAKET AI KHUSUS ADMIN (z-ai-web-dev-sdk langsung di chat-service;
+ *        klien hanya menerima hasil via event berikut, semua adminGuard +
+ *        audit): admin:ai_summary (ringkasan percakapan LLM Bahasa
+ *        Indonesia), admin:ai_suggest (3 saran balasan pendek untuk
+ *        admin), admin:ai_assistant (chat bebas "ChatKita AI" multi-turn
+ *        maks 20 giliran), admin:ai_tts (bacakan pesan teks → WAV base64,
+ *        voice "tongtong"), admin:ai_transcribe (transkrip ulang pesan
+ *        suara via ASR → transcript disimpan + message:updated),
+ *        admin:ai_media_search (cari foto dgn bahasa: VLM caption per
+ *        foto + cache in-memory, ranking LLM → hits), admin:ai_image_generate
+ *        + admin:ai_image_send (text-to-image, cache 15 menit, kirim
+ *        sebagai pesan foto asli via insertAndFanOut + attachMediaMeta),
+ *        admin:ai_moderation (get/set status moderasi otomatis AI global
+ *        { enabled, mode 'censor'|'block' }) — hook pasca-kirim di
+ *        messages:send memeriksa pesan TEKS user (bukan admin) tanpa
+ *        menahan pengiriman: mode sensor mengganti konten jadi versi
+ *        bersih (message:updated), mode block mem-tombstone pesan
+ *        (moderation:rejected ke user). Fail-open bila AI tidak bisa
+ *        dihubungi. Intel ke room admins: admin:ai_flag. */
+const SERVICE_VERSION = 'v41'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -2203,6 +2233,225 @@ const mediaNameOf = (content: string | null | undefined): string | null => {
 }
 
 /* ------------------------------------------------------------------ */
+/* v41 — Paket AI khusus admin (LLM/ASR/TTS/VLM/Text-to-Image)         */
+/* ------------------------------------------------------------------ */
+
+/** Cache caption VLM per file media (nama file → deskripsi singkat). */
+const aiCaptionCache = new Map<string, string>()
+
+/** Cache hasil text-to-image 15 menit ("size:prompt" → PNG base64). */
+const aiImageCache = new Map<string, { b64: string; at: number }>()
+
+const AI_IMAGE_TTL_MS = 15 * 60_000
+const AI_IMAGE_SIZES = new Set([
+  '1024x1024',
+  '768x1344',
+  '864x1152',
+  '1344x768',
+  '1152x864',
+  '1440x720',
+  '720x1440',
+])
+
+/** LLM multi-giliran (asisten admin) — messages[0] = system. */
+const llmChat = async (
+  messages: Array<{ role: 'assistant' | 'user'; content: string }>,
+  maxLen = 1200
+): Promise<string | null> => {
+  try {
+    const zai = await getZai()
+    const completion = await zai.chat.completions.create({
+      messages,
+      thinking: { type: 'disabled' },
+    })
+    const text = completion?.choices?.[0]?.message?.content?.trim()
+    zaiPromise = null
+    return text && text.length > 0 ? text.slice(0, maxLen) : null
+  } catch (err) {
+    zaiPromise = null
+    console.error('LLM chat error:', (err as Error)?.message ?? err)
+    return null
+  }
+}
+
+/** TTS: teks → WAV base64 (maks 900 karakter per permintaan). */
+const ttsSpeak = async (text: string): Promise<string | null> => {
+  try {
+    const zai = await getZai()
+    const res = await zai.audio.tts.create({
+      input: text.slice(0, 900),
+      voice: 'tongtong',
+      speed: 1.0,
+      response_format: 'wav',
+      stream: false,
+    })
+    zaiPromise = null
+    const buf = Buffer.from(new Uint8Array(await res.arrayBuffer()))
+    return buf.length > 0 ? buf.toString('base64') : null
+  } catch (err) {
+    zaiPromise = null
+    console.error('TTS error:', (err as Error)?.message ?? err)
+    return null
+  }
+}
+
+/** VLM: deskripsi foto satu kalimat (Bahasa Indonesia). */
+const vlmCaption = async (dataUrl: string): Promise<string | null> => {
+  try {
+    const zai = await getZai()
+    const res = await zai.chat.completions.createVision({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Deskripsikan foto ini dalam SATU kalimat Bahasa Indonesia (maks 20 kata). Jawab hanya deskripsinya tanpa awalan apa pun.',
+            },
+            { type: 'image_url', image_url: { url: dataUrl } },
+          ],
+        },
+      ],
+      thinking: { type: 'disabled' },
+    })
+    zaiPromise = null
+    const text = res?.choices?.[0]?.message?.content?.trim()
+    return text && text.length > 0 ? text.slice(0, 200) : null
+  } catch (err) {
+    zaiPromise = null
+    console.error('VLM error:', (err as Error)?.message ?? err)
+    return null
+  }
+}
+
+/** Text-to-image: prompt → PNG base64 (null bila gagal). */
+const imageGenerateAI = async (prompt: string, size: string): Promise<string | null> => {
+  try {
+    const zai = await getZai()
+    const res = await zai.images.generations.create({ prompt: prompt.slice(0, 500), size })
+    zaiPromise = null
+    const b64 = res?.data?.[0]?.base64
+    return typeof b64 === 'string' && b64.length > 0 ? b64 : null
+  } catch (err) {
+    zaiPromise = null
+    console.error('ImageGen error:', (err as Error)?.message ?? err)
+    return null
+  }
+}
+
+/** Konten pesan gambar → data URL (file db/media dibaca dari disk). */
+const imageDataUrlOf = (content: string): string | null => {
+  if (content.startsWith('data:')) return content
+  const name = mediaNameOf(content)
+  if (!name || !/\.(png|jpe?g|webp|gif|avif|bmp)$/i.test(name)) return null
+  try {
+    const bytes = readFileSync(join(MEDIA_DIR, name))
+    if (bytes.length === 0 || bytes.length > 12_000_000) return null
+    const mime = /\.png$/i.test(name)
+      ? 'image/png'
+      : /\.webp$/i.test(name)
+        ? 'image/webp'
+        : /\.gif$/i.test(name)
+          ? 'image/gif'
+          : 'image/jpeg'
+    return `data:${mime};base64,${bytes.toString('base64')}`
+  } catch {
+    return null
+  }
+}
+
+/** Status moderasi otomatis AI (setting global). */
+interface AiModerationState {
+  enabled: boolean
+  mode: 'censor' | 'block'
+}
+
+const getAiModerationState = (): AiModerationState => {
+  try {
+    const raw = getSetting('aiModeration')
+    if (!raw) return { enabled: false, mode: 'censor' }
+    const parsed = JSON.parse(raw) as Partial<AiModerationState> | null
+    return {
+      enabled: parsed?.enabled === true,
+      mode: parsed?.mode === 'block' ? 'block' : 'censor',
+    }
+  } catch {
+    return { enabled: false, mode: 'censor' }
+  }
+}
+
+/**
+ * v41 — moderasi AI pasca-kirim untuk pesan TEKS user (bukan admin).
+ * Tidak menahan pengiriman: hasil diterapkan belakangan (sensor = konten
+ * diganti versi bersih; blok = tombstone). Fail-open bila AI gagal.
+ */
+const aiModerateNewMessage = async (
+  message: ChatMessageApi,
+  conversation: ConversationRow,
+  text: string
+) => {
+  const state = getAiModerationState()
+  if (!state.enabled) return
+  const verdict = await llmComplete(
+    'Kamu moderator konten chat Bahasa Indonesia. Tentukan apakah pesan user mengandung kata kasar, hinaan, SARA, konten seksual, atau spam/judi online. Jawab HANYA dengan salah satu format berikut (tanpa penjelasan lain): "AMAN" ATAU "BLOK: <alasan singkat>" ATAU "SENSOR: <teks yang sudah dibersihkan, kata terlarang diganti ***>".',
+    text.slice(0, 800),
+    900
+  )
+  if (!verdict) return // fail-open
+  const v = verdict.trim()
+  if (/^AMAN\b/i.test(v)) return
+  const sender = findUserById(message.senderId)
+  const senderName = sender?.name ?? message.senderId.slice(0, 8)
+  const partnerId =
+    conversation.user_a_id === ADMIN_ID ? conversation.user_b_id : conversation.user_a_id
+  if (/^BLOK\b/i.test(v)) {
+    const row = db.query('SELECT * FROM messages WHERE id = ?').get(message.id) as
+      | MessageRow
+      | null
+    if (!row || row.deleted_at) return
+    tombstoneMessage(row, conversation, now())
+    io.to(`user:${partnerId}`).emit('moderation:rejected', { messageId: message.id })
+    io.to('admins').emit('admin:ai_flag', {
+      messageId: message.id,
+      conversationId: conversation.id,
+      senderName,
+      action: 'block',
+      reason: v.slice(5).replace(/^[:\s]+/, '').slice(0, 120) || 'konten terlarang',
+      snippet: text.slice(0, 140),
+      createdAt: message.createdAt,
+    })
+    audit('ai_moderation_block', `${senderName} #${message.id}: ${text.slice(0, 60)}`)
+    console.log(`[ai-moderasi] blok #${message.id} (${senderName})`)
+    return
+  }
+  if (/^SENSOR\b/i.test(v)) {
+    const cleaned = v.slice(7).replace(/^[:\s]+/, '').trim().slice(0, MAX_MESSAGE_LENGTH)
+    if (!cleaned || cleaned === text) return
+    db.run('UPDATE messages SET content = ? WHERE id = ? AND deleted_at IS NULL', [
+      cleaned,
+      message.id,
+    ])
+    const payload = { id: message.id, conversationId: conversation.id, content: cleaned }
+    io.to(`user:${partnerId}`).emit('message:updated', payload)
+    io.to(`user:${message.senderId}`).emit('message:updated', payload)
+    io.to('admins').emit('message:updated', payload)
+    io.to('admins').emit('admin:ai_flag', {
+      messageId: message.id,
+      conversationId: conversation.id,
+      senderName,
+      action: 'censor',
+      reason: 'konten tidak pantas disensor ***',
+      snippet: text.slice(0, 140),
+      createdAt: message.createdAt,
+    })
+    pushConversationsTo(conversation.user_a_id)
+    pushConversationsTo(conversation.user_b_id)
+    audit('ai_moderation_censor', `${senderName} #${message.id}`)
+    console.log(`[ai-moderasi] sensor #${message.id} (${senderName})`)
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* v26 — Pembaca metadata media (header file) untuk Peta Penyimpanan   */
 /* ------------------------------------------------------------------ */
 
@@ -4226,6 +4475,12 @@ io.on('connection', (socket) => {
         void attachMediaMeta(message.id, message.content)
       }
       ack({ ok: true, message })
+
+      // v41 — moderasi AI pasca-kirim (hanya teks dari user, bukan admin;
+      // pesan pending lewat jalur persetujuan manual jadi tidak diperiksa).
+      if (type === 'text' && me !== ADMIN_ID) {
+        void aiModerateNewMessage(message, conversation, trimmed)
+      }
 
       // v40 — peringatan kuota 80%/95% + feed aktivitas live (user saja).
       if (senderRow && fileMeta) maybeEmitQuotaWarn(senderRow)
@@ -7179,6 +7434,367 @@ io.on('connection', (socket) => {
     })
   }))
 
+
+  /* ------------------------------------------------------------------ */
+  /* v41 — paket AI khusus admin (semua adminGuard + audit)              */
+  /* ------------------------------------------------------------------ */
+
+  /** Kumpulkan teks percakapan hidup terakhir untuk LLM (terlama → terbaru). */
+  const buildAiTranscript = (conversationId: string, limit = 80): string => {
+    const rows = db
+      .query(
+        `SELECT m.*, u.name AS sender_name FROM messages m
+         LEFT JOIN users u ON u.id = m.sender_id
+         WHERE m.conversation_id = ? AND m.deleted_at IS NULL
+           AND (m.pending IS NULL OR m.pending = 0)
+         ORDER BY m.id DESC LIMIT ?`
+      )
+      .all(conversationId, limit) as Array<MessageRow & { sender_name: string | null }>
+    return rows
+      .reverse()
+      .map((r) => {
+        const name = r.sender_name ?? 'Tanpa nama'
+        const t = r.type ?? 'text'
+        if (t === 'image') return `${name}: [foto]${r.caption ? ` ${r.caption}` : ''}`
+        if (t === 'voice')
+          return `${name}: (pesan suara)${r.transcript ? ` ${r.transcript}` : ''}`
+        if (t === 'file')
+          return `${name}: [berkas ${r.file_name ?? ''}]${r.caption ? ` ${r.caption}` : ''}`
+        return `${name}: ${r.content}`
+      })
+      .filter((line) => !line.endsWith(':'))
+      .join('\n')
+  }
+
+  socket.on('admin:ai_summary', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const transcript = buildAiTranscript(conversation.id)
+    if (transcript.length < 8) {
+      ack({ ok: false, error: 'EMPTY' })
+      return
+    }
+    void llmComplete(
+      'Kamu asisten admin aplikasi chat ChatKita. Ringkas percakapan berikut dalam Bahasa Indonesia: satu paragraf pembuka (2-3 kalimat) lalu maksimal 5 poin penting berawalan "• ". Bila ada keputusan atau janji, tambahkan bagian "Keputusan & janji:" dengan poinnya. Maksimal 900 karakter.',
+      transcript,
+      1400
+    ).then((summary) => {
+      if (!summary) {
+        ack({ ok: false, error: 'AI_UNAVAILABLE' })
+        return
+      }
+      audit('ai_summary', `conv ${conversation.id.slice(0, 8)} (${transcript.split('\n').length} pesan)`)
+      ack({ ok: true, summary })
+    })
+  }))
+
+  socket.on('admin:ai_suggest', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const transcript = buildAiTranscript(conversation.id, 30)
+    if (transcript.length < 4) {
+      ack({ ok: true, suggestions: [] })
+      return
+    }
+    void llmComplete(
+      'Kamu asisten admin aplikasi chat Indonesia. Berdasarkan potongan percakapan terakhir, buat 3 saran balasan SINGKAT (maks 8 kata) yang wajar untuk ADMIN membalas. Jawab HANYA tiga baris teks saran tanpa nomor, tanpa tanda hubung, tanpa penjelasan.',
+      transcript,
+      300
+    ).then((verdict) => {
+      if (!verdict) {
+        ack({ ok: false, error: 'AI_UNAVAILABLE' })
+        return
+      }
+      const suggestions = verdict
+        .split('\n')
+        .map((s) => s.replace(/^[-•*\d.)\s]+/, '').trim())
+        .filter((s) => s.length > 0 && s.length <= 80)
+        .slice(0, 3)
+      ack({ ok: true, suggestions })
+    })
+  }))
+
+  socket.on('admin:ai_assistant', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const raw = Array.isArray(data?.history) ? data.history : []
+    if (raw.length === 0 || raw.length > 20) {
+      ack({ ok: false, error: 'INVALID_HISTORY' })
+      return
+    }
+    const history: Array<{ role: 'assistant' | 'user'; content: string }> = []
+    for (const turn of raw) {
+      const role = turn?.role === 'assistant' ? 'assistant' : 'user'
+      const content = typeof turn?.content === 'string' ? turn.content.trim().slice(0, 1000) : ''
+      if (!content) continue
+      history.push({ role, content })
+    }
+    if (history.length === 0) {
+      ack({ ok: false, error: 'INVALID_HISTORY' })
+      return
+    }
+    void llmChat([
+      {
+        role: 'assistant',
+        content:
+          'Kamu adalah "ChatKita AI", asisten yang ramah di aplikasi chat ChatKita. Jawab dengan Bahasa Indonesia yang singkat, jelas, dan membantu. Bila diminta isi pesan atau ide, langsung berikan.',
+      },
+      ...history,
+    ]).then((reply) => {
+      if (!reply) {
+        ack({ ok: false, error: 'AI_UNAVAILABLE' })
+        return
+      }
+      audit('ai_assistant', `${history.length} giliran`)
+      ack({ ok: true, reply })
+    })
+  }))
+
+  socket.on('admin:ai_tts', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row || row.deleted_at || (row.type ?? 'text') !== 'text') {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    void ttsSpeak(row.content).then((audioBase64) => {
+      if (!audioBase64) {
+        ack({ ok: false, error: 'AI_UNAVAILABLE' })
+        return
+      }
+      audit('ai_tts', `#${row.id}`)
+      ack({ ok: true, audioBase64 })
+    })
+  }))
+
+  socket.on('admin:ai_transcribe', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row || row.deleted_at || (row.type ?? 'text') !== 'voice') {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const conversation = getConversation(row.conversation_id)
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const dataUrl = voiceDataUrlOf(row.content)
+    if (!dataUrl) {
+      ack({ ok: false, error: 'AI_UNAVAILABLE' })
+      return
+    }
+    void asrTranscribe(dataUrl).then((text) => {
+      if (!text) {
+        ack({ ok: false, error: 'AI_UNAVAILABLE' })
+        return
+      }
+      db.run('UPDATE messages SET transcript = ? WHERE id = ?', [text, row.id])
+      const payload = { id: row.id, conversationId: conversation.id, transcript: text }
+      io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+      io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+      io.to('admins').emit('message:updated', payload)
+      audit('ai_transcribe', `#${row.id}: "${text.slice(0, 40)}"`)
+      ack({ ok: true, transcript: text })
+    })
+  }))
+
+  socket.on('admin:ai_media_search', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const query = typeof data?.query === 'string' ? data.query.trim().slice(0, 120) : ''
+    if (query.length < 2) {
+      ack({ ok: false, error: 'INVALID_QUERY' })
+      return
+    }
+    const rows = db
+      .query(
+        `SELECT m.id, m.conversation_id, m.content, m.file_name, m.created_at, m.caption,
+                u.name AS sender_name
+         FROM messages m LEFT JOIN users u ON u.id = m.sender_id
+         WHERE m.deleted_at IS NULL AND m.type = 'image'
+           AND (m.pending IS NULL OR m.pending = 0)
+         ORDER BY m.id DESC LIMIT 24`
+      )
+      .all() as Array<
+      MessageRow & { sender_name: string | null; conversation_id: string; caption?: string | null }
+    >
+    if (rows.length === 0) {
+      ack({ ok: true, hits: [], scanned: 0 })
+      return
+    }
+    void Promise.all(
+      rows.map(async (r) => {
+        const name = mediaNameOf(r.content) ?? ''
+        const cached = name ? aiCaptionCache.get(name) : undefined
+        if (cached) return cached
+        if (r.caption) return r.caption
+        const dataUrl = imageDataUrlOf(r.content)
+        if (!dataUrl) return ''
+        const cap = (await vlmCaption(dataUrl)) ?? ''
+        if (cap && name) aiCaptionCache.set(name, cap)
+        return cap
+      })
+    ).then(async (captions) => {
+      const list = rows
+        .map(
+          (r, i) => `${i + 1}. ${captions[i] || r.caption || r.file_name || 'tanpa keterangan'}`
+        )
+        .join('\n')
+      const ranking = await llmComplete(
+        'Kamu mesin pencari foto. Diberi daftar deskripsi foto bernomor dan kueri pengguna, pilih nomor-nomor foto yang cocok dengan kueri. Jawab HANYA nomor dipisah koma (contoh: "1,5,7"). Bila tidak ada yang cocok, jawab "0".',
+        `Kueri: ${query}\n\nDaftar foto:\n${list}`,
+        200
+      )
+      if (!ranking) {
+        ack({ ok: false, error: 'AI_UNAVAILABLE' })
+        return
+      }
+      const idxs = (ranking.match(/\d+/g) ?? [])
+        .map(Number)
+        .filter((n) => n >= 1 && n <= rows.length)
+      const hits = idxs.map((n) => {
+        const r = rows[n - 1]
+        return {
+          messageId: r.id,
+          conversationId: r.conversation_id,
+          mediaUrl: r.content,
+          fileName: r.file_name ?? '',
+          senderName: r.sender_name ?? '',
+          createdAt: new Date(r.created_at).toISOString(),
+          caption: captions[n - 1] || r.caption || '',
+        }
+      })
+      audit('ai_media_search', `"${query}" → ${hits.length} dari ${rows.length} foto`)
+      ack({ ok: true, hits, scanned: rows.length })
+    })
+  }))
+
+  socket.on('admin:ai_image_generate', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const prompt = typeof data?.prompt === 'string' ? data.prompt.trim().slice(0, 500) : ''
+    const size =
+      typeof data?.size === 'string' && AI_IMAGE_SIZES.has(data.size) ? data.size : '1024x1024'
+    if (prompt.length < 3) {
+      ack({ ok: false, error: 'INVALID_PROMPT' })
+      return
+    }
+    const key = `${size}:${prompt}`
+    const cached = aiImageCache.get(key)
+    if (cached && Date.now() - cached.at < AI_IMAGE_TTL_MS) {
+      ack({ ok: true, imageBase64: cached.b64 })
+      return
+    }
+    void imageGenerateAI(prompt, size).then((b64) => {
+      if (!b64) {
+        ack({ ok: false, error: 'AI_UNAVAILABLE' })
+        return
+      }
+      if (aiImageCache.size > 12) aiImageCache.clear()
+      aiImageCache.set(key, { b64, at: Date.now() })
+      audit('ai_image_generate', `"${prompt.slice(0, 60)}" (${size})`)
+      ack({ ok: true, imageBase64: b64 })
+    })
+  }))
+
+  socket.on('admin:ai_image_send', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation || !isParticipant(conversation, ADMIN_ID)) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const prompt = typeof data?.prompt === 'string' ? data.prompt.trim().slice(0, 500) : ''
+    const size =
+      typeof data?.size === 'string' && AI_IMAGE_SIZES.has(data.size) ? data.size : '1024x1024'
+    if (prompt.length < 3) {
+      ack({ ok: false, error: 'INVALID_PROMPT' })
+      return
+    }
+    const key = `${size}:${prompt}`
+    const cached = aiImageCache.get(key)
+    const writeAndSend = (b64: string) => {
+      const bytes = Buffer.from(b64, 'base64')
+      if (bytes.length === 0 || bytes.length > 20_000_000) {
+        ack({ ok: false, error: 'INVALID_IMAGE' })
+        return
+      }
+      if (storedMediaBytes(ADMIN_ID) + bytes.length > effectiveQuotaBytes(findUserById(ADMIN_ID))) {
+        ack({ ok: false, error: 'QUOTA_EXCEEDED' })
+        return
+      }
+      const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 32)
+      const storedName = `${hash}.png`
+      try {
+        mkdirSync(MEDIA_DIR, { recursive: true })
+        const target = join(MEDIA_DIR, storedName)
+        if (!existsSync(target)) writeFileSync(target, bytes)
+      } catch {
+        ack({ ok: false, error: 'STORAGE_FAILED' })
+        return
+      }
+      const message = insertAndFanOut(conversation, ADMIN_ID, `/api/media/${storedName}`, 'image', {
+        fileName: `gambar-ai-${Date.now()}.png`,
+        fileSize: bytes.length,
+        mimeType: 'image/png',
+        caption: `🎨 AI: ${prompt.slice(0, 180)}`,
+      })
+      void attachMediaMeta(message.id, message.content)
+      audit('ai_image_send', `"${prompt.slice(0, 60)}" → #${message.id}`)
+      ack({ ok: true })
+    }
+    if (cached && Date.now() - cached.at < AI_IMAGE_TTL_MS) {
+      writeAndSend(cached.b64)
+      return
+    }
+    void imageGenerateAI(prompt, size).then((b64) => {
+      if (!b64) {
+        ack({ ok: false, error: 'AI_UNAVAILABLE' })
+        return
+      }
+      if (aiImageCache.size > 12) aiImageCache.clear()
+      aiImageCache.set(key, { b64, at: Date.now() })
+      writeAndSend(b64)
+    })
+  }))
+
+  socket.on('admin:ai_moderation', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const hasEnabled = typeof data?.enabled === 'boolean'
+    const hasMode = data?.mode === 'block' || data?.mode === 'censor'
+    if (!hasEnabled && !hasMode) {
+      ack({ ok: true, state: getAiModerationState() })
+      return
+    }
+    const current = getAiModerationState()
+    const next: AiModerationState = {
+      enabled: hasEnabled ? (data.enabled as boolean) : current.enabled,
+      mode: hasMode ? (data.mode as 'block' | 'censor') : current.mode,
+    }
+    db.run(
+      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      ['aiModeration', JSON.stringify(next)]
+    )
+    audit('ai_moderation', JSON.stringify(next))
+    ack({ ok: true, state: next })
+  }))
 
   /* ---------------------------- account PIN ---------------------------- */
 
