@@ -181,6 +181,10 @@ export function ChatBubble({
   onPin,
   onToggleStar,
   onCancelScheduled,
+  onSpeak,
+  speaking = false,
+  onTranscribe,
+  transcribing = false,
 }: ChatBubbleProps) {
   const [actionsOpen, setActionsOpen] = useState(false);
   const [reactOpen, setReactOpen] = useState(false);

@@ -7629,6 +7629,7 @@ io.on('connection', (socket) => {
                 u.name AS sender_name
          FROM messages m LEFT JOIN users u ON u.id = m.sender_id
          WHERE m.deleted_at IS NULL AND m.type = 'image'
+           AND m.content IS NOT NULL AND m.content <> ''
            AND (m.pending IS NULL OR m.pending = 0)
          ORDER BY m.id DESC LIMIT 24`
       )

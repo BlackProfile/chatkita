@@ -403,11 +403,17 @@ export function AdminAIDialog({
                       className="group overflow-hidden rounded-lg border text-left transition-colors hover:border-emerald-600"
                       onClick={() => onOpenMedia(hit)}
                     >
-                      <img
-                        src={hit.mediaUrl}
-                        alt={hit.caption || hit.fileName}
-                        className="aspect-square w-full object-cover"
-                      />
+                      {hit.mediaUrl ? (
+                        <img
+                          src={hit.mediaUrl}
+                          alt={hit.caption || hit.fileName}
+                          className="aspect-square w-full object-cover"
+                        />
+                      ) : (
+                        <div className="flex aspect-square w-full items-center justify-center bg-muted text-[10px] text-muted-foreground">
+                          tanpa pratinjau
+                        </div>
+                      )}
                       <div className="truncate px-1.5 py-1 text-[10px] text-muted-foreground">
                         {hit.senderName} · {hit.caption || hit.fileName}
                       </div>
