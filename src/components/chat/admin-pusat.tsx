@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import type { Socket } from "socket.io-client";
 import {
   Download,
@@ -8,6 +8,7 @@ import {
   Landmark,
   Loader2,
   RotateCcw,
+  Save,
   ShieldAlert,
   TriangleAlert,
   Upload,
@@ -25,8 +26,11 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import type {
   AckOf,
+  AdminAutoBackupGetAck,
+  AdminAutoBackupNowAck,
   AdminResetAllAck,
   AdminRestoreAck,
   BackupAck,
@@ -53,7 +57,7 @@ interface ParsedBackup {
   settings: number;
 }
 
-type PusatBusy = "backup" | "restore" | "reset" | null;
+type PusatBusy = "backup" | "restore" | "reset" | "autobackup" | null;
 
 export function AdminPusat({
   socket,
@@ -67,6 +71,42 @@ export function AdminPusat({
   const [pendingRestore, setPendingRestore] = useState<ParsedBackup | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  /* v43 — backup otomatis terjadwal (jam WIB bisa diubah admin). */
+  const [autoAt, setAutoAt] = useState("");
+  const [autoLast, setAutoLast] = useState<AdminAutoBackupGetAck["lastRun"]>(null);
+
+  useEffect(() => {
+    if (!socket) return;
+    const onAutoBackup = (p: { ok: boolean; at: string }) => {
+      setAutoLast((prev) =>
+        prev ? { ...prev, ok: p.ok, at: p.at, detail: p.ok ? "OK" : "GAGAL" } : {
+          at: p.at,
+          ok: p.ok,
+          detail: p.ok ? "OK" : "GAGAL",
+        }
+      );
+      setNotice({
+        ok: p.ok,
+        text: p.ok ? "Backup otomatis (berlapis) selesai." : "Backup otomatis (berlapis) GAGAL — cek log server.",
+      });
+    };
+    socket.on("admin:auto_backup", onAutoBackup);
+    return () => {
+      socket.off("admin:auto_backup", onAutoBackup);
+    };
+  }, [socket]);
+
+  /* Muat status jadwal saat tab dibuka / socket siap. */
+  useEffect(() => {
+    if (!socket) return;
+    socket.emit("admin:auto_backup_get", {}, (res: AckOf<AdminAutoBackupGetAck>) => {
+      if (res.ok) {
+        setAutoAt(res.at);
+        setAutoLast(res.lastRun);
+      }
+    });
+  }, [socket]);
 
   const downloadBackup = () => {
     if (!socket || busy) return;
@@ -164,6 +204,38 @@ export function AdminPusat({
     });
   };
 
+  /* v43 — simpan jam backup otomatis (WIB). */
+  const saveAutoAt = () => {
+    if (!socket || busy) return;
+    const v = autoAt.trim();
+    if (v !== "" && !/^([01]\d|2[0-3]):([0-5]\d)$/.test(v)) {
+      setNotice({ ok: false, text: "Format jam salah — pakai HH:MM (contoh 03:07)." });
+      return;
+    }
+    setBusy("autobackup");
+    socket.emit("admin:settings:set", { autoBackupAt: v }, (res: AckOf<{ ok: true }> | { ok: false; error?: string }) => {
+      setBusy(null);
+      if (!res.ok) {
+        setNotice({ ok: false, text: "Gagal menyimpan jadwal backup otomatis." });
+        return;
+      }
+      setNotice({ ok: true, text: `Jadwal backup otomatis disimpan: ${v === "" ? "03:07 (default)" : v} WIB.` });
+    });
+  };
+
+  /* v43 — jalankan backup berlapis sekarang. */
+  const runBackupNow = () => {
+    if (!socket || busy) return;
+    setBusy("autobackup");
+    socket.emit("admin:auto_backup_now", {}, (res: AckOf<AdminAutoBackupNowAck>) => {
+      setBusy(null);
+      setNotice({
+        ok: res.ok,
+        text: res.ok ? "Backup dimulai — hasil menyusul." : "Backup masih berjalan — tunggu sebentar.",
+      });
+    });
+  };
+
   return (
     <div className="space-y-3">
       {/* Info pusat kendali */}
@@ -210,6 +282,50 @@ export function AdminPusat({
             <Download className="size-4" aria-hidden="true" />
           )}
           Unduh backup JSON
+        </Button>
+      </div>
+
+      {/* v43 — Backup otomatis terjadwal */}
+      <div className="space-y-2.5 rounded-xl border bg-card p-3">
+        <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          <Save className="size-3.5" aria-hidden="true" />
+          Backup otomatis terjadwal
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Setiap hari pada jam WIB yang dipilih, server menjalankan backup
+          berlapis (git bundle + tar media) ke /home/z/backups/. Default 03:07.
+        </p>
+        <div className="flex items-end gap-2">
+          <div className="min-w-0 flex-1 space-y-1">
+            <Input
+              id="auto-backup-at"
+              value={autoAt}
+              onChange={(e) => setAutoAt(e.target.value)}
+              placeholder="03:07"
+              inputMode="numeric"
+              maxLength={5}
+              className="h-9"
+              aria-label="Jam backup otomatis (WIB)"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Format HH:MM WIB. Terakhir dijalankan:{" "}
+              {autoLast
+                ? `${new Date(autoLast.at).toLocaleString("id-ID")} — ${autoLast.ok ? "✅" : "❌"}`
+                : "belum pernah"}
+            </p>
+          </div>
+          <Button size="sm" variant="outline" className="h-9" onClick={saveAutoAt} disabled={busy !== null}>
+            <Save className="size-4" aria-hidden="true" />
+            Simpan
+          </Button>
+        </div>
+        <Button size="sm" variant="outline" className="h-9" onClick={runBackupNow} disabled={busy !== null}>
+          {busy === "autobackup" ? (
+            <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+          ) : (
+            <Download className="size-4" aria-hidden="true" />
+          )}
+          Jalankan backup sekarang
         </Button>
       </div>
 

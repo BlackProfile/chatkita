@@ -867,7 +867,13 @@ const APP_SETTING_RESET_KEYS = [
   'allowReactions',
   'readReceipts',
   'slowmodeSeconds',
+  'autoBackupAt',
 ] as const
+
+/* v43 — backup otomatis terjadwal (WIB). */
+const AUTO_BACKUP_DEFAULT_AT = '03:07'
+const AUTO_BACKUP_PROJECT_ROOT = '/home/z/my-project'
+const isValidHm = (v: string): boolean => /^([01]\d|2[0-3]):([0-5]\d)$/.test(v)
 
 const getNumSetting = (key: string, dflt: number): number => {
   const v = Number(getSetting(key))
@@ -5628,6 +5634,16 @@ io.on('connection', (socket) => {
       next.slowmodeSeconds = clampNum(data.slowmodeSeconds, APP_SETTING_LIMITS.slowmodeSeconds)
       touched += ' slowmode'
     }
+    // v43 — jam backup otomatis (WIB, format HH:MM). Kosong = kembali default.
+    if (typeof data?.autoBackupAt === 'string') {
+      const v = data.autoBackupAt.trim()
+      if (v !== '' && !isValidHm(v)) {
+        ack({ ok: false, error: 'INVALID_TIME' })
+        return
+      }
+      setSetting('autoBackupAt', v === '' ? AUTO_BACKUP_DEFAULT_AT : v)
+      touched += ' autoBackupAt'
+    }
     setSetting('appName', next.appName)
     setSetting('welcomeMessage', next.welcomeMessage)
     setSetting('maintenanceMode', next.maintenanceMode ? '1' : '0')
@@ -6016,6 +6032,29 @@ io.on('connection', (socket) => {
       conversations: db.query('SELECT * FROM conversations').all(),
       messages: db.query('SELECT * FROM messages ORDER BY id ASC').all(),
       settings: settingsRows,
+    })
+  }))
+
+  /* v43 — Pusat: status backup otomatis terjadwal (baca; moderator boleh lihat). */
+  socket.on('admin:auto_backup_get', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    ack({
+      ok: true,
+      at: getSetting('autoBackupAt') ?? AUTO_BACKUP_DEFAULT_AT,
+      lastAutoBackup: getSetting('lastAutoBackup') ?? null,
+      lastRun: autoBackupLast,
+    })
+  }))
+
+  /* v43 — Pusat: jalankan backup berlapis (git bundle + tar media) SEKARANG.
+   * Hasilnya dikirim ke room admins via event admin:auto_backup. */
+  socket.on('admin:auto_backup_now', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    const started = runAutoBackup('manual')
+    ack({
+      ok: started,
+      started,
+      detail: started ? 'Backup dimulai — hasil menyusul.' : 'Backup masih berjalan.',
     })
   }))
 
@@ -8702,6 +8741,82 @@ const sweepReminders = () => {
 }
 setTimeout(sweepReminders, 15_000)
 setInterval(sweepReminders, 30_000)
+
+/* ---------------- v43 — backup otomatis terjadwal (WIB) ---------------- */
+/**
+ * v43 — tiap 60 detik cek jam:menit WIB; bila sama dengan settings
+ * `autoBackupAt` (default "03:07") dan `lastAutoBackup` belum tanggal hari
+ * ini → jalankan scripts/make-backup.sh (git bundle + tar media, hardened
+ * v36: tar gagal = exit 1). Anti-dobel: `lastAutoBackup` di-set SEBELUM
+ * spawn. Fire-and-forget — hasil log + audit + admin:auto_backup ke admins.
+ */
+const wibParts = (ms: number = Date.now()) => {
+  const d = new Date(ms + WIB_OFFSET_MS)
+  const hh = String(d.getUTCHours()).padStart(2, '0')
+  const mm = String(d.getUTCMinutes()).padStart(2, '0')
+  const ymd = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`
+  return { hh, mm, ymd, hm: `${hh}:${mm}` }
+}
+
+let autoBackupRunning = false
+let autoBackupLast: { at: string; ok: boolean; detail: string } | null = null
+
+const runAutoBackup = (reason: 'schedule' | 'manual'): boolean => {
+  if (autoBackupRunning) return false
+  autoBackupRunning = true
+  const startedIso = new Date().toISOString()
+  console.log(`[auto-backup] memulai backup berlapis (${reason}) …`)
+  const proc = Bun.spawn(['bash', 'scripts/make-backup.sh'], {
+    cwd: AUTO_BACKUP_PROJECT_ROOT,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  void Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ])
+    .then(([code, out, err]) => {
+      const ok = code === 0
+      const tail = (ok ? out : `${out}\n${err}`)
+        .trim()
+        .split('\n')
+        .slice(-3)
+        .join(' | ')
+      const detail = tail || `exit=${code}`
+      autoBackupLast = { at: startedIso, ok, detail }
+      audit('auto_backup', `${reason}: ${ok ? 'OK' : `GAGAL exit=${code}`} — ${detail}`)
+      io.to('admins').emit('admin:auto_backup', {
+        ok,
+        at: startedIso,
+        detail: detail.slice(0, 200),
+      })
+      console.log(`[auto-backup] ${ok ? 'OK' : `GAGAL (exit ${code})`} — ${detail}`)
+    })
+    .catch((err) => {
+      autoBackupLast = { at: startedIso, ok: false, detail: String(err) }
+      console.error('[auto-backup] error:', (err as Error)?.message ?? err)
+    })
+    .finally(() => {
+      autoBackupRunning = false
+    })
+  return true
+}
+
+const autoBackupTick = () => {
+  try {
+    const target = getSetting('autoBackupAt') ?? AUTO_BACKUP_DEFAULT_AT
+    if (!isValidHm(target)) return
+    const w = wibParts()
+    if (w.hm !== target) return
+    if (getSetting('lastAutoBackup') === w.ymd) return
+    setSetting('lastAutoBackup', w.ymd) // anti dobel — sebelum spawn
+    runAutoBackup('schedule')
+  } catch (err) {
+    console.error('[auto-backup] tick error:', (err as Error)?.message ?? err)
+  }
+}
+setInterval(autoBackupTick, 60_000)
 
 httpServer.listen(PORT, () => {
   console.log(

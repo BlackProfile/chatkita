@@ -1214,6 +1214,23 @@ export interface AdminAutoBackupPayload {
   detail?: string;
 }
 
+/** v43 — ack `admin:auto_backup_get` — status backup otomatis (Pusat). */
+export interface AdminAutoBackupGetAck {
+  ok: true;
+  /** Jam:menit WIB target (format HH:MM). */
+  at: string;
+  /** Tanggal WIB (YYYY-MM-DD) backup otomatis terakhir, null bila belum pernah. */
+  lastAutoBackup: string | null;
+  lastRun: { at: string; ok: boolean; detail: string } | null;
+}
+
+/** v43 — ack `admin:auto_backup_now` — mulai backup sekarang (hasil menyusul via broadcast). */
+export interface AdminAutoBackupNowAck {
+  ok: boolean;
+  started: boolean;
+  detail: string;
+}
+
 /** v40 — server → user: pesan yang menunggu moderasi ditolak admin. */
 export interface ModerationRejectedPayload {
   messageId: number;
@@ -1769,8 +1786,10 @@ export interface ConversationResetPayload {
 //           terikat ke akun (pendaftaran / login perangkat lain).
 // server → admins: admin:auto_backup (AdminAutoBackupPayload) — backup
 //           otomatis terjadwal selesai (ok/at/detail).
-// admin:auto_backup_now    {} → { ok, detail } (admin penuh) — jalankan
-//           backup sekarang tanpa menunggu jadwal (audit auto_backup).
+// admin:auto_backup_get    {} → AdminAutoBackupGetAck — status jadwal + hasil
+//           terakhir (Pusat).
+// admin:auto_backup_now    {} → AdminAutoBackupNowAck — jalankan backup
+//           berlapis sekarang (audit auto_backup, admin penuh).
 //
 // Kategori C — fake signals (stored as settings rows):
 // admin:fake_typing       { conversationId, on: boolean } → FakeTypingAck

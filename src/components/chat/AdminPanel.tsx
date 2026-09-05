@@ -157,6 +157,7 @@ import {
   type AdminAIFlagPayload,
   type AdminAITranscribeAck,
   type AdminAITtsAck,
+  type AdminAutoBackupPayload,
   type AdminFlaggedPayload,
   type AdminModerateAck,
   type AdminNewLoginPayload,
@@ -1004,6 +1005,10 @@ export function AdminPanel() {
     // v43 — perangkat baru terikat ke akun (login/pendaftaran dari perangkat lain).
     socket.on("admin:new_login", (p: AdminNewLoginPayload) => {
       showMenuNotice(`🔓 Login baru: ${p.userName} (perangkat baru)`);
+    });
+    // v43 — backup otomatis terjadwal selesai (hasil fire-and-forget server).
+    socket.on("admin:auto_backup", (p: AdminAutoBackupPayload) => {
+      showMenuNotice(p.ok ? "💾 Backup otomatis selesai" : "⚠️ Backup otomatis GAGAL — cek log server");
     });
     // v40 — peringatan kuota media per-user (ambang 80% / 95%).
     socket.on("admin:quota_warn", (p: AdminQuotaWarnPayload) => {
