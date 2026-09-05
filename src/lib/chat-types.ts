@@ -2253,3 +2253,96 @@ export interface AdminTotpDisableAck {
 //                  kode salah → {ok:false,error:'TOTP_INVALID'}.
 // server → admins: admin:new_login (v43 — perangkat baru terikat ke akun),
 //           admin:auto_backup {ok, at} (v43 — hasil backup terjadwal).
+
+/* ------------------------------------------------------------------ */
+/* Kategori D — call suara/video WebRTC (v44, Task 60-d)               */
+/* ------------------------------------------------------------------ */
+/* Signaling via socket.io chat-service; MEDIA P2P langsung antar browser
+ * (RTCPeerConnection + STUN publik, host candidate satu mesin langsung
+ * berhasil) — TIDAK lewat gateway. Server hanya me-relay sinyal dengan
+ * validasi peserta; maks 1 call aktif per pasangan (BUSY).              */
+
+/** Jenis media call: 'audio' = telepon suara, 'video' = video call. */
+export type CallMedia = "audio" | "video";
+
+/** Fase UI satu call dari awal sampai selesai. */
+export type CallPhase =
+  | "ringing" // callee: call masuk berbunyi
+  | "outgoing" // caller: memanggil, menunggu dijawab
+  | "connecting" // SDP/ICE dipertukarkan setelah diterima
+  | "active" // media mengalir (timer durasi berjalan)
+  | "ended"; // call berakhir (overlay singkat sebelum ditutup)
+
+/** Peran lokal dalam call. */
+export type CallRole = "caller" | "callee";
+
+/** Identitas lawan dalam call. */
+export interface CallPeer {
+  id: string;
+  name: string;
+}
+
+/** call:ring {toUserId, media} → ack. BUSY bila pasangan sedang call. */
+export interface CallRingAck {
+  ok: boolean;
+  callId?: string;
+  error?: "BUSY" | "INVALID_TARGET" | "NO_CONVERSATION" | "UNAUTHORIZED" | string;
+}
+
+/** server → penerima: call masuk (room user:<id> / admins). */
+export interface CallIncomingPayload {
+  callId: string;
+  from: CallPeer;
+  media: CallMedia;
+}
+
+/** call:answer {callId, accept} (hanya penerima) → ack. */
+export interface CallAnswerAck {
+  ok: boolean;
+  error?: "INVALID_CALL" | "NOT_CALLEE" | string;
+}
+
+/** server → penelepon: call diterima → mulai createOffer. */
+export interface CallAnsweredPayload {
+  callId: string;
+  media: CallMedia;
+}
+
+/** server → penelepon: call ditolak penerima. */
+export interface CallRejectedPayload {
+  callId: string;
+}
+
+/** server → penelepon: call tak terjawab (timeout 45 dtk server). */
+export interface CallMissedPayload {
+  callId: string;
+  to: string;
+  media: CallMedia;
+}
+
+/** Ack umum event relay (call:offer / call:answer_sdp / call:ice / call:end). */
+export interface CallRelayAck {
+  ok: boolean;
+  error?: "INVALID_CALL" | string;
+}
+
+/** server → lawan: call diakhiri oleh `by` (userId). */
+export interface CallEndedPayload {
+  callId: string;
+  by: string;
+}
+
+// Protokol Kategori D — call (v44), semua handler di chat-service index.ts:
+// client → server (ack):
+//   call:ring       {toUserId, media}  → CallRingAck ('BUSY' bila sibuk)
+//   call:answer     {callId, accept}   → CallAnswerAck (penerima saja)
+//   call:offer      {callId, sdp}      → CallRelayAck (penelepon → penerima)
+//   call:answer_sdp {callId, sdp}      → CallRelayAck (penerima → penelepon)
+//   call:ice        {callId, candidate} → CallRelayAck (dua arah, JSON string)
+//   call:end        {callId}           → CallRelayAck (siapa pun peserta)
+// server → client:
+//   call:incoming   {callId, from:{id,name}, media} — ke room penerima
+//   call:answered   {callId, media}  — ke penelepon (mulai createOffer)
+//   call:rejected   {callId}         — ke penelepon
+//   call:missed     {callId, to, media} — ke penelepon (timeout 45 dtk)
+//   call:ended      {callId, by}     — ke lawan (juga saat peserta disconnect)

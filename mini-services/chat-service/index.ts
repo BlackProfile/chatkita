@@ -244,8 +244,18 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        (5) multi-admin moderator — role 'moderator' boleh baca semua via
  *        admin:auth (password akun) tapi ditolak event destruktif
  *        (adminGuardDestructive → FORBIDDEN), event admin:user_role
- *        (admin penuh saja) mengubah role user↔moderator. */
-const SERVICE_VERSION = 'v43'
+ *        (admin penuh saja) mengubah role user↔moderator.
+ * v44 — call suara/video WebRTC 1-on-1 (Task 60-d): signaling via socket.io
+ *        (media P2P langsung, TIDAK lewat server/gateway). Event client→server:
+ *        call:ring {toUserId, media audio|video} — validasi percakapan
+ *        berpasangan ada + maks 1 call aktif per pasangan (error BUSY);
+ *        call:answer {callId, accept} (penerima); call:offer / call:answer_sdp
+ *        {callId, sdp}; call:ice {callId, candidate} dua arah; call:end.
+ *        server→client: call:incoming (ke room penerima), call:answered,
+ *        call:rejected, call:missed (timeout 45 dtk), call:ended {callId, by}.
+ *        Semua relay tervalidasi peserta; state in-memory activeCalls Map;
+ *        cleanup otomatis saat peserta disconnect. */
+const SERVICE_VERSION = 'v44'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -3950,6 +3960,58 @@ const buildUserExport = (userId: string) => {
   const fileName = `chatkita-user-${sanitizeFileNamePart(user?.name ?? userId)}-${date}.json`
   return { fileName, content, count: rows.length }
 }
+
+/* ------------------------------------------------------------------ */
+/* v44 — call suara/video (WebRTC): state signaling + helpers          */
+/* ------------------------------------------------------------------ */
+/* Media mengalir P2P langsung antar browser (RTCPeerConnection) — TIDAK
+ * lewat server/gateway. Server hanya me-relay SINYAL (ring / offer /
+ * answer / ice) antar peserta percakapan berpasangan, dengan validasi:
+ * pengirim ter-autentikasi + peserta call + callId masih di map.
+ * State in-memory saja (hilang saat restart — call memang sementara). */
+
+/** Jenis media satu call: 'audio' = telepon suara, 'video' = video call. */
+type CallMedia = 'audio' | 'video'
+
+/** Timeout call tak terjawab sebelum dianggap missed (dtk × 1000). */
+const CALL_RING_TIMEOUT_MS = 45_000
+
+interface ActiveCall {
+  callId: string
+  from: string
+  to: string
+  media: CallMedia
+  at: number
+  /** Timer timeout 45 dtk (null setelah dijawab / dibatalkan). */
+  timeout: ReturnType<typeof setTimeout> | null
+}
+
+/** callId → call aktif (maks 1 per pasangan — guard BUSY). */
+const activeCalls = new Map<string, ActiveCall>()
+
+/** Call aktif antara pasangan (dua arah) — untuk guard BUSY. */
+const findActiveCallForPair = (a: string, b: string): ActiveCall | undefined =>
+  [...activeCalls.values()].find(
+    (c) => (c.from === a && c.to === b) || (c.from === b && c.to === a)
+  )
+
+/** Room socket tujuan untuk satu userId (admin memakai room 'admins'). */
+const callRoomOf = (userId: string) => (userId === ADMIN_ID ? 'admins' : `user:${userId}`)
+
+/** Nama tampilan penelepon untuk payload call:incoming. */
+const displayNameOf = (userId: string): string =>
+  userId === ADMIN_ID ? ADMIN_NAME : (findUserById(userId)?.name ?? 'Pengguna')
+
+/** Hapus call dari map + batalkan timer timeout-nya. */
+const clearCall = (callId: string) => {
+  const call = activeCalls.get(callId)
+  if (call?.timeout) clearTimeout(call.timeout)
+  activeCalls.delete(callId)
+}
+
+/** Call aktif di mana `userId` peserta (untuk cleanup saat disconnect). */
+const activeCallOf = (userId: string): ActiveCall | undefined =>
+  [...activeCalls.values()].find((c) => c.from === userId || c.to === userId)
 
 /* ------------------------------------------------------------------ */
 /* Connection                                                          */
@@ -8811,6 +8873,15 @@ io.on('connection', (socket) => {
     if (typeof userId !== 'string') return
     // v11 — connection metadata for admin:xray is memory-only and cleaned here.
     dropConnMeta(userId, socket.id)
+    // v44 — call menggantung saat peserta disconnect → akhiri + beri tahu lawan
+    // supaya overlay lawan tidak menggantung selamanya.
+    const dangling = activeCallOf(userId)
+    if (dangling) {
+      clearCall(dangling.callId)
+      const peer = dangling.from === userId ? dangling.to : dangling.from
+      io.to(callRoomOf(peer)).emit('call:ended', { callId: dangling.callId, by: userId })
+      console.log(`[call] ${dangling.callId.slice(0, 8)} diakhiri otomatis (${userId.slice(0, 8)} disconnect)`)
+    }
     // v11 — always_online fake signal: the admin never goes offline / never
     // gets a fresh last_seen while the setting is on (socket bookkeeping in
     // onlineSockets still happens so counts stay accurate).
@@ -8853,6 +8924,147 @@ io.on('connection', (socket) => {
       console.log(`User ${userId} went offline`)
     }
   })
+
+  /* ------------------------------------------------------------------ */
+  /* v44 — call suara/video (WebRTC): signaling relay                    */
+  /* ------------------------------------------------------------------ */
+  /* Semua event memvalidasi: pengirim ter-autentikasi, callId ada di map,
+   * dan pengirim adalah peserta call. Admin = userId 'admin' (room admins).
+   * call:answer (jawaban ring) vs call:answer_sdp (SDP jawaban WebRTC). */
+
+  /* v44 — penelepon (user ATAU admin) meminta call ke lawan percakapan. */
+  socket.on('call:ring', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const to = typeof data?.toUserId === 'string' ? data.toUserId : ''
+    const media: CallMedia = data?.media === 'video' ? 'video' : 'audio'
+    if (!to || to === me || (to !== ADMIN_ID && !findUserById(to))) {
+      ack({ ok: false, error: 'INVALID_TARGET' })
+      return
+    }
+    // Percakapan berpasangan harus sudah ada (call hanya di dalam chat).
+    if (!findConversationBetween(me, to)) {
+      ack({ ok: false, error: 'NO_CONVERSATION' })
+      return
+    }
+    // Maks 1 call aktif per pasangan (dua arah).
+    if (findActiveCallForPair(me, to)) {
+      ack({ ok: false, error: 'BUSY' })
+      return
+    }
+    const callId = crypto.randomUUID()
+    const call: ActiveCall = { callId, from: me, to, media, at: now(), timeout: null }
+    activeCalls.set(callId, call)
+    // Timeout otomatis: 45 dtk tanpa jawaban → call:missed ke penelepon.
+    call.timeout = setTimeout(() => {
+      if (!activeCalls.has(callId)) return
+      activeCalls.delete(callId)
+      io.to(callRoomOf(call.from)).emit('call:missed', {
+        callId,
+        to: call.to,
+        media: call.media,
+      })
+      audit('call', `missed ${call.media} ${call.from.slice(0, 8)} → ${call.to.slice(0, 8)} (timeout 45s)`)
+      console.log(`[call] ${callId.slice(0, 8)} missed (timeout 45s)`)
+    }, CALL_RING_TIMEOUT_MS)
+    io.to(callRoomOf(to)).emit('call:incoming', {
+      callId,
+      from: { id: me, name: displayNameOf(me) },
+      media,
+    })
+    audit('call', `ring ${media} ${me.slice(0, 8)} → ${to.slice(0, 8)} (${callId.slice(0, 8)})`)
+    ack({ ok: true, callId })
+  }))
+
+  /* v44 — penerima menerima / menolak call. Accept → call:answered ke
+   * PENELEPON (sinyal mulai createOffer); tolak → call:rejected + hapus. */
+  socket.on('call:answer', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    const callId = typeof data?.callId === 'string' ? data.callId : ''
+    const call = activeCalls.get(callId)
+    if (!me || !call || (me !== call.from && me !== call.to)) {
+      ack({ ok: false, error: 'INVALID_CALL' })
+      return
+    }
+    if (me !== call.to) {
+      ack({ ok: false, error: 'NOT_CALLEE' })
+      return
+    }
+    if (data?.accept === true) {
+      if (call.timeout) clearTimeout(call.timeout)
+      call.timeout = null
+      io.to(callRoomOf(call.from)).emit('call:answered', { callId, media: call.media })
+      console.log(`[call] ${callId.slice(0, 8)} diterima oleh ${call.to.slice(0, 8)}`)
+      ack({ ok: true })
+    } else {
+      clearCall(callId)
+      io.to(callRoomOf(call.from)).emit('call:rejected', { callId })
+      audit('call', `ditolak oleh ${me.slice(0, 8)} (${callId.slice(0, 8)})`)
+      ack({ ok: true })
+    }
+  }))
+
+  /* v44 — SDP offer dari penelepon → relay ke penerima. */
+  socket.on('call:offer', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    const callId = typeof data?.callId === 'string' ? data.callId : ''
+    const sdp = typeof data?.sdp === 'string' ? data.sdp : ''
+    const call = activeCalls.get(callId)
+    if (!me || !sdp || !call || me !== call.from) {
+      ack({ ok: false, error: 'INVALID_CALL' })
+      return
+    }
+    io.to(callRoomOf(call.to)).emit('call:offer', { callId, sdp })
+    ack({ ok: true })
+  }))
+
+  /* v44 — SDP answer dari penerima → relay ke penelepon. */
+  socket.on('call:answer_sdp', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    const callId = typeof data?.callId === 'string' ? data.callId : ''
+    const sdp = typeof data?.sdp === 'string' ? data.sdp : ''
+    const call = activeCalls.get(callId)
+    if (!me || !sdp || !call || me !== call.to) {
+      ack({ ok: false, error: 'INVALID_CALL' })
+      return
+    }
+    io.to(callRoomOf(call.from)).emit('call:answer_sdp', { callId, sdp })
+    ack({ ok: true })
+  }))
+
+  /* v44 — ICE candidate dua arah: relay ke LAWAN call. */
+  socket.on('call:ice', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    const callId = typeof data?.callId === 'string' ? data.callId : ''
+    const candidate = typeof data?.candidate === 'string' ? data.candidate : ''
+    const call = activeCalls.get(callId)
+    if (!me || !candidate || !call || (me !== call.from && me !== call.to)) {
+      ack({ ok: false, error: 'INVALID_CALL' })
+      return
+    }
+    const peer = me === call.from ? call.to : call.from
+    io.to(callRoomOf(peer)).emit('call:ice', { callId, candidate })
+    ack({ ok: true })
+  }))
+
+  /* v44 — siapa pun mengakhiri: call:ended ke lawan + hapus state. */
+  socket.on('call:end', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    const callId = typeof data?.callId === 'string' ? data.callId : ''
+    const call = activeCalls.get(callId)
+    if (!me || !call || (me !== call.from && me !== call.to)) {
+      ack({ ok: false, error: 'INVALID_CALL' })
+      return
+    }
+    clearCall(callId)
+    const peer = me === call.from ? call.to : call.from
+    io.to(callRoomOf(peer)).emit('call:ended', { callId, by: me })
+    audit('call', `selesai oleh ${me.slice(0, 8)} (${callId.slice(0, 8)})`)
+    ack({ ok: true })
+  }))
 
   socket.on('error', (error) => {
     console.error(`Socket error (${socket.id}):`, error)
