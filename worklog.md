@@ -1274,3 +1274,30 @@ Work Log:
 
 Stage Summary:
 - Task 60-b SELESAI (v42): polling live multi-voter, pesan menghilang per-percakapan (admin set, sweeper 60 dtk), pengingat per-pesan (3 preset, toast live), statistik pribadi user, arsip percakapan user, status custom (emoji+teks di header), jadwal berulang harian/mingguan (kembaran otomatis), slash command /dadu /koin /me /shrug, ekspor PDF print-view. Verify 278/278, lint 0/0, GitHub sinkron (7a5e1e8 + rescue-v42). Sisa antrean: v43 (multi-admin/2FA/alert login/backup otomatis/branding) + v44 (call WebRTC).
+---
+Task ID: 60-c
+Agent: Z.ai Code (main; melanjutkan full-stack-developer subagent yang terputus kedua kali)
+Task: v43 — 5 fitur Admin & Sistem (alert login baru, backup otomatis, branding kustom, 2FA TOTP, multi-admin moderator)
+
+Work Log:
+- SUBAGENT TERPUTUS (ke-2) tapi strategi commit-per-fitur MENYELAMATKAN 4/5: commit v43.1 (admin:new_login + notice), v43.2 (runAutoBackup + autoBackupAt + admin:auto_backup_get/now + UI Pusat), v43.3 (appLogo+accentColor server+UI+applyAccentColor CSS vars), v43.4 (role moderator: login fallback bcrypt, adminGuardDestructive pada ±60 event destruktif, admin:user_role, actorRole di ack, badge+hidden UI). Subagent mati saat TOTP klien; server TOTP + adminGuardDestructive sudah utuh (diff 173 baris).
+- Main agent menuntaskan: (a) KLIEN 2FA — AdminPanel login: emitAdminAuth refactor menangani TOTP_REQUIRED/TOTP_INVALID (password disimpan di memori), input 6 digit auto-submit; Pusat: seksi "Keamanan — verifikasi 2 langkah" (state/enable/disable via admin:totp_state/setup/enable/disable + secret+otpauth+salin + badge 2FA AKTIF). (b) BUG BRANDING — AdminPanel tidak pernah FETCH settings (hanya dengar broadcast) → warna aksen tak muncul setelah reload → emit admin:settings:get pasca-login. (c) rescue-v43 + bump instrumentation (subagent lupa). (d) verify-integrity seksi v43 (27 cek) → 302/302; FEATURES.md v43.
+- E2E (t60c browser + skrip socket): TOTP SKRIP — state default mati ✓, setup secret+otpauth ✓, enable ✓, gate TOTP_REQUIRED ✓, kode salah TOTP_INVALID ✓, kode benar login ✓, disable dgn kode jendela -1 ✓. TOTP UI — aktifkan via Pusat (kode dihitung di browser dari secret DOM via WebCrypto) → badge 2FA AKTIF ✓ → logout → login gate muncul ✓ → kode benar → masuk ✓ → matikan via UI ✓ (DB totpEnabled=0). MODERATOR — login ModUji60c/mod123 via form admin (Enter native — Enter sintetis tidak memicu submit form) → actorRole=moderator ✓ badge "Moderator" ✓ Reset chat & 🎭 hilang ✓ chat terlihat ✓ reset FORBIDDEN ✓ leaderboard ok ✓ admin:user_role promosi/demosi ✓. LOGIN BARU — fixture login deviceId baru → admin menerima admin:new_login lengkap ✓. BACKUP — admin:auto_backup_now ok ✓ + UI Pusat (jadwal HH:MM + jalankan sekarang) ✓. BRANDING — UI Pengaturan (Unggah logo/Warna aksen/Reset) ✓; set #9333ea via socket → reload → --primary #9333ea terverifikasi (setelah fix settings:get) ✓ → dikembalikan bawaan.
+- INSIDEN KECIL: "Mode pemeliharaan AKTIF" sisa uji subagent ditemukan menyala → dimatikan via settings:set. Enter sintetis eval tidak memicu submit form React (harus press native agent-browser).
+- Cleanup: maintenance off, accent reset, artefak socket bersih; ModUji60c/mod123 DIBIARKAN sebagai akun demo moderator; browser ditutup. Commit 86cc569 (TOTP klien) + c259ad8 (final + rescue-v43 + tag push).
+
+Stage Summary:
+- Task 60-c SELESAI (v43): admin dapat alert login perangkat baru, backup otomatis harian terjadwal (jam diatur admin) + jalankan sekarang, branding (logo + warna aksen CSS global), 2FA TOTP penuh (setup/enable/gate login/matikan), dan multi-admin moderator (lihat semua, tanpa merusak). Verify 302/302, lint 0/0, GitHub sinkron (c259ad8 + rescue-v43). Sisa antrean: v44 (call suara/video WebRTC) — fitur terakhir dari 24.
+---
+Task ID: 60-d
+Agent: Z.ai Code (main; melanjutkan full-stack-developer subagent yang terputus ketiga kali di fase E2E)
+Task: v44 — Call suara/video WebRTC (fitur terakhir dari 24 fitur disetujui)
+
+Work Log:
+- SUBAGENT SELESAI SEMUA KODE (commit bertahap selamat): v44.1 (server signaling: call:ring/answer/offer/answer_sdp/ice/end + activeCalls Map + BUSY + timeout 45 dtk call:missed + cleanup disconnect + SERVICE_VERSION v44 + tipe Kategori D), v44.2 (call-overlay.tsx: CallOverlay + useWebRTC + tombol 📞/🎥 toolbar admin [tersembunyi utk moderator] & header user [tersembunyi saat dibatasi] + listeners), v44.3 (polish: stop track saat logout/unmount, guard fase ended, label fase + durasi mm:ss + indikator mute/kamera).
+- Main agent menutup: restart bersih service → "chat-service v44 listening" ✓; jalankan E2E signaling skrip subagent (.zscripts/t60d-signaling.ts) → 18/18 LULUS (ring→incoming→accept→answered→offer→answer_sdp→ICE dua arah→BUSY dua arah→end→ended→ring bersih setelah end→reject path); browser t60d: tombol 📞/🎥 tampil di toolbar, klik call → overlay full-screen "Memanggil…" avatar peer berdenyut + tombol akhiri ✓ → akhiri → overlay tertutup ✓, console 0 error, errors kosong; rescue-v44 + bump instrumentation (subagent lupa lagi), verify-integrity seksi v44 (16 cek; versi v43 dipindah) → 316/316; FEATURES.md v44; lint 0/0.
+- Catatan: media P2P nyata butuh 2 browser asli dengan izin kamera/mikrofon — sandbox headless diverifikasi sampai lapisan signaling penuh + UI overlay; di mesin nyata (satu LAN) host-candidate langsung berhasil, STUN disertakan untuk NAT.
+- Cleanup: browser ditutup; skrip signaling disimpan (.zscripts/t60d-signaling.ts).
+
+Stage Summary:
+- Task 60-d SELESAI (v44) — SEMUA 24 FITUR YANG DISETUJUI USER TUNTAS: v41 (8 AI admin), v42 (10 fitur chat), v43 (5 admin & sistem), v44 (call WebRTC). Verify 316/316, lint 0/0, chat-service v44 listening, GitHub sinkron dengan tag rescue-v44.

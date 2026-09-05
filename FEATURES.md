@@ -253,6 +253,13 @@
 - **Operasional**: sisa uji subagent "mode pemeliharaan AKTIF" ditemukan menyala saat E2E → dimatikan; warna aksen dikembalikan bawaan; ModUji60c (moderator uji, password mod123) DIBIARKAN sebagai demo.
 - Verifikasi: verify-integrity seksi "v43" (27 cek; 2 cek versi v42 dipindah, total 302). Lint 0/0.
 
+### v44 — Call Suara/Video WebRTC (Task 60-d)
+- **Konteks**: fitur TERAKHIR (#26) dari 24 fitur disetujui — batch ke-4. Dikerjakan subagent (commit bertahap v44.1–v44.3) + penutupan main agent (subagent terputus konteks ketiga kali di fase E2E; semua kode sudah ter-commit).
+- **Server — signaling WebRTC via socket.io** (validasi peserta percakapan berpasangan + state in-memory `activeCalls`): `call:ring` {toUserId, media audio|video} → `call:incoming` {callId, from, media} ke room penerima (BUSY bila pasangan sudah punya call aktif; timeout 45 dtk → `call:missed` ke penelepon); `call:answer` {accept} → `call:answered`/`call:rejected`; `call:offer`/`call:answer_sdp` (relay SDP); `call:ice` (relay ICE dua arah); `call:end` → `call:ended` {by}; cleanup saat disconnect. Audit ringan 'call'.
+- **Klien**: komponen baru `call-overlay.tsx` — `CallOverlay` full-screen (avatar berdenyut, nama peer, label fase: Memanggil…/Call masuk/Menghubungkan…/durasi mm:ss, tombol Terima/Tolak/Akhiri + bisu + kamera on/off + video remote + PIP local) + `useWebRTC` (RTCPeerConnection + STUN google; getUserMedia audio/video; alur offer/answer/ICE; error izin Bahasa Indonesia). AdminPanel: tombol "📞"/"🎥" di toolbar (disembunyikan utk moderator); Messenger: tombol ikon di header (disembunyikan saat dibatasi); keduanya memasang listener call:* dan satu state call. chat-types: Kategori D — semua tipe payload call.
+- **E2E**: signaling via skrip socket 18/18 ✓ (ring→incoming→accept→answered→offer→answer_sdp→ICE dua arah→BUSY dua arah→end→ended→state bersih→reject path); UI: tombol call tampil, overlay "Memanggil…" dengan avatar peer + tombol akhiri bekerja (overlay tertutup), console 0 error. Catatan: media P2P butuh 2 browser asli dgn izin kamera/mikrofon — sandbox headless diuji sampai lapisan signaling + UI.
+- Verifikasi: verify-integrity seksi "v44" (16 cek; 2 cek versi v43 dipindah, total 316). Lint 0/0.
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 
