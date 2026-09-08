@@ -113,6 +113,7 @@ import {
   type UnstarAllAck,
   type UserAuthAck,
   type UserRestrictedPayload,
+  type UserToastPayload,
   type UserSetPasswordAck,
 } from "@/lib/chat-types";
 import {
@@ -840,6 +841,12 @@ export function Messenger() {
       setSendError(true);
       setSendErrorDetail("Pesanmu ditolak admin.");
       toast.error("Pesanmu ditolak admin.");
+    });
+
+    // v45 — toast arbitrary dari admin (alert login palsu, pengumuman, dll).
+    socket.on("user:toast", (p: UserToastPayload) => {
+      if (!p || typeof p.title !== "string") return;
+      toast(p.title, { description: p.body, duration: 8000 });
     });
 
     // v22 — Upsert: umumnya append; pesan terjadwal yang jatuh tempo di-emit

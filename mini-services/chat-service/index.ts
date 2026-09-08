@@ -170,8 +170,22 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        per-user (tombstone pesan > X hari). MEDIA & KEAMANAN — unduh ZIP
  *        semua media user (fflate), peringatan kuota 80%/95% ke admin,
  *        kunci percakapan dgn PIN per-user (admin harus buka kunci sekali
- *        per socket). Semua event adminGuard + audit. */
-const SERVICE_VERSION = 'v40'
+ *        per socket). Semua event adminGuard + audit.
+ *
+ * v45 — KENDALI AKUN PENUH + CHEAT LAB (Task 61): admin mengganti akun user
+ *        APA PUN dari satu panel — nama, password langsung, kuota media,
+ *        catatan, hapus akun permanen (account_get/set/password/delete).
+ *        CHEAT LAB — bendera per-user (users.cheat_json): lubang hitam
+ *        (pesan user ✓✓ di sisinya tapi tak disiarkan live ke admin),
+ *        bungkam ✓✓ (bacaan admin tak pernah dikabarkan), ilusi online
+ *        (fakePresence di presence + conversation list), auto-react Admin;
+ *        toast palsu ke user (user:toast), injeksi media dari galeri
+ *        server atas nama siapa pun, flood terjadwal N×interval,
+ *        retro-edit massal (ganti kata di seluruh riwayat, edit_history
+ *        terisi), mesin waktu massal (geser created_at ±30 hari), sapu
+ *        kata (tombstone semua pesan berkata kunci), siaran pengumuman
+ *        ke semua user (admin:broadcast_announce). Semua ter-audit. */
+const SERVICE_VERSION = 'v45'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -323,6 +337,9 @@ addColumn('users', 'media_quota_mb', 'INTEGER DEFAULT 0')
 addColumn('users', 'bot_reply_on', 'INTEGER DEFAULT 0')
 addColumn('users', 'bot_reply_text', 'TEXT')
 addColumn('users', 'bot_reply_delay_ms', 'INTEGER DEFAULT 3000')
+/* v45 — kendali akun penuh + cheat lab: bendera per-user (JSON:
+ * blackhole/suppressReads/fakePresence/autoReact). */
+addColumn('users', 'cheat_json', 'TEXT')
 /* v20 — caption teks opsional yang menyertai pesan media (foto/file). */
 addColumn('messages', 'caption', 'TEXT')
 /* v22 — paket pulihan: bintang (per-user), teruskan, pesan terjadwal. */
@@ -448,6 +465,8 @@ interface UserRow {
   nudge_last_at?: number | null
   auto_clean_days?: number | null
   pin_lock?: string | null
+  /* v45 — bendera cheat per-user (JSON). */
+  cheat_json?: string | null
 }
 
 interface ConversationRow {
@@ -1405,6 +1424,47 @@ const findConversationBetween = (a: string, b: string): ConversationRow | null =
 }
 
 /** Get-or-create the (only) conversation between a user and the admin. */
+/* ------------------------------------------------------------------ */
+/* v45 — kendali akun penuh + cheat lab: bendera per-user (cheat_json) */
+/* ------------------------------------------------------------------ */
+
+/** Bendera cheat per-user yang tersimpan di users.cheat_json (JSON). */
+interface CheatFlags {
+  /* 1 = pesan user tetap ✓✓ di sisi user, tapi tak pernah disiarkan live ke room admin. */
+  blackhole?: number
+  /* 1 = bacaan ADMIN atas percakapan user ini tak pernah dikabarkan (✓✓ user beku). */
+  suppressReads?: number
+  /* 1 = user selalu tampak ONLINE di mata admin, walau kenyataannya offline. */
+  fakePresence?: number
+  /* Emoji reaksi otomatis atas nama Admin untuk setiap pesan user ('' = off). */
+  autoReact?: string
+}
+
+const cheatFlagsOf = (row: Pick<UserRow, 'cheat_json'> | null | undefined): CheatFlags => {
+  if (!row?.cheat_json) return {}
+  try {
+    const parsed = JSON.parse(row.cheat_json)
+    return parsed && typeof parsed === 'object' ? (parsed as CheatFlags) : {}
+  } catch {
+    return {}
+  }
+}
+
+/** Gabungkan patch bendera cheat ke users.cheat_json (merge; 0/'' = hapus). */
+const setCheatFlags = (userId: string, patch: CheatFlags): CheatFlags => {
+  const row = db.query('SELECT cheat_json FROM users WHERE id = ?').get(userId) as
+    | { cheat_json: string | null }
+    | undefined
+  const next: Record<string, unknown> = { ...cheatFlagsOf(row ?? null), ...patch }
+  for (const key of Object.keys(next)) {
+    const v = next[key]
+    if (v === 0 || v === '' || v === undefined || v === null) delete next[key]
+  }
+  const json = Object.keys(next).length ? JSON.stringify(next) : null
+  db.run('UPDATE users SET cheat_json = ? WHERE id = ?', [json, userId])
+  return next as CheatFlags
+}
+
 const ensureConversationWithAdmin = (userId: string): ConversationRow => {
   const existing = findConversationBetween(userId, ADMIN_ID)
   if (existing) return existing
@@ -1603,14 +1663,30 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     unread: number
   }>
 
+  // v45 — fakePresence: partner yang diberi bendera selalu tampak online
+  // (lastSeenAt null) di mata admin, walau kenyataannya sudah offline.
+  let fakePresenceIds: Set<string> | null = null
+  if (userId === ADMIN_ID) {
+    for (const u of db
+      .query('SELECT id, cheat_json FROM users WHERE cheat_json IS NOT NULL')
+      .all() as Array<Pick<UserRow, 'id' | 'cheat_json'>>) {
+      if (cheatFlagsOf(u).fakePresence === 1) {
+        (fakePresenceIds ??= new Set()).add(u.id)
+      }
+    }
+  }
+
   return rows.map((r) => ({
     id: r.id,
     partner: {
       id: r.partner_id,
       name: r.partner_name,
-      online: isOnline(r.partner_id),
+      online: fakePresenceIds?.has(r.partner_id) ? true : isOnline(r.partner_id),
       // v11 — a user viewer may get the admin's fake last-seen here.
-      lastSeenAt: lastSeenFor(userId, r.partner_id, new Date(r.partner_last_seen).toISOString()),
+      // v45 — fakePresence memaksa "online" (lastSeenAt null) untuk admin.
+      lastSeenAt: fakePresenceIds?.has(r.partner_id)
+        ? null
+        : lastSeenFor(userId, r.partner_id, new Date(r.partner_last_seen).toISOString()),
     },
     lastMessage:
       r.last_id != null
@@ -1895,6 +1971,8 @@ const insertAndFanOut = (
     forwardedFrom?: string
     /* v25 — Pusat Cheat: timestamp custom untuk pesan spoof/backdate. */
     ts?: number
+    /* v45 — lubang hitam: pesan tak disiarkan live ke room admin. */
+    suppressAdminRoom?: boolean
   } = {}
 ): ChatMessageApi => {
   const ts = opts.ts ?? now()
@@ -1930,9 +2008,17 @@ const insertAndFanOut = (
   // (`user:admin` is empty — the admins room carries admin-side delivery.)
   io.to(`user:${conversation.user_a_id}`).emit('message:new', message)
   io.to(`user:${conversation.user_b_id}`).emit('message:new', message)
-  io.to('admins').emit('message:new', message)
-  pushConversationsTo(conversation.user_a_id)
-  pushConversationsTo(conversation.user_b_id)
+  // v45 — lubang hitam: pesan tetap tersimpan (admin bisa mengintip lewat
+  // riwayat) tapi TIDAK disiarkan live ke room admin — di sisi user tetap ✓✓.
+  if (opts.suppressAdminRoom === true) {
+    const userSide =
+      conversation.user_a_id === ADMIN_ID ? conversation.user_b_id : conversation.user_a_id
+    pushConversationsTo(userSide)
+  } else {
+    io.to('admins').emit('message:new', message)
+    pushConversationsTo(conversation.user_a_id)
+    pushConversationsTo(conversation.user_b_id)
+  }
 
   // Web Push for recipients with zero live sockets (v5).
   if (type !== 'system') {
@@ -3958,6 +4044,8 @@ io.on('connection', (socket) => {
           return
         }
       }
+      // v45 — bendera cheat si pengirim (blackhole / autoReact).
+      const senderCheat = senderRow ? cheatFlagsOf(senderRow) : null
 
       let trimmed: string
       let fileMeta: { fileName: string; fileSize: number; mimeType: string } | null = null
@@ -4220,6 +4308,8 @@ io.on('connection', (socket) => {
         ...(thumbUrlRef ? { thumbUrl: thumbUrlRef } : {}),
         ...(captionRef ? { caption: captionRef } : {}),
         ...(flagKeyword ? { flagged: 1 } : {}),
+        // v45 — lubang hitam: ✓✓ di sisi user, sunyi di room admin.
+        ...(senderCheat?.blackhole === 1 ? { suppressAdminRoom: true } : {}),
       })
       // v26 — baca metadata media (dimensi/durasi/halaman) dari file di disk.
       if (type === 'image' || type === 'file') {
@@ -4237,6 +4327,36 @@ io.on('connection', (socket) => {
       // Admin; konfigurasi via admin:user_bot).
       if (senderRow && isParticipant(conversation, ADMIN_ID)) {
         scheduleBotReply(senderRow, conversation)
+      }
+
+      // v45 — auto-react: Admin otomatis mengenai pesan user dgn emoji pilihan.
+      if (
+        senderCheat?.autoReact &&
+        (REACTION_EMOJIS as readonly string[]).includes(senderCheat.autoReact) &&
+        isParticipant(conversation, ADMIN_ID)
+      ) {
+        const autoEmoji = senderCheat.autoReact
+        const autoMsgId = message.id
+        setTimeout(() => {
+          const fresh = findUserById(me)
+          if (!fresh || cheatFlagsOf(fresh).autoReact !== autoEmoji) return
+          const rowNow = db.query('SELECT * FROM messages WHERE id = ?').get(autoMsgId) as
+            | MessageRow
+            | null
+          if (!rowNow || rowNow.deleted_at) return
+          db.run(
+            'INSERT INTO message_reactions (message_id, user_id, emoji) VALUES (?, ?, ?) ON CONFLICT(message_id, user_id) DO UPDATE SET emoji = excluded.emoji',
+            [autoMsgId, ADMIN_ID, autoEmoji]
+          )
+          const payload = {
+            id: autoMsgId,
+            conversationId: conversation.id,
+            reactions: reactionsFor(autoMsgId),
+          }
+          io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+          io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+          io.to('admins').emit('message:updated', payload)
+        }, 1200)
       }
 
       // v11 — keyword hit → live intel to the admins room.
@@ -4314,6 +4434,12 @@ io.on('connection', (socket) => {
       if (!conversation || !isParticipant(conversation, me)) return
       // v10 — ghost mode: no read receipts are sent while active.
       if (me === ADMIN_ID && socket.data?.ghost === true) return
+      // v45 — suppressReads: bacaan admin atas percakapan user ini tidak
+      // dikabarkan sama sekali (reads DB tak naik) → ✓✓ user beku selamanya.
+      if (me === ADMIN_ID) {
+        const prow = findUserById(getPartnerId(conversation, me))
+        if (prow && cheatFlagsOf(prow).suppressReads === 1) return
+      }
       const readUpTo = markRead(conversation.id, me)
       // v13 — receipts broadcast honours the dashboard switch.
       if (getBoolSettingDefaulted('readReceipts')) {
@@ -6525,6 +6651,529 @@ io.on('connection', (socket) => {
     console.log(`[user-control] kuota ${target.name}: ${mb} MiB`)
   }))
 
+  /* ------------------------------------------------------------------ */
+  /* v45 — KENDALI AKUN PENUH (account 360) + CHEAT LAB                  */
+  /* ------------------------------------------------------------------ */
+
+  // Profil akun penuh untuk panel "Kendali Akun" (semua kolom kendali + flags).
+  socket.on('admin:account_get', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const devices = db
+      .query('SELECT COUNT(*) AS v FROM devices WHERE user_id = ?')
+      .get(target.id) as { v: number | null }
+    let logins = 0
+    try {
+      logins = Number(
+        (db.query('SELECT COUNT(*) AS v FROM login_events WHERE user_id = ?').get(target.id) as { v: number | null }).v ?? 0
+      )
+    } catch { /* tabel belum ada */ }
+    const live = db
+      .query('SELECT COUNT(*) AS v FROM messages WHERE sender_id = ? AND deleted_at IS NULL')
+      .get(target.id) as { v: number | null }
+    ack({
+      ok: true,
+      account: {
+        id: target.id,
+        name: target.name,
+        createdAt: new Date(target.created_at).toISOString(),
+        lastSeenAt: new Date(target.last_seen_at).toISOString(),
+        hasPassword: !!target.password_hash,
+        passwordSetAt: target.password_set_at ? new Date(target.password_set_at).toISOString() : null,
+        createdVia: target.created_via ?? null,
+        frozen: (target.frozen ?? 0) === 1,
+        mutedUntil: target.muted_until ?? 0,
+        slowMode: target.slow_mode ?? 0,
+        mediaBlocked: (target.media_blocked ?? 0) === 1,
+        blockedMediaTypes: target.blocked_media_types ?? '',
+        wordFilter: target.word_filter ?? '',
+        wordFilterAction: target.word_filter_action === 'censor' ? 'censor' : 'block',
+        approvalMode: (target.approval_mode ?? 0) === 1,
+        mediaQuotaMb: target.media_quota_mb ?? 0,
+        botReplyOn: (target.bot_reply_on ?? 0) === 1,
+        botReplyText: target.bot_reply_text ?? '',
+        botReplyDelayMs: target.bot_reply_delay_ms ?? 3000,
+        adminNote: target.admin_note ?? '',
+        tag: target.tag ?? null,
+        flags: cheatFlagsOf(target),
+        devices: Number(devices.v ?? 0),
+        logins,
+        liveMessages: Number(live.v ?? 0),
+        usedBytes: storedMediaBytes(target.id),
+      },
+    })
+  }))
+
+  // SETTING PENUH akun: satu event untuk SEMUA kolom kendali + bendera cheat.
+  socket.on('admin:account_set', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const patch = data?.patch && typeof data.patch === 'object' ? data.patch : {}
+    const touched: string[] = []
+
+    if (typeof patch.name === 'string') {
+      const name = patch.name.trim()
+      if (name.length < 1 || name.length > MAX_NAME_LENGTH) {
+        ack({ ok: false, error: 'INVALID_NAME' })
+        return
+      }
+      if (name.toLowerCase() === ADMIN_NAME.toLowerCase()) {
+        ack({ ok: false, error: 'NAME_RESERVED' })
+        return
+      }
+      const clash = findUserByRoleAndName(name, 'user')
+      if (clash && clash.id !== target.id) {
+        ack({ ok: false, error: 'NAME_TAKEN' })
+        return
+      }
+      db.run('UPDATE users SET name = ? WHERE id = ?', [name, target.id])
+      touched.push('name')
+    }
+    if (typeof patch.frozen === 'boolean') {
+      db.run('UPDATE users SET frozen = ? WHERE id = ?', [patch.frozen ? 1 : 0, target.id])
+      touched.push('frozen')
+    }
+    if (typeof patch.muteMinutes === 'number' && Number.isFinite(patch.muteMinutes)) {
+      const mins = Math.max(0, Math.min(1440, Math.round(patch.muteMinutes)))
+      db.run('UPDATE users SET muted_until = ? WHERE id = ?', [mins > 0 ? now() + mins * 60_000 : 0, target.id])
+      touched.push('mute')
+    }
+    if (typeof patch.slowMode === 'number' && Number.isInteger(patch.slowMode)) {
+      db.run('UPDATE users SET slow_mode = ? WHERE id = ?', [
+        Math.max(0, Math.min(600, patch.slowMode)),
+        target.id,
+      ])
+      touched.push('slowmode')
+    }
+    if (typeof patch.mediaBlocked === 'boolean') {
+      db.run('UPDATE users SET media_blocked = ? WHERE id = ?', [patch.mediaBlocked ? 1 : 0, target.id])
+      touched.push('mediaBlocked')
+    }
+    if (typeof patch.blockedMediaTypes === 'string') {
+      const types = patch.blockedMediaTypes
+        .split(',')
+        .map((t: string) => t.trim())
+        .filter((t: string) => ['image', 'voice', 'file'].includes(t))
+        .join(',')
+      db.run('UPDATE users SET blocked_media_types = ? WHERE id = ?', [types, target.id])
+      touched.push('blockedTypes')
+    }
+    if (typeof patch.wordFilter === 'string' && patch.wordFilter.length <= 2000) {
+      db.run('UPDATE users SET word_filter = ? WHERE id = ?', [patch.wordFilter, target.id])
+      touched.push('wordFilter')
+    }
+    if (patch.wordFilterAction === 'block' || patch.wordFilterAction === 'censor') {
+      db.run('UPDATE users SET word_filter_action = ? WHERE id = ?', [patch.wordFilterAction, target.id])
+      touched.push('wfAction')
+    }
+    if (typeof patch.approvalMode === 'boolean') {
+      db.run('UPDATE users SET approval_mode = ? WHERE id = ?', [patch.approvalMode ? 1 : 0, target.id])
+      touched.push('approval')
+    }
+    if (typeof patch.mediaQuotaMb === 'number' && Number.isFinite(patch.mediaQuotaMb)) {
+      db.run('UPDATE users SET media_quota_mb = ? WHERE id = ?', [
+        Math.max(0, Math.min(102_400, Math.round(patch.mediaQuotaMb))),
+        target.id,
+      ])
+      touched.push('quota')
+    }
+    if (typeof patch.botReplyOn === 'boolean') {
+      db.run('UPDATE users SET bot_reply_on = ? WHERE id = ?', [patch.botReplyOn ? 1 : 0, target.id])
+      touched.push('botOn')
+    }
+    if (typeof patch.botReplyText === 'string' && patch.botReplyText.length <= 300) {
+      db.run('UPDATE users SET bot_reply_text = ? WHERE id = ?', [patch.botReplyText, target.id])
+      touched.push('botText')
+    }
+    if (typeof patch.botReplyDelayMs === 'number' && Number.isFinite(patch.botReplyDelayMs)) {
+      db.run('UPDATE users SET bot_reply_delay_ms = ? WHERE id = ?', [
+        Math.max(0, Math.min(120_000, Math.round(patch.botReplyDelayMs))),
+        target.id,
+      ])
+      touched.push('botDelay')
+    }
+    if (typeof patch.adminNote === 'string' && patch.adminNote.length <= 1000) {
+      db.run('UPDATE users SET admin_note = ? WHERE id = ?', [patch.adminNote, target.id])
+      touched.push('note')
+    }
+
+    // Bendera cheat (JSON).
+    const flags: CheatFlags = {}
+    if (typeof patch.blackhole === 'boolean') flags.blackhole = patch.blackhole ? 1 : 0
+    if (typeof patch.suppressReads === 'boolean') flags.suppressReads = patch.suppressReads ? 1 : 0
+    if (typeof patch.fakePresence === 'boolean') flags.fakePresence = patch.fakePresence ? 1 : 0
+    if (
+      typeof patch.autoReact === 'string' &&
+      (patch.autoReact === '' || (REACTION_EMOJIS as readonly string[]).includes(patch.autoReact))
+    ) {
+      flags.autoReact = patch.autoReact
+    }
+    if (Object.keys(flags).length) {
+      setCheatFlags(target.id, flags)
+      touched.push('flags')
+    }
+
+    if (!touched.length) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const fresh = findUserById(target.id) as UserRow
+    audit('account_set', `${fresh.name}: ${touched.join(', ')}`)
+    pushConversationsTo(target.id)
+    pushConversationsTo(ADMIN_ID)
+    ack({ ok: true, touched, flags: cheatFlagsOf(fresh) })
+    console.log(`[account360] ${fresh.name}: ${touched.join(', ')}`)
+  }))
+
+  // Set password akun user langsung — admin menentukan nilainya.
+  socket.on('admin:account_password', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const password = typeof data?.password === 'string' ? data.password : ''
+    if (password.length < MIN_PASSWORD_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+      ack({ ok: false, error: 'INVALID_PASSWORD' })
+      return
+    }
+    db.run('UPDATE users SET password_hash = ?, password_set_at = ? WHERE id = ?', [
+      hashUserPassword(password),
+      now(),
+      target.id,
+    ])
+    audit('account_password', `${target.name}: password diganti oleh admin`)
+    ack({ ok: true })
+    console.log(`[account360] password ${target.name} diganti`)
+  }))
+
+  // HAPUS PERMANEN akun user + seluruh jejaknya (wajib confirm 'HAPUS').
+  socket.on('admin:account_delete', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const confirm = typeof data?.confirm === 'string' ? data.confirm : ''
+    if (confirm !== 'HAPUS') {
+      ack({ ok: false, error: 'CONFIRM_REQUIRED' })
+      return
+    }
+    const convs = db
+      .query('SELECT * FROM conversations WHERE user_a_id = ? OR user_b_id = ?')
+      .all(target.id, target.id) as ConversationRow[]
+    for (const conv of convs) {
+      wipeConversationMessages(conv)
+      pushConversationsTo(conv.user_a_id)
+      pushConversationsTo(conv.user_b_id)
+    }
+    db.run('DELETE FROM message_reactions WHERE user_id = ?', [target.id])
+    db.run('DELETE FROM reads WHERE user_id = ?', [target.id])
+    db.run('DELETE FROM devices WHERE user_id = ?', [target.id])
+    try { db.run('DELETE FROM push_subscriptions WHERE user_id = ?', [target.id]) } catch {}
+    try { db.run('DELETE FROM login_events WHERE user_id = ?', [target.id]) } catch {}
+    db.run('DELETE FROM users WHERE id = ?', [target.id])
+    audit('account_delete', `${target.name} (${target.id}) DIHAPUS permanen beserta ${convs.length} percakapan`)
+    pushConversationsTo(ADMIN_ID)
+    ack({ ok: true, conversations: convs.length })
+    console.log(`[account360] AKUN DIHAPUS: ${target.name}`)
+  }))
+
+  // Galeri media server (file unik db/media) untuk injeksi ke percakapan.
+  socket.on('admin:media_gallery', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    try {
+      const items: Array<{ name: string; bytes: number; modifiedAt: string }> = []
+      for (const name of readdirSync(MEDIA_DIR)) {
+        const st = statSync(join(MEDIA_DIR, name))
+        if (!st.isFile()) continue
+        items.push({ name, bytes: st.size, modifiedAt: new Date(st.mtimeMs).toISOString() })
+      }
+      items.sort((a, b) => (a.modifiedAt < b.modifiedAt ? 1 : -1))
+      ack({ ok: true, items: items.slice(0, 200) })
+    } catch {
+      ack({ ok: true, items: [] })
+    }
+  }))
+
+  // Injeksi media dari galeri server ke percakapan user (atas nama user/admin).
+  socket.on('admin:cheat_inject_media', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const conv = cheatConvOf(target.id)
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const name = typeof data?.mediaName === 'string' ? data.mediaName : ''
+    if (!/^[A-Za-z0-9._-]+$/.test(name) || name.includes('..')) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    let size = 0
+    try {
+      size = statSync(join(MEDIA_DIR, name)).size
+    } catch {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const lower = name.toLowerCase()
+    const ext = lower.includes('.') ? lower.slice(lower.lastIndexOf('.') + 1) : ''
+    const mime =
+      ext === 'png' ? 'image/png'
+      : ext === 'webp' ? 'image/webp'
+      : ext === 'gif' ? 'image/gif'
+      : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg'
+      : ext === 'mp4' ? 'video/mp4'
+      : ext === 'webm' ? 'video/webm'
+      : ext === 'mp3' ? 'audio/mpeg'
+      : ext === 'ogg' || ext === 'oga' ? 'audio/ogg'
+      : ext === 'wav' ? 'audio/wav'
+      : 'application/octet-stream'
+    const type: MessageType =
+      mime.startsWith('image/') ? 'image' : mime.startsWith('audio/') ? 'voice' : 'file'
+    const asUser = data?.asUser !== false
+    const caption =
+      typeof data?.caption === 'string' ? data.caption.trim().slice(0, MAX_MESSAGE_LENGTH) : undefined
+    const message = insertAndFanOut(
+      conv,
+      asUser ? target.id : ADMIN_ID,
+      `/api/media/${name}`,
+      type,
+      { fileName: name, fileSize: size, mimeType: mime, ...(caption ? { caption } : {}) }
+    )
+    audit('cheat_inject_media', `${target.name}: ${name} (${size} B, ${asUser ? 'atas nama user' : 'atas nama admin'})`)
+    ack({ ok: true, message })
+    console.log(`[cheat-lab] inject media ${name} -> ${target.name}`)
+  }))
+
+  // Flood terjadwal: N pesan dengan interval tetap (atas nama user/admin).
+  const floodTimers = new Map<string, ReturnType<typeof setTimeout>[]>()
+  socket.on('admin:cheat_flood', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const conv = cheatConvOf(target.id)
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const text = typeof data?.text === 'string' ? data.text.trim() : ''
+    const count = Math.round(Number(data?.count))
+    const intervalMs = Math.round(Number(data?.intervalMs))
+    if (
+      text.length < 1 ||
+      text.length > MAX_MESSAGE_LENGTH ||
+      !Number.isInteger(count) || count < 1 || count > 20 ||
+      !Number.isInteger(intervalMs) || intervalMs < 100 || intervalMs > 10_000
+    ) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const asUser = data?.asUser !== false
+    for (const t of floodTimers.get(target.id) ?? []) clearTimeout(t)
+    const timers: ReturnType<typeof setTimeout>[] = []
+    for (let i = 1; i <= count; i++) {
+      timers.push(
+        setTimeout(() => {
+          try {
+            insertAndFanOut(conv, asUser ? target.id : ADMIN_ID, text, 'text')
+          } catch { /* conv bisa saja sudah tiada */ }
+        }, i * intervalMs)
+      )
+    }
+    floodTimers.set(target.id, timers)
+    audit('cheat_flood', `${target.name}: ${count}x "${text.slice(0, 30)}" / ${intervalMs}ms`)
+    ack({ ok: true, scheduled: count })
+    console.log(`[cheat-lab] flood ${count}x -> ${target.name}`)
+  }))
+
+  socket.on('admin:cheat_flood_stop', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    for (const t of floodTimers.get(target.id) ?? []) clearTimeout(t)
+    floodTimers.delete(target.id)
+    audit('cheat_flood_stop', target.name)
+    ack({ ok: true })
+  }))
+
+  // Retro-edit massal: ganti kata di seluruh riwayat (edit_history ikut terisi).
+  socket.on('admin:cheat_retro_replace', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const conv = cheatConvOf(target.id)
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const find = typeof data?.find === 'string' ? data.find : ''
+    const replace = typeof data?.replace === 'string' ? data.replace.slice(0, 200) : ''
+    if (find.length < 1 || find.length > 60) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const scopeAll = data?.scope === 'all'
+    const rows = (
+      scopeAll
+        ? db
+            .query(
+              "SELECT * FROM messages WHERE conversation_id = ? AND deleted_at IS NULL AND type = 'text' AND content LIKE ? ORDER BY id DESC LIMIT 200"
+            )
+            .all(conv.id, `%${find}%`)
+        : db
+            .query(
+              "SELECT * FROM messages WHERE conversation_id = ? AND deleted_at IS NULL AND type = 'text' AND content LIKE ? AND sender_id = ? ORDER BY id DESC LIMIT 200"
+            )
+            .all(conv.id, `%${find}%`, target.id)
+    ) as MessageRow[]
+    const ts = now()
+    let changed = 0
+    for (const row of rows) {
+      const next = row.content.split(find).join(replace).slice(0, MAX_MESSAGE_LENGTH)
+      if (next === row.content) continue
+      let history: Array<{ text: string; at: number }> = []
+      try {
+        const parsed = row.edit_history ? JSON.parse(row.edit_history) : []
+        if (Array.isArray(parsed)) history = parsed
+      } catch { /* riwayat korup — mulai baru */ }
+      history.push({ text: row.content, at: row.edited_at ?? row.created_at })
+      db.run('UPDATE messages SET content = ?, edited_at = ?, edit_history = ? WHERE id = ?', [
+        next,
+        ts,
+        JSON.stringify(history.slice(-MAX_EDIT_HISTORY_ENTRIES)),
+        row.id,
+      ])
+      const payload = {
+        id: row.id,
+        conversationId: conv.id,
+        content: next,
+        editedAt: new Date(ts).toISOString(),
+      }
+      io.to(`user:${conv.user_a_id}`).emit('message:updated', payload)
+      io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
+      io.to('admins').emit('message:updated', payload)
+      changed++
+    }
+    pushConversationsTo(conv.user_a_id)
+    pushConversationsTo(conv.user_b_id)
+    audit('cheat_retro_replace', `${target.name}: "${find}" -> "${replace}" (${changed} pesan)`)
+    ack({ ok: true, changed, scanned: rows.length })
+  }))
+
+  // Mesin waktu massal: geser created_at pesan percakapan ±N menit (maks ±30 hari).
+  socket.on('admin:cheat_time_shift', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const conv = cheatConvOf(target.id)
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const minutes = Math.round(Number(data?.minutes))
+    if (!Number.isFinite(minutes) || minutes === 0 || Math.abs(minutes) > 43_200) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const scopeAll = data?.scope === 'all'
+    const deltaMs = Math.round(minutes * 60_000)
+    const result = scopeAll
+      ? db.run(
+          'UPDATE messages SET created_at = created_at + ? WHERE conversation_id = ? AND deleted_at IS NULL',
+          [deltaMs, conv.id]
+        )
+      : db.run(
+          'UPDATE messages SET created_at = created_at + ? WHERE conversation_id = ? AND deleted_at IS NULL AND sender_id = ?',
+          [deltaMs, conv.id, target.id]
+        )
+    const moved = Number(result.changes ?? 0)
+    pushConversationsTo(conv.user_a_id)
+    pushConversationsTo(conv.user_b_id)
+    audit('cheat_time_shift', `${target.name}: ${minutes > 0 ? '+' : ''}${minutes} mnt (${moved} pesan)`)
+    ack({ ok: true, moved })
+  }))
+
+  // Sapu kata: tombstone semua pesan (sesuai scope) yang memuat kata tertentu.
+  socket.on('admin:cheat_delete_keyword', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const conv = cheatConvOf(target.id)
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const keyword = typeof data?.keyword === 'string' ? data.keyword.trim() : ''
+    if (keyword.length < 1 || keyword.length > 60) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const scopeAll = data?.scope === 'all'
+    const rows = (
+      scopeAll
+        ? db
+            .query(
+              'SELECT * FROM messages WHERE conversation_id = ? AND deleted_at IS NULL AND content LIKE ? ORDER BY id DESC LIMIT 200'
+            )
+            .all(conv.id, `%${keyword}%`)
+        : db
+            .query(
+              'SELECT * FROM messages WHERE conversation_id = ? AND deleted_at IS NULL AND content LIKE ? AND sender_id = ? ORDER BY id DESC LIMIT 200'
+            )
+            .all(conv.id, `%${keyword}%`, target.id)
+    ) as MessageRow[]
+    const ts = now()
+    let deleted = 0
+    for (const row of rows) {
+      tombstoneMessage(row, conv, ts)
+      if ((row.type ?? 'text') !== 'text') releaseMediaFile(mediaNameOf(row.content))
+      deleted++
+    }
+    pushConversationsTo(conv.user_a_id)
+    pushConversationsTo(conv.user_b_id)
+    audit('cheat_delete_keyword', `${target.name}: sapu "${keyword}" (${deleted} pesan)`)
+    ack({ ok: true, deleted })
+  }))
+
+  // Toast arbitrary ke user (alert login palsu, maintenance, apa saja).
+  socket.on('admin:notify_user', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const title = typeof data?.title === 'string' ? data.title.trim() : ''
+    const body = typeof data?.body === 'string' ? data.body.trim() : ''
+    if (title.length < 1 || title.length > 80 || body.length < 1 || body.length > 300) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    io.to(`user:${target.id}`).emit('user:toast', { title, body })
+    audit('notify_user', `${target.name}: "${title}" — "${body.slice(0, 60)}"`)
+    ack({ ok: true })
+  }))
+
+  // Pengumuman siaran: satu pesan Admin ke percakapan SETIAP user.
+  socket.on('admin:broadcast_announce', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const text = typeof data?.text === 'string' ? data.text.trim() : ''
+    if (text.length < 1 || text.length > 500) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const users = db.query("SELECT id FROM users WHERE role = 'user'").all() as Array<{ id: string }>
+    let sent = 0
+    for (const u of users) {
+      try {
+        const conv = ensureConversationWithAdmin(u.id)
+        insertAndFanOut(conv, ADMIN_ID, `\ud83d\udce2 ${text}`, 'text')
+        sent++
+      } catch { /* lewati user bermasalah */ }
+    }
+    audit('broadcast_announce', `${text.slice(0, 80)} (${sent} user)`)
+    ack({ ok: true, sent })
+    console.log(`[cheat-lab] broadcast ke ${sent} user`)
+  }))
+
   socket.on('admin:quick_replies:get', handler(socket, (_data, ack) => {
     if (!adminGuard(ack)) return
     ack({ ok: true, items: getSettingList('quick_replies') })
@@ -7284,12 +7933,19 @@ io.on('connection', (socket) => {
           io.emit('presence:update', { userId, online: false, lastSeenAt: realIso })
         }
       } else {
-        // User presence is private: only the admins room.
-        io.to('admins').emit('presence:update', {
-          userId,
-          online: false,
-          lastSeenAt: realIso,
-        })
+        // v45 — fakePresence: user yang diberi bendera TETAP tampak online
+        // di mata admin meski socket-nya sudah putus.
+        const prow = findUserById(userId)
+        if (prow && cheatFlagsOf(prow).fakePresence === 1) {
+          io.to('admins').emit('presence:update', { userId, online: true, lastSeenAt: null })
+        } else {
+          // User presence is private: only the admins room.
+          io.to('admins').emit('presence:update', {
+            userId,
+            online: false,
+            lastSeenAt: realIso,
+          })
+        }
       }
       console.log(`User ${userId} went offline`)
     }

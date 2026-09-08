@@ -453,6 +453,157 @@ export interface ChatErrorAck {
 export type AckOf<T> = T | ChatErrorAck;
 
 /* ------------------------------------------------------------------ */
+/* Kategori J — Kendali Akun Penuh + Cheat Lab (v45).                  */
+/* Semua event: adminGuard + restrictionTarget + audit di server.      */
+/* admin:account_get / admin:account_set / admin:account_password /    */
+/* admin:account_delete / admin:media_gallery /                        */
+/* admin:cheat_inject_media / admin:cheat_flood(+_stop) /              */
+/* admin:cheat_retro_replace / admin:cheat_time_shift /                */
+/* admin:cheat_delete_keyword / admin:notify_user /                    */
+/* admin:broadcast_announce. Efek flags: blackhole (pesan user tak     */
+/* disiarkan live ke room admin), suppressReads (bacaan admin tak      */
+/* dikabarkan), fakePresence (user tampak selalu online), autoReact    */
+/* (Admin otomatis mereaksi pesan user).                               */
+/* ------------------------------------------------------------------ */
+
+/** Bendera cheat per-user (tersimpan sebagai JSON users.cheat_json). */
+export interface AdminCheatFlags {
+  blackhole?: number;
+  suppressReads?: number;
+  fakePresence?: number;
+  autoReact?: string;
+}
+
+/** Profil akun penuh satu user (admin:account_get). */
+export interface AdminAccountProfile {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastSeenAt: string;
+  hasPassword: boolean;
+  passwordSetAt: string | null;
+  createdVia: string | null;
+  frozen: boolean;
+  mutedUntil: number;
+  slowMode: number;
+  mediaBlocked: boolean;
+  blockedMediaTypes: string;
+  wordFilter: string;
+  wordFilterAction: "block" | "censor";
+  approvalMode: boolean;
+  mediaQuotaMb: number;
+  botReplyOn: boolean;
+  botReplyText: string;
+  botReplyDelayMs: number;
+  adminNote: string;
+  tag: string | null;
+  flags: AdminCheatFlags;
+  devices: number;
+  logins: number;
+  liveMessages: number;
+  usedBytes: number;
+}
+
+export interface AdminAccountGetAck {
+  ok: true;
+  account: AdminAccountProfile;
+}
+
+/** Patch parsial untuk admin:account_set — cukup kirim field yang berubah. */
+export interface AdminAccountSetPayload {
+  name?: string;
+  frozen?: boolean;
+  muteMinutes?: number;
+  slowMode?: number;
+  mediaBlocked?: boolean;
+  blockedMediaTypes?: string;
+  wordFilter?: string;
+  wordFilterAction?: "block" | "censor";
+  approvalMode?: boolean;
+  mediaQuotaMb?: number;
+  botReplyOn?: boolean;
+  botReplyText?: string;
+  botReplyDelayMs?: number;
+  adminNote?: string;
+  blackhole?: boolean;
+  suppressReads?: boolean;
+  fakePresence?: boolean;
+  autoReact?: string;
+}
+
+export interface AdminAccountSetAck {
+  ok: true;
+  touched: string[];
+  flags: AdminCheatFlags;
+}
+
+export interface AdminAccountPasswordAck {
+  ok: true;
+}
+
+export interface AdminAccountDeleteAck {
+  ok: true;
+  conversations: number;
+}
+
+/** Satu file di galeri media server (db/media) untuk injeksi. */
+export interface AdminMediaGalleryItem {
+  name: string;
+  bytes: number;
+  modifiedAt: string;
+}
+
+export interface AdminMediaGalleryAck {
+  ok: true;
+  items: AdminMediaGalleryItem[];
+}
+
+export interface AdminInjectMediaAck {
+  ok: true;
+  message: ChatMessageApi;
+}
+
+export interface AdminCheatFloodAck {
+  ok: true;
+  scheduled: number;
+}
+
+export interface AdminCheatFloodStopAck {
+  ok: true;
+}
+
+export interface AdminRetroReplaceAck {
+  ok: true;
+  changed: number;
+  scanned: number;
+}
+
+export interface AdminTimeShiftAck {
+  ok: true;
+  moved: number;
+}
+
+export interface AdminDeleteKeywordAck {
+  ok: true;
+  deleted: number;
+}
+
+export interface AdminNotifyUserAck {
+  ok: true;
+}
+
+export interface AdminBroadcastAck {
+  ok: true;
+  sent: number;
+}
+
+/** v45 — toast arbitrary dari admin ke satu user (bukan push). */
+export interface UserToastPayload {
+  title: string;
+  body: string;
+}
+
+/* ------------------------------------------------------------------ */
 /* v10 — admin dashboard / app settings / broadcast                    */
 /* ------------------------------------------------------------------ */
 

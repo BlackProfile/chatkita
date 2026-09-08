@@ -18,10 +18,12 @@ import {
   Smartphone,
   Timer,
   Trash2,
+  UserCog,
   VolumeX,
 } from "lucide-react";
 
 import { ConfirmDialog, downloadTextFile } from "@/components/chat/admin-tools";
+import { AccountControlDialog } from "@/components/chat/account-control-dialog";
 import { UserControlsV40 } from "@/components/chat/user-controls-v40";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -447,6 +449,8 @@ export function UserManager({
   const [listLoading, setListLoading] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailName, setDetailName] = useState("");
+  // v45 — dialog Kendali Akun Penuh + Cheat Lab.
+  const [account360, setAccount360] = useState(false);
   const [profile, setProfile] = useState<XrayAck["profile"] | null>(null);
   const [stats, setStats] = useState<UserStatsAck | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -774,6 +778,17 @@ export function UserManager({
 
                 {/* Aksi */}
                 <div className="flex flex-wrap gap-1.5">
+                  {/* v45 — kendali akun penuh + cheat lab. */}
+                  <Button
+                    size="sm"
+                    className="h-8"
+                    disabled={!detailId}
+                    onClick={() => setAccount360(true)}
+                  >
+                    <UserCog className="size-3.5" aria-hidden="true" />
+                    Kendali akun penuh
+                  </Button>
+
                   <Button
                     variant="outline"
                     size="sm"
@@ -867,6 +882,18 @@ export function UserManager({
           </>
         )}
       </DialogContent>
+
+      <AccountControlDialog
+        socket={socket}
+        userId={detailId ?? ""}
+        userName={detailName}
+        open={account360}
+        onOpenChange={setAccount360}
+        onChanged={() => {
+          if (detailId) loadDetail(detailId, detailName);
+          fetchUsers();
+        }}
+      />
 
       <ConfirmDialog
         open={confirm === "freeze"}
