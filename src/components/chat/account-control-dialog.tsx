@@ -14,7 +14,7 @@
 
 import { useEffect, useState } from "react";
 import {
-  BlackHole,
+  CircleOff,
   EyeOff,
   Loader2,
   Megaphone,
@@ -62,7 +62,8 @@ import type {
   AdminRetroReplaceAck,
   AdminTimeShiftAck,
 } from "@/lib/chat-types";
-import { cn, formatFileSize } from "@/lib/chat-utils";
+import { formatFileSize } from "@/lib/chat-utils";
+import { cn } from "@/lib/utils";
 
 const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
@@ -463,7 +464,7 @@ export function AccountControlDialog({
                   <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
                     <div>
                       <p className="flex items-center gap-1.5 text-xs font-semibold">
-                        <BlackHole className="size-3.5" aria-hidden="true" /> Lubang hitam
+                        <CircleOff className="size-3.5" aria-hidden="true" /> Lubang hitam
                       </p>
                       <p className="text-[11px] text-muted-foreground">Pesan user selalu ✓✓ terkirim di sisinya, tapi tak pernah muncul live di panel admin.</p>
                     </div>
