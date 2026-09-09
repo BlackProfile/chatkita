@@ -1298,3 +1298,24 @@ Work Log:
   * TERTANGKAP & DIFIX saat E2E: (1) crash Radix SelectItem value="" (mutator) → sentinel "off"; (2) user:auth tanpa viewerId → ghost tak tampil di halaman pertama; (3) fixture buat conv orientasi salah utk id user berawalan digit (jebakan t59) → conv duplikat; fixture kini hitung pairKey; (4) selfDestruct hanya copy pertama → sentIds.
   * Screenshot desktop 1440×900 + mobile 390×844 (user & admin); konsol 0 pageerror kedua sesi.
 - Cleanup: fixture t63 dihapus total (sisa=0, pesan yatim=0, conv duplikat=0); verify 295/295; lint 0/0; :3000 & :81 = 200; commit + tag rescue-v47 push GitHub.
+
+---
+Task ID: 64
+Agent: Z.ai Code (main)
+Task: v48 — "semua" 24 ide media/file/tautan + panel user & admin
+
+Work Log:
+- pkill chat-service (iron rule) → edit `index.ts`: kolom v48 (sensitive/album/burn/trap_url/trap_clicks + users.block_attach), 6 setting baru (extBlocklist, linkBlacklist/Whitelist, retImage/Video/FileDays), tipe 'sticker' + STICKER_KEYS, enforcement send (blokir lampiran per-user, ekstensi, domain), 12 event baru (chat:gallery+files, links:list, reactions:of, messages:forward, messages:sensitive, messages:burn_seen, link:trap_click, admin:media_swap/message_burn/message_blur/link_trap/user_attach_block), sweepTypedMedia per jenis, HTTP /http/upload_policy + /http/link_preview (dicegat via httpServer.emit override — socket.io path '/' memindap semua request), SERVICE_VERSION v48.
+- `/api/upload`: HARD_BLOCK_EXT + magic-bytes sniffKind (tolak menyamar/eksekutabel) + kebijakan ext dari chat-service.
+- Aset: `.zscripts/gen-gifs.ts` (GIF89a tanpa deps) → `public/gifs/*.gif` 8 animasi; `bun add qrcode.react`.
+- Lib baru: `link-tools.ts` (suspicionOf, videoEmbedOf), `stickers.tsx` (16 stiker SVG).
+- UI user: ChatBubble (stiker, blur sensitif img/video, chip burn, album, trap URL semua tautan, tombol Teruskan), link-preview (strip "Tautan berisiko" tampil juga saat preview gagal — renderCard di-hoist jadi function declaration utk hindari TDZ, tombol QR), media-viewer (slideshow + bar reaksi cepat + daftar pereaksi), Messenger (multi-lampiran antrian + drop/paste, picker Stiker&GIF 2 tab, kamera CameraCapture, sensitif+album, dialog Teruskan, tombol panel header, burn ack saat buka media, viewer react), panel user `user-media-panel.tsx` (3 tab).
+- UI admin: tab "Media & Tautan" (`admin-media-tautan.tsx`): 6 setting keamanan+retensi, blokir stiker/tautan per-user, Lab Aksi Pesan (burn/blur/tukar media/jebakan + counter klik live via admin:trap_click).
+- Versi: rescue-v48 (instrumentation), verify-integrity.sh +27 cek v48 (295/0), FEATURES.md segmen v48, chmod 644.
+- Lint 0/0 (4 directive tak terpakai dibersihkan). E2E gateway :81: login UjiV48 → stiker terkirim & render, kartu bit.ly + peringatan berisiko + QR, panel user (Media/File/Tautan ok), foto + GIF terkirim (DB mime image/gif), viewer reaksi ❤️ → "❤️ UjiV48", foto sensitif → sensitive=1 + overlay blur "Media sensitif", admin /?admin → tab v48 → simpan extBlocklist (policy endpoint balik "exe, apk, bat"), pasang jebakan #261 → korban klik → trap_clicks=1 → badge admin live "Klik jebakan pesan #261: 1", mobile 390×844 ok, console 0 error dua sesi. Fixture UjiV48/uji48 + pesan dibuat via .zscripts/t64-user.ts (jebakan dibersihkan setelah uji).
+- Commit 27fb908 (hook push menang balapan) + tag rescue-v48 dipush.
+
+Stage Summary:
+- v48 lengkap: 24 fitur media/file/tautan + panel user (3 tab) + panel admin (tab baru + lab cheat) — E2E terverifikasi dua viewport, console bersih.
+- Keputusan penting: HTTP /http/* dicegat via override httpServer.emit (engine.io path '/'), peringatan berisiko tampil walau OG gagal, stiker = tipe pesan baru tervalidasi server.
+- Artefak: public/gifs/*.gif, .zscripts/gen-gifs.ts, link-tools.ts, stickers.tsx, user-media-panel.tsx, admin-media-tautan.tsx.
