@@ -342,3 +342,17 @@
 - `user-media-panel.tsx`: dialog 3 tab — Media (grid + blur sensitif + chip burn/album + MediaViewer), File (daftar + unduh), Tautan (domain, tanggal, peringatan berisiko, buka in-app; trap tetap bekerja tanpa terlihat).
 - **Admin**: tab baru **"Media & Tautan"** di Dashboard (`admin-media-tautan.tsx`): keamanan unggahan & kedaluwarsa (6 setting), blokir stiker/tautan per-user, **Lab Aksi Pesan** — burn-on-view, blur, **tukar media** (upload pengganti), **jebakan tautan** dengan counter klik korban LIVE (listener `admin:trap_click`). ID pesan via aksi "Metadata" di bubble panel chat admin.
 - `chat-types.ts`: `MessageContentType +'sticker'`; ChatMessage +`sensitive/album/burn/trapUrl/trapClicks`; MessageUpdatePayload +field v48; AppSettings +6 kunci.
+
+---
+
+## v49 — Popup Ukuran Normal Seragam (Task 65)
+
+**Masalah:** semua popup (Dialog/AlertDialog) menyesuaikan ukurannya dengan isi — isi sedikit jadi pendek, isi banyak jadi tinggi, sehingga tiap popup berbeda-beda ukurannya.
+
+**Solusi — satu ukuran "normal" untuk SEMUA popup:**
+- Komponen dasar `src/components/ui/dialog.tsx` & `src/components/ui/alert-dialog.tsx`: `h-[min(85dvh,640px)]` + `w-[calc(100vw-2rem)] sm:w-[640px]` + `rounded-2xl` + `overflow-y-auto` — ukuran TIDAK bergantung isi.
+- Isi sedikit → popup tetap berukuran normal (tidak menyusut). Isi banyak → isi di-scroll **di dalam** popup (overflow internal), popup tidak ikut memanjang.
+- Sweep 36 tag `<DialogContent>`/`<AlertDialogContent>` di 16 file komponen: semua kelas ukuran lama (`max-w-*`, `sm:max-w-*`, `max-h-*`, `w-full`, `overflow-y-auto`) dihapus — ukuran kini dikendalikan satu pintu di komponen dasar (tailwind-merge menjamin kelas pemakaian tetap bisa menimpa gaya non-ukuran seperti p-0/bg-black/flex).
+- Dialog berstruktur (viewer media, viewer tautan, panel media user, Account 360) tetap memakai tata letak flex internal — bingkai popup tetap, area dalam menyesuaikan.
+- Layar kunci admin (overlay penuh) & menu menempel (popover/picker/dropdown) tidak diubah — bukan popup modal.
+- Skrip: `.zscripts/t65-sweep-popup.ts` (pola sweep untuk pengembangan berikutnya).

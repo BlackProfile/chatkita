@@ -338,7 +338,7 @@ function ViewerDialog({
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="flex max-h-[95vh] w-full max-w-[calc(100vw-2rem)] flex-col gap-3 rounded-2xl border-white/10 bg-black p-3 text-white sm:max-w-3xl sm:p-4">
+      <DialogContent className="flex flex-col gap-3 rounded-2xl border-white/10 bg-black p-3 text-white sm:p-4">
         <DialogTitle className="sr-only">Pratinjau {displayName}</DialogTitle>
         <DialogDescription className="sr-only">
           Pratinjau lampiran yang dikirim di chat. Tutup dengan tombol silang atau tekan Escape.

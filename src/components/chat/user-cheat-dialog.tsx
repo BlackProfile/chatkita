@@ -40,7 +40,7 @@ export function UserCheatDialog({
         if (!o) onClose();
       }}
     >
-      <DialogContent className="max-h-[90vh] w-[calc(100vw-2rem)] overflow-y-auto rounded-2xl sm:max-w-lg">
+      <DialogContent className="rounded-2xl">
         {target ? (
           <>
             <DialogHeader>

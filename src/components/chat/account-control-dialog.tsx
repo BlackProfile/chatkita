@@ -607,7 +607,7 @@ export function AccountControlDialog({
   return (
     <>
       <Dialog open={open} onOpenChange={handleOpenChange}>
-        <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-base">
               <UserCog className="size-4" aria-hidden="true" />

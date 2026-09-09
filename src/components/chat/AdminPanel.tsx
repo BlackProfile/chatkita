@@ -3149,7 +3149,7 @@ export function AdminPanel() {
       {/* QR / share dialog (v5) */}
       {qrOpen ? (
         <Dialog open onOpenChange={setQrOpen}>
-          <DialogContent className="max-w-sm rounded-2xl">
+          <DialogContent className="rounded-2xl">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <QrCode className="size-4 text-emerald-600" aria-hidden="true" />
@@ -3342,7 +3342,7 @@ export function AdminPanel() {
             }
           }}
         >
-          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-xs">
+          <DialogContent className="rounded-2xl">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <Lock className="size-4" aria-hidden="true" />
@@ -3391,7 +3391,7 @@ export function AdminPanel() {
       {/* v22+ — dialog kirim terjadwal (dibuka dari menu lampiran composer) */}
       {schedOpen ? (
         <Dialog open onOpenChange={handleSchedOpenChange}>
-          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+          <DialogContent className="rounded-2xl">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <Clock className="size-4" aria-hidden="true" />
@@ -3434,7 +3434,7 @@ export function AdminPanel() {
       {/* v22 — dialog pesan berbintang (bintang milik admin di chat aktif) */}
       {starredOpen ? (
         <Dialog open onOpenChange={setStarredOpen}>
-          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-md">
+          <DialogContent className="rounded-2xl">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <Star className="size-4 fill-amber-400 text-amber-400" aria-hidden="true" />
@@ -3494,7 +3494,7 @@ export function AdminPanel() {
             if (!open) resetForward();
           }}
         >
-          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-md">
+          <DialogContent className="rounded-2xl">
             {forwardStep === "message" ? (
               <>
                 <DialogHeader>
@@ -3626,7 +3626,7 @@ export function AdminPanel() {
           if (!open) setCancelSchedId(null);
         }}
       >
-        <AlertDialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+        <AlertDialogContent className="rounded-2xl">
           <AlertDialogHeader>
             <AlertDialogTitle>Batalkan pesan terjadwal?</AlertDialogTitle>
             <AlertDialogDescription>

@@ -359,7 +359,7 @@ function PinDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm rounded-2xl">
+      <DialogContent className="rounded-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <ShieldCheck className="size-5 text-emerald-600" aria-hidden="true" />
@@ -3274,7 +3274,7 @@ export function Messenger() {
 
       {/* v22+ — dialog kirim terjadwal (dibuka dari menu lampiran composer) */}
       <Dialog open={schedOpen} onOpenChange={setSchedOpen}>
-        <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+        <DialogContent className="rounded-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Clock className="size-4" aria-hidden="true" />
@@ -3324,7 +3324,7 @@ export function Messenger() {
           if (o) fetchStarred();
         }}
       >
-        <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-md">
+        <DialogContent className="rounded-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Star className="size-5 fill-amber-400 text-amber-400" aria-hidden="true" />
@@ -3465,7 +3465,7 @@ export function Messenger() {
 
       {/* v48 — dialog album lampiran */}
       <Dialog open={albumOpen} onOpenChange={setAlbumOpen}>
-        <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+        <DialogContent className="rounded-2xl">
           <DialogHeader>
             <DialogTitle>Album lampiran</DialogTitle>
             <DialogDescription>
@@ -3494,7 +3494,7 @@ export function Messenger() {
           if (!o) setForwardMsg(null);
         }}
       >
-        <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+        <DialogContent className="rounded-2xl">
           <DialogHeader>
             <DialogTitle>Teruskan pesan</DialogTitle>
             <DialogDescription>Pilih percakapan tujuan.</DialogDescription>
@@ -3618,7 +3618,7 @@ function CameraCapture({
         if (!o) onClose();
       }}
     >
-      <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-md">
+      <DialogContent className="rounded-2xl">
         <DialogHeader>
           <DialogTitle>Kamera</DialogTitle>
           <DialogDescription>Ambil foto lalu kirim seperti foto biasa.</DialogDescription>

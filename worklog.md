@@ -1319,3 +1319,24 @@ Stage Summary:
 - v48 lengkap: 24 fitur media/file/tautan + panel user (3 tab) + panel admin (tab baru + lab cheat) — E2E terverifikasi dua viewport, console bersih.
 - Keputusan penting: HTTP /http/* dicegat via override httpServer.emit (engine.io path '/'), peringatan berisiko tampil walau OG gagal, stiker = tipe pesan baru tervalidasi server.
 - Artefak: public/gifs/*.gif, .zscripts/gen-gifs.ts, link-tools.ts, stickers.tsx, user-media-panel.tsx, admin-media-tautan.tsx.
+
+---
+Task ID: 65
+Agent: Z.ai Code (main)
+Task: v49 — semua popup berukuran tetap seragam "normal" (tidak menyesuaikan isi)
+
+Work Log:
+- Inventaris: 105 `<DialogContent>` (19 file) + 13 `<AlertDialogContent>`; semua memakai `max-w-*` tanpa tinggi tetap → tinggi popup mengikuti isi (keluhan user).
+- Strategi satu pintu: ukuran tetap ditetapkan di komponen dasar `src/components/ui/dialog.tsx` & `ui/alert-dialog.tsx` → `h-[min(85dvh,640px)] w-[calc(100vw-2rem)] sm:w-[640px] rounded-2xl overflow-y-auto` (grid gap-4 dipertahankan; cn/tailwind-merge memastikan kelas non-ukuran pemakaian tetap menimpa: p-0, bg-black, flex, dll).
+- Sweep 36 tag di 16 file via `.zscripts/t65-sweep-popup.ts` (hapus `max-w-*`, `sm:max-w-*`, `max-h-[..vh]`, `w-full`, `w-[calc(100vw-1|2rem)]`, `overflow-y-auto` dari className tag popup; viewer/panel tetap flex internal).
+- Bump v49: `SERVICE_VERSION 'v49'` (index.ts — pkill iron rule dipatuhi, spawn ulang manual nohup), `rescue-v49` + penanda bump di `src/instrumentation.ts`, segmen v49 di FEATURES.md & verify-integrity.sh (chmod 644 keduanya; cek disisipkan SEBELUM blok hasil — append setelah exit tidak terhitung).
+- Fix 4 cek warisan v48 yang sudah kedaluwarsa: `href={data.url}` → `href={cardData.url}`, `openLinkViewer(data.url, data)` → `(cardData.url, cardData)`, cek versi "v47"→ label+pattern v49, rescue-v47→rescue-v49.
+- Insiden saat E2E: Next dev mati (next-server 1,6 GB / indikasi OOM) → gateway :81 sempat 502 → restart pola subshell `(bun run dev > dev.log 2>&1 &)` → :3000 & :81 kembali 200.
+- Lint 0/0; verify-integrity **301/301 — 0 gagal**.
+- E2E gateway :81 (agent-browser, sesi t65 admin & t65u user): desktop 1440×900 — popup Media 640×640, Cheat 640×640, Account 360/X-Ray 640×640, QR 640×640, konfirmasi Reset chat 640×640 (isi sedikit TIDAK menyusut; batal, tidak jadi reset); mobile 390×844 — panel media user 358×640, QR 358×640, Insight 358×640 scrollable=true (scrollHeight 746 → isi banyak TIDAK memanjang, scroll di dalam). Screenshot 5 bukti di /tmp/t65-*.png; konsol 0 error dua sesi; browser ditutup.
+- Fixture: UjiV49/uji49 dibuat via .zscripts/t65-user.ts (pola t64; dibiarkan hidup, konsisten UjiV48).
+
+Stage Summary:
+- SEMUA popup (Dialog + AlertDialog) kini satu ukuran normal seragam: desktop 640×640 px, mobile lebar layar−32 px, tinggi tetap; isi sedikit tidak menyusut, isi banyak di-scroll di dalam popup.
+- Keputusan: ukuran dikendalikan komponen dasar (satu pintu), bukan per-pemakaian; menu menempel (popover/picker/dropdown) & layar kunci admin (overlay penuh) sengaja tidak diubah.
+- Artefak: .zscripts/t65-sweep-popup.ts, .zscripts/t65-user.ts, segmen v49 di FEATURES.md/verify-integrity.sh (301 cek).

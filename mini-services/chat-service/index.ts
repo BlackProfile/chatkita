@@ -218,7 +218,7 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        mengirim, reuse user:toast). Ganti nama: admin:account_set {name}
  *        kini ikut menyiarkan users:changed. KLIEN — badge favicon +
  *        App Badging API (lib/app-badge). */
-const SERVICE_VERSION = 'v48'
+const SERVICE_VERSION = 'v49'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'

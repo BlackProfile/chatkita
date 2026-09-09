@@ -113,7 +113,7 @@ export function ConfirmDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm rounded-2xl">
+      <DialogContent className="rounded-2xl">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           {description ? <DialogDescription>{description}</DialogDescription> : null}
@@ -179,7 +179,7 @@ export function EditHistoryDialog({
 
   return (
     <Dialog open onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-md rounded-2xl">
+      <DialogContent className="rounded-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <History className="size-4 text-emerald-600" aria-hidden="true" />
@@ -295,7 +295,7 @@ export function ForensicsDialog({
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-lg rounded-2xl">
+        <DialogContent className="rounded-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <ShieldAlert className="size-4 text-emerald-600" aria-hidden="true" />
@@ -483,7 +483,7 @@ export function SearchMessagesDialog({
         }
       }}
     >
-      <DialogContent className="max-w-lg rounded-2xl">
+      <DialogContent className="rounded-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Search className="size-4 text-emerald-600" aria-hidden="true" />
@@ -658,7 +658,7 @@ export function AuditLogDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg rounded-2xl">
+      <DialogContent className="rounded-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <ScrollText className="size-4 text-emerald-600" aria-hidden="true" />
@@ -805,7 +805,7 @@ export function KeywordsDialog({
         }
       }}
     >
-      <DialogContent className="max-w-md rounded-2xl">
+      <DialogContent className="rounded-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Flag className="size-4 text-emerald-600" aria-hidden="true" />
@@ -951,7 +951,7 @@ export function QuickRepliesDialog({
         }
       }}
     >
-      <DialogContent className="max-w-md rounded-2xl">
+      <DialogContent className="rounded-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Clock className="size-4 text-emerald-600" aria-hidden="true" />
@@ -1076,7 +1076,7 @@ export function FakeLastSeenDialog({
         if (!v) setValue("");
       }}
     >
-      <DialogContent className="max-w-sm rounded-2xl">
+      <DialogContent className="rounded-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Clock className="size-4 text-emerald-600" aria-hidden="true" />

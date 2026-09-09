@@ -204,7 +204,7 @@ export function UserManager({
       open={open}
       onOpenChange={onOpenChange}
     >
-      <DialogContent className="max-w-lg rounded-2xl">
+      <DialogContent className="rounded-2xl">
         {detailId === null ? (
           <>
             <DialogHeader>

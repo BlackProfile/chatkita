@@ -83,7 +83,7 @@ export function UserMediaDialog({
         if (!o) onClose();
       }}
     >
-      <DialogContent className="flex max-h-[90vh] w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-2xl sm:max-w-lg">
+      <DialogContent className="flex flex-col overflow-hidden rounded-2xl">
         {target ? (
           <MediaBody
             key={target.id}

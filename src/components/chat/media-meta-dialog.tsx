@@ -171,7 +171,7 @@ export function MediaMetaDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-md">
+      <DialogContent className="">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-base">
             <Camera className="size-4 shrink-0" aria-hidden="true" />

@@ -320,7 +320,7 @@ export function UserInsightDialog({
         if (!o) onClose();
       }}
     >
-      <DialogContent className="max-h-[90vh] w-[calc(100vw-2rem)] overflow-y-auto rounded-2xl sm:max-w-md">
+      <DialogContent className="rounded-2xl">
         {target ? <InsightBody key={target.id} target={target} socket={socket} /> : null}
       </DialogContent>
     </Dialog>

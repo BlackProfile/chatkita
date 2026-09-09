@@ -860,7 +860,7 @@ export function AdminDashboard({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[92vh] w-[calc(100vw-1rem)] max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-5xl">
+      <DialogContent className="flex flex-col gap-0 overflow-hidden rounded-2xl p-0">
         <DialogHeader className="shrink-0 border-b bg-muted/30 px-4 py-3 sm:px-6 sm:py-4">
           <DialogTitle className="flex items-center gap-2 text-base sm:text-lg">
             <span className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm shadow-emerald-600/25">
@@ -2056,7 +2056,7 @@ export function AdminDashboard({
 
         {/* v27 — dialog buat akun (nama + password, tanpa kode undangan). */}
         <Dialog open={userCreateOpen} onOpenChange={setUserCreateOpen}>
-          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+          <DialogContent className="rounded-2xl">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <UserPlus className="size-5 text-emerald-600" aria-hidden="true" />
@@ -2141,7 +2141,7 @@ export function AdminDashboard({
             if (!o) setRenameTarget(null);
           }}
         >
-          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+          <DialogContent className="rounded-2xl">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <PencilLine className="size-5 text-emerald-600" aria-hidden="true" />
@@ -2186,7 +2186,7 @@ export function AdminDashboard({
 
         {/* v29 — konfirmasi kembalikan seluruh pengaturan ke default. */}
         <Dialog open={settingsResetOpen} onOpenChange={setSettingsResetOpen}>
-          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+          <DialogContent className="rounded-2xl">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <RotateCcw className="size-5 text-destructive" aria-hidden="true" />

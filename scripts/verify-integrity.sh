@@ -172,7 +172,7 @@ chk_grep "URL jadi tautan tab baru"           "src/components/chat/link-preview.
 chk_grep "Tautan aman noopener"               "src/components/chat/link-preview.tsx" 'rel="noopener noreferrer"'
 chk_grep "Teks bubble via LinkifiedText"      "src/components/chat/ChatBubble.tsx" "<LinkifiedText"
 chk_grep "Caption juga bisa diklik"           "src/components/chat/ChatBubble.tsx" "text={caption}"
-chk_grep "Kartu pratinjau kini anchor buka"   "src/components/chat/link-preview.tsx" "href={data.url}"
+chk_grep "Kartu pratinjau kini anchor buka"   "src/components/chat/link-preview.tsx" "href={cardData.url}"
 chk_grep "Label buka langsung di kartu"       "src/components/chat/link-preview.tsx" "di browser"
 
 echo "[v33 — Thumbnail pratinjau tautan YouTube (Task 52)]"
@@ -187,7 +187,7 @@ chk_grep "Komponen LinkViewerDialog ada"      "src/components/chat/link-viewer.t
 chk_grep "Store zustand penampil tautan"      "src/components/chat/link-viewer.tsx" "useLinkViewerStore"
 chk_grep "Embed YouTube in-app"               "src/components/chat/link-viewer.tsx" "youtube-nocookie.com/embed"
 chk_grep "Embed TikTok in-app"                "src/components/chat/link-viewer.tsx" "tiktok.com/embed/v2"
-chk_grep "Kartu pratinjau buka viewer in-app" "src/components/chat/link-preview.tsx" "openLinkViewer(data.url, data)"
+chk_grep "Kartu pratinjau buka viewer in-app" "src/components/chat/link-preview.tsx" "openLinkViewer(cardData.url, cardData)"
 chk_grep "Tautan teks buka viewer in-app"     "src/components/chat/link-preview.tsx" "openLinkViewer(seg.url)"
 chk_grep "Viewer termount sisi user"          "src/components/chat/Messenger.tsx" "<LinkViewerDialog />"
 chk_grep "Viewer termount sisi admin"         "src/components/chat/AdminPanel.tsx" "<LinkViewerDialog />"
@@ -336,8 +336,8 @@ chk_grep "Dashboard pakai Account 360"       "src/components/chat/admin-dashboar
 chk_grep "Pill sinyal palsu dihapus"         "src/components/chat/AdminPanel.tsx" "pill \"⌨ Typing palsu\" & \"✓✓ Palsu\" dihapus"
 
 echo "[v47 — Cheat Lab II + ganti nama + badge ikon (Task 63)]"
-chk_grep "Versi service v47"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v48'"
-chk_grep "Rescue tag v47"                     "src/instrumentation.ts" "rescue-v48"
+chk_grep "Versi service v49"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v49'"
+chk_grep "Rescue tag v49"                     "src/instrumentation.ts" "rescue-v49"
 chk_grep "Cheat kebal hapus (antiDelete)"     "mini-services/chat-service/index.ts" "antiDelete === 1"
 chk_grep "Ghost event di tombstone"           "mini-services/chat-service/index.ts" "message:ghost"
 chk_grep "Riwayat ghost (antiDelete)"         "mini-services/chat-service/index.ts" "ghostView"
@@ -367,6 +367,14 @@ chk_grep "Panel v40 tanpa paksa logout"       "src/components/chat/user-controls
 chk_grep "Ganti nama cepat dashboard"         "src/components/chat/admin-dashboard.tsx" "submitRename"
 chk_grep "Alarm admin di AdminPanel"          "src/components/chat/AdminPanel.tsx" "user:toast"
 
+# ── v49 (Task 65) — popup ukuran normal seragam ──
+chk_grep "Tinggi popup tetap (dialog base)"   "src/components/ui/dialog.tsx" "h-\[min(85dvh,640px)\]"
+chk_grep "Lebar popup tetap (dialog base)"    "src/components/ui/dialog.tsx" "sm:w-\[640px\]"
+chk_grep "Scroll dalam popup (dialog base)"   "src/components/ui/dialog.tsx" "overflow-y-auto"
+chk_grep "Tinggi popup tetap (alert base)"    "src/components/ui/alert-dialog.tsx" "h-\[min(85dvh,640px)\]"
+chk_grep "Lebar popup tetap (alert base)"     "src/components/ui/alert-dialog.tsx" "sm:w-\[640px\]"
+chk_file  "Skrip sweep popup v49"             ".zscripts/t65-sweep-popup.ts"
+
 echo ""
 echo "== Versi server terdaftar =="
 grep -m1 "SERVICE_VERSION = " mini-services/chat-service/index.ts || echo "  ❌ SERVICE_VERSION tidak ditemukan"
@@ -382,3 +390,4 @@ else
   printf 'Fitur bermasalah: %s\n' "${FAILED[*]}"
   exit 1
 fi
+

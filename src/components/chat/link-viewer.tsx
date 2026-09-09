@@ -252,7 +252,7 @@ export function LinkViewerDialog() {
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && closeViewer()}>
-      <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-xl">
+      <DialogContent className="gap-0 overflow-hidden p-0">
         <DialogHeader className="space-y-0 border-b p-3 pr-12">
           <DialogTitle className="line-clamp-1 text-sm font-semibold">
             {data?.title ?? site}
