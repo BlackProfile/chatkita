@@ -4,27 +4,16 @@ import { useCallback, useEffect, useState } from "react";
 import type { Socket } from "socket.io-client";
 import {
   ArrowLeft,
-  BellRing,
-  Bot,
   Download,
-  Gauge,
   Globe,
   Loader2,
-  LogOut,
-  Paperclip,
-  PenLine,
   RefreshCw,
-  ShieldBan,
   Smartphone,
-  Timer,
-  Trash2,
   UserCog,
-  VolumeX,
 } from "lucide-react";
 
-import { ConfirmDialog, downloadTextFile } from "@/components/chat/admin-tools";
+import { downloadTextFile } from "@/components/chat/admin-tools";
 import { AccountControlDialog } from "@/components/chat/account-control-dialog";
-import { UserControlsV40 } from "@/components/chat/user-controls-v40";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -36,24 +25,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
-import {
   avatarColorClass,
   formatFileSize,
   formatLastSeen,
@@ -61,19 +32,9 @@ import {
 } from "@/lib/chat-utils";
 import type {
   AckOf,
-  AdminBotAck,
-  AdminBulkDeleteUserAck,
-  AdminPushAck,
-  AdminQuotaAck,
-  AdminRenameAck,
   DashboardStatsAck,
   DashboardUserRow,
   ExportAck,
-  FreezeAck,
-  KickAck,
-  MediaBlockAck,
-  MuteAck,
-  SlowModeAck,
   UserRestrictionState,
   UserStatsAck,
   XrayAck,
@@ -82,14 +43,15 @@ import { cn } from "@/lib/utils";
 
 /**
  * v11 — Manajemen pengguna: daftar semua user (dari admin:dashboard) +
- * X-Ray per user (admin:xray + admin:user_stats) lengkap dengan aksi
- * sesi: bekukan, bisukan, mode lambat, blokir media, paksa keluar,
- * ekspor data. Semua event admin-only; setiap perubahan pembatasan
- * otomatis di-push server ke user terkait (user:restricted).
+ * X-Ray per user (admin:xray + admin:user_stats).
+ *
+ * v46 — KONSOLIDASI: seluruh tombol aksi duplikat (bekukan, bisukan, mode
+ * lambat, blokir media, paksa keluar) dan panel "Kendali tambahan" v39
+ * (rename/bot/kuota/push/hapus massal) + panel v40 inline DIHAPUS dari
+ * X-Ray — semuanya kini ada di SATU dialog "Kendali akun penuh"
+ * (AccountControlDialog). X-Ray tinggal: profil, grafik, chip status,
+ * tombol Kendali akun penuh, dan Ekspor data.
  */
-
-const SLOW_OPTIONS = [0, 1, 2, 3, 5, 10];
-const MUTE_OPTIONS = [5, 30, 60];
 
 /** Cache pembatasan terakhir per user (scope sesi halaman). */
 const restrictionCache = new Map<string, UserRestrictionState>();
@@ -150,286 +112,6 @@ function Fact({ label, value }: { label: string; value: string }) {
   );
 }
 
-const BOT_DELAY_OPTIONS = [0, 3, 10, 30, 60];
-const QUOTA_MB_OPTIONS = [0, 5, 10, 25, 50, 100, 200, 500];
-
-/**
- * v39 — kendali per-user tambahan di panel X-Ray: ganti nama, bot balasan
- * otomatis atas nama Admin, kuota media khusus, kirim push custom, dan
- * pintu masuk hapus-massal pesan user. Semua aksi ter-audit di server.
- * State diinisialisasi dari `profile` — komponen di-remount per user (key).
- */
-function ExtraControls({
-  socket,
-  profile,
-  onNotice,
-  onBulkDelete,
-}: {
-  socket: Socket | null;
-  profile: XrayAck["profile"];
-  onNotice?: (text: string) => void;
-  onBulkDelete: () => void;
-}) {
-  const [name, setName] = useState(profile.name);
-  const [botOn, setBotOn] = useState(profile.botReplyOn ?? false);
-  const [botText, setBotText] = useState(profile.botReplyText ?? "");
-  const [botDelay, setBotDelay] = useState(String(profile.botReplyDelaySec ?? 3));
-  const [quotaMb, setQuotaMb] = useState(String(profile.mediaQuotaMb ?? 0));
-  const [pushTitle, setPushTitle] = useState("");
-  const [pushBody, setPushBody] = useState("");
-  const [busy, setBusy] = useState<string | null>(null);
-  const [quotaNote, setQuotaNote] = useState<string | null>(null);
-
-  const doRename = () => {
-    const next = name.trim();
-    if (!socket || next.length < 1 || next === profile.name) return;
-    setBusy("rename");
-    socket.emit("admin:user_rename", { userId: profile.id, name: next }, (res: AckOf<AdminRenameAck>) => {
-      setBusy(null);
-      if (res.ok) onNotice?.(`Nama diubah: ${profile.name} → ${res.name} ✓`);
-      else if (res.error === "NAME_TAKEN") onNotice?.("Nama sudah dipakai user lain");
-      else onNotice?.("Gagal mengganti nama");
-    });
-  };
-
-  const doBot = () => {
-    if (!socket || !botOn || !botText.trim()) return;
-    setBusy("bot");
-    socket.emit(
-      "admin:user_bot",
-      { userId: profile.id, on: true, text: botText.trim(), delaySec: Number(botDelay) },
-      (res: AckOf<AdminBotAck>) => {
-        setBusy(null);
-        if (res.ok) onNotice?.(`Bot balasan AKTIF (${res.bot.delaySec} dtk jeda) ✓`);
-        else onNotice?.("Gagal menyimpan bot balasan");
-      }
-    );
-  };
-
-  const doQuota = () => {
-    if (!socket) return;
-    setBusy("quota");
-    socket.emit("admin:user_quota", { userId: profile.id, mb: Number(quotaMb) }, (res: AckOf<AdminQuotaAck>) => {
-      setBusy(null);
-      if (res.ok) {
-        setQuotaNote(
-          res.quotaMb === 0
-            ? "default 250 MiB"
-            : `${formatFileSize(res.quotaBytes)} — terpakai ${formatFileSize(res.usedBytes)}`
-        );
-        onNotice?.(
-          res.quotaMb === 0
-            ? "Kuota kembali ke default 250 MiB ✓"
-            : `Kuota khusus ${res.quotaMb} MiB diterapkan ✓`
-        );
-      } else onNotice?.("Gagal mengubah kuota");
-    });
-  };
-
-  const doPush = () => {
-    if (!socket || !pushTitle.trim() || !pushBody.trim()) return;
-    setBusy("push");
-    socket.emit(
-      "admin:user_push",
-      { userId: profile.id, title: pushTitle.trim(), body: pushBody.trim() },
-      (res: AckOf<AdminPushAck>) => {
-        setBusy(null);
-        if (res.ok) {
-          onNotice?.(
-            res.subscriptions > 0
-              ? `Push terkirim ke ${res.subscriptions} langganan ✓`
-              : "Push dikirim — user belum punya langganan notifikasi"
-          );
-          setPushTitle("");
-          setPushBody("");
-        } else onNotice?.("Gagal mengirim push");
-      }
-    );
-  };
-
-  return (
-    <div className="space-y-3 rounded-xl border bg-card p-3">
-      <p className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
-        <Gauge className="size-3.5" aria-hidden="true" />
-        Kendali tambahan
-      </p>
-
-      {/* Ganti nama (v39) */}
-      <div className="space-y-1">
-        <Label className="flex items-center gap-1 text-xs">
-          <PenLine className="size-3" aria-hidden="true" />
-          Ganti nama
-        </Label>
-        <div className="flex gap-1.5">
-          <Input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            maxLength={40}
-            className="h-8 text-xs"
-            aria-label="Nama baru"
-          />
-          <Button
-            size="sm"
-            className="h-8 shrink-0"
-            disabled={busy === "rename" || !name.trim() || name.trim() === profile.name}
-            onClick={doRename}
-          >
-            {busy === "rename" ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : "Ganti"}
-          </Button>
-        </div>
-      </div>
-
-      {/* Bot balasan otomatis (v39) */}
-      <div className="space-y-1.5">
-        <div className="flex items-center justify-between gap-2">
-          <Label className="flex items-center gap-1 text-xs">
-            <Bot className="size-3" aria-hidden="true" />
-            Bot balasan otomatis
-          </Label>
-          <Switch checked={botOn} onCheckedChange={setBotOn} aria-label="Aktifkan bot balasan" />
-        </div>
-        <Input
-          value={botText}
-          onChange={(e) => setBotText(e.target.value)}
-          placeholder="Teks balasan atas nama Admin…"
-          maxLength={300}
-          className="h-8 text-xs"
-          aria-label="Teks balasan bot"
-        />
-        <div className="flex items-center gap-1.5">
-          <Select value={botDelay} onValueChange={setBotDelay} disabled={!botOn}>
-            <SelectTrigger className="h-8 flex-1 text-xs" aria-label="Jeda balasan bot">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {BOT_DELAY_OPTIONS.map((s) => (
-                <SelectItem key={s} value={String(s)} className="text-xs">
-                  {s === 0 ? "Langsung (0 dtk)" : `${s} detik`}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-8 shrink-0"
-            disabled={!botOn || !botText.trim() || busy === "bot"}
-            onClick={doBot}
-          >
-            {busy === "bot" ? (
-              <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-            ) : (
-              "Simpan"
-            )}
-          </Button>
-        </div>
-        <p className="text-[10px] leading-snug text-muted-foreground">
-          Saat {profile.name} mengirim pesan, Admin membalas otomatis dengan teks ini.
-        </p>
-      </div>
-
-      {/* Kuota media khusus (v39) */}
-      <div className="space-y-1.5">
-        <Label className="flex items-center gap-1 text-xs">
-          <Gauge className="size-3" aria-hidden="true" />
-          Kuota media khusus
-        </Label>
-        <div className="flex items-center gap-1.5">
-          <Select value={quotaMb} onValueChange={setQuotaMb}>
-            <SelectTrigger className="h-8 flex-1 text-xs" aria-label="Kuota media user">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {QUOTA_MB_OPTIONS.map((mb) => (
-                <SelectItem key={mb} value={String(mb)} className="text-xs">
-                  {mb === 0 ? "Default (250 MiB)" : `${mb} MiB`}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-8 shrink-0"
-            disabled={busy === "quota"}
-            onClick={doQuota}
-          >
-            {busy === "quota" ? (
-              <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-            ) : (
-              "Terapkan"
-            )}
-          </Button>
-        </div>
-        <p className="text-[10px] leading-snug text-muted-foreground">
-          Terpakai {formatFileSize(profile.mediaBytes)}
-          {quotaNote ? ` · ${quotaNote}` : ""}
-        </p>
-      </div>
-
-      {/* Kirim push custom (v39) */}
-      <div className="space-y-1.5">
-        <Label className="flex items-center gap-1 text-xs">
-          <BellRing className="size-3" aria-hidden="true" />
-          Kirim notifikasi (push)
-        </Label>
-        <Input
-          value={pushTitle}
-          onChange={(e) => setPushTitle(e.target.value)}
-          placeholder="Judul notifikasi…"
-          maxLength={60}
-          className="h-8 text-xs"
-          aria-label="Judul push"
-        />
-        <Input
-          value={pushBody}
-          onChange={(e) => setPushBody(e.target.value)}
-          placeholder="Isi notifikasi…"
-          maxLength={200}
-          className="h-8 text-xs"
-          aria-label="Isi push"
-        />
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-8 w-full"
-          disabled={!pushTitle.trim() || !pushBody.trim() || busy === "push"}
-          onClick={doPush}
-        >
-          {busy === "push" ? (
-            <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-          ) : (
-            <BellRing className="size-3.5" aria-hidden="true" />
-          )}
-          Kirim push
-        </Button>
-      </div>
-
-      {/* Hapus massal pesan user (v39) */}
-      <div className="space-y-1.5">
-        <Label className="flex items-center gap-1 text-xs text-destructive">
-          <Trash2 className="size-3" aria-hidden="true" />
-          Hapus massal
-        </Label>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-8 w-full border-destructive/40 text-destructive hover:text-destructive"
-          onClick={onBulkDelete}
-        >
-          <Trash2 className="size-3.5" aria-hidden="true" />
-          Hapus semua pesan user
-        </Button>
-      </div>
-
-      {/* v40 — pusat kendali per-user (catatan/tag, filter kata, persetujuan,
-       * blokir per jenis, kunci PIN, balasan cepat, terjadwal, nudge,
-       * auto-bersih, ZIP media, paksa logout, riwayat login). */}
-      <UserControlsV40 socket={socket} profile={profile} onNotice={onNotice} />
-    </div>
-  );
-}
-
 export function UserManager({
   open,
   onOpenChange,
@@ -449,13 +131,12 @@ export function UserManager({
   const [listLoading, setListLoading] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailName, setDetailName] = useState("");
-  // v45 — dialog Kendali Akun Penuh + Cheat Lab.
+  // v45 — dialog Kendali Akun Penuh (v46: satu-satunya pintu kendali per-user).
   const [account360, setAccount360] = useState(false);
   const [profile, setProfile] = useState<XrayAck["profile"] | null>(null);
   const [stats, setStats] = useState<UserStatsAck | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [restricted, setRestricted] = useState<UserRestrictionState | null>(null);
-  const [confirm, setConfirm] = useState<"freeze" | "kick" | "bulkDelete" | null>(null);
 
   const fetchUsers = useCallback(() => {
     if (!socket?.connected) return;
@@ -502,78 +183,6 @@ export function UserManager({
     setRestricted(state);
   };
 
-  const doFreeze = (on: boolean) => {
-    if (!socket || !detailId) return;
-    socket.emit(
-      "admin:freeze",
-      { userId: detailId, on },
-      (res: AckOf<FreezeAck>) => {
-        if (res.ok) {
-          remember(detailId, res.restricted);
-          onNotice?.(res.frozen ? `${detailName} dibekukan 🚫` : `${detailName} dibebaskan`);
-        } else onNotice?.("Gagal mengubah status bekukan");
-      }
-    );
-  };
-
-  const doMute = (minutes: number) => {
-    if (!socket || !detailId) return;
-    socket.emit(
-      "admin:mute",
-      { userId: detailId, minutes },
-      (res: AckOf<MuteAck>) => {
-        if (res.ok) {
-          remember(detailId, res.restricted);
-          onNotice?.(
-            res.mutedUntil
-              ? `${detailName} dibisukan s/${fmtHM(new Date(res.mutedUntil))}`
-              : `Bisukan ${detailName} dilepas`
-          );
-        } else onNotice?.("Gagal mengubah bisukan");
-      }
-    );
-  };
-
-  const doSlow = (perMinute: number) => {
-    if (!socket || !detailId) return;
-    socket.emit(
-      "admin:slowmode",
-      { userId: detailId, perMinute },
-      (res: AckOf<SlowModeAck>) => {
-        if (res.ok) {
-          remember(detailId, res.restricted);
-          onNotice?.(
-            res.perMinute > 0
-              ? `Mode lambat ${detailName}: ${res.perMinute} pesan/menit`
-              : `Mode lambat ${detailName} dimatikan`
-          );
-        } else onNotice?.("Gagal mengubah mode lambat");
-      }
-    );
-  };
-
-  const doMediaBlock = (on: boolean) => {
-    if (!socket || !detailId) return;
-    socket.emit(
-      "admin:mediablock",
-      { userId: detailId, on },
-      (res: AckOf<MediaBlockAck>) => {
-        if (res.ok) {
-          remember(detailId, res.restricted);
-          onNotice?.(res.mediaBlocked ? `Media ${detailName} diblokir 📎` : `Blokir media ${detailName} dilepas`);
-        } else onNotice?.("Gagal mengubah blokir media");
-      }
-    );
-  };
-
-  const doKick = () => {
-    if (!socket || !detailId) return;
-    socket.emit("admin:kick", { userId: detailId }, (res: AckOf<KickAck>) => {
-      if (res.ok) onNotice?.(`${detailName} dikeluarkan (${res.sockets} socket)`);
-      else onNotice?.("Gagal memaksa keluar");
-    });
-  };
-
   const doExport = () => {
     if (!socket || !detailId) return;
     onNotice?.("Menyiapkan ekspor…");
@@ -587,37 +196,13 @@ export function UserManager({
     });
   };
 
-  /** v39 — tombstone SEMUA pesan hidup milik user (pipeline resmi server). */
-  const doBulkDelete = () => {
-    if (!socket || !detailId) return;
-    socket.emit(
-      "admin:bulk_delete_user",
-      { userId: detailId },
-      (res: AckOf<AdminBulkDeleteUserAck>) => {
-        if (res.ok) {
-          onNotice?.(
-            res.deleted > 0
-              ? `${res.deleted} pesan ${detailName} dihapus ✓${
-                  res.freedBytes > 0 ? ` (${formatFileSize(res.freedBytes)} media dibebaskan)` : ""
-                }`
-              : `${detailName} belum punya pesan`
-          );
-          loadDetail(detailId, detailName);
-        } else onNotice?.("Gagal menghapus pesan user");
-      }
-    );
-  };
-
   const mutedActive =
     !!restricted?.mutedUntil && Date.parse(restricted.mutedUntil) > Date.now();
 
   return (
     <Dialog
       open={open}
-      onOpenChange={(v) => {
-        onOpenChange(v);
-        if (!v) setConfirm(null);
-      }}
+      onOpenChange={onOpenChange}
     >
       <DialogContent className="max-w-lg rounded-2xl">
         {detailId === null ? (
@@ -715,7 +300,7 @@ export function UserManager({
                 </Button>
                 X-Ray: {profile?.name ?? (detailName || "…")}
               </DialogTitle>
-              <DialogDescription>Profil live + kontrol sesi (dicatat di audit log).</DialogDescription>
+              <DialogDescription>Profil live + pintu kendali (dicatat di audit log).</DialogDescription>
             </DialogHeader>
 
             {detailLoading && !profile ? (
@@ -776,9 +361,8 @@ export function UserManager({
                   />
                 ) : null}
 
-                {/* Aksi */}
+                {/* Aksi — v46: semua kendali ada di satu dialog. */}
                 <div className="flex flex-wrap gap-1.5">
-                  {/* v45 — kendali akun penuh + cheat lab. */}
                   <Button
                     size="sm"
                     className="h-8"
@@ -789,100 +373,20 @@ export function UserManager({
                     Kendali akun penuh
                   </Button>
 
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className={cn("h-8", restricted?.frozen && "border-rose-500 text-rose-600")}
-                    onClick={() => (restricted?.frozen ? doFreeze(false) : setConfirm("freeze"))}
-                  >
-                    <ShieldBan className="size-3.5" aria-hidden="true" />
-                    {restricted?.frozen ? "Bebaskan akun" : "Bekukan akun"}
-                  </Button>
-
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="outline" size="sm" className="h-8">
-                        <VolumeX className="size-3.5" aria-hidden="true" />
-                        Bisukan…
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start">
-                      <DropdownMenuLabel>Bisukan</DropdownMenuLabel>
-                      {MUTE_OPTIONS.map((m) => (
-                        <DropdownMenuItem key={m} onClick={() => doMute(m)}>
-                          {m} menit
-                        </DropdownMenuItem>
-                      ))}
-                      {mutedActive ? (
-                        <>
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem onClick={() => doMute(0)}>Lepas bisukan</DropdownMenuItem>
-                        </>
-                      ) : null}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="outline" size="sm" className="h-8">
-                        <Timer className="size-3.5" aria-hidden="true" />
-                        Mode lambat…
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start">
-                      <DropdownMenuLabel>Batas per menit</DropdownMenuLabel>
-                      {SLOW_OPTIONS.map((v) => (
-                        <DropdownMenuItem
-                          key={v}
-                          className={cn(restricted?.slowMode === v && "bg-accent")}
-                          onClick={() => doSlow(v)}
-                        >
-                          {v === 0 ? "Nonaktif" : `${v} pesan/menit`}
-                        </DropdownMenuItem>
-                      ))}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className={cn("h-8", restricted?.mediaBlocked && "border-amber-500 text-amber-600")}
-                    onClick={() => doMediaBlock(!restricted?.mediaBlocked)}
-                  >
-                    <Paperclip className="size-3.5" aria-hidden="true" />
-                    {restricted?.mediaBlocked ? "Buka media" : "Blokir media"}
-                  </Button>
-
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-8 text-destructive hover:text-destructive"
-                    onClick={() => setConfirm("kick")}
-                  >
-                    <LogOut className="size-3.5" aria-hidden="true" />
-                    Paksa keluar
-                  </Button>
-
                   <Button variant="outline" size="sm" className="h-8" onClick={doExport}>
                     <Download className="size-3.5" aria-hidden="true" />
                     Ekspor data
                   </Button>
                 </div>
-
-                {/* v39 — kendali per-user tambahan (rename/bot/kuota/push/hapus massal). */}
-                <ExtraControls
-                  key={detailId}
-                  socket={socket}
-                  profile={profile}
-                  onNotice={onNotice}
-                  onBulkDelete={() => setConfirm("bulkDelete")}
-                />
               </div>
             )}
           </>
         )}
       </DialogContent>
 
+      {/* v45/v46 — SATU dialog untuk seluruh kendali per-user: akun, moderasi
+          (freeze/mute/slowmode/mediablock/kick + bot + panel v40), ilusi/cheat,
+          dan aksi massal. */}
       <AccountControlDialog
         socket={socket}
         userId={detailId ?? ""}
@@ -893,43 +397,11 @@ export function UserManager({
           if (detailId) loadDetail(detailId, detailName);
           fetchUsers();
         }}
-      />
-
-      <ConfirmDialog
-        open={confirm === "freeze"}
-        onOpenChange={(v) => !v && setConfirm(null)}
-        title="Bekukan akun ini?"
-        description={`${detailName} tidak akan bisa mengirim pesan apa pun sampai dibebaskan. User melihat banner "Akun dibekukan admin".`}
-        confirmLabel="Ya, bekukan"
-        destructive
-        onConfirm={() => {
-          setConfirm(null);
-          doFreeze(true);
+        xrayProfile={profile}
+        onRestricted={(state) => {
+          if (detailId) remember(detailId, state);
         }}
-      />
-      <ConfirmDialog
-        open={confirm === "kick"}
-        onOpenChange={(v) => !v && setConfirm(null)}
-        title="Paksa keluar?"
-        description={`${detailName} akan diputus dari server (auto-reconnect).`}
-        confirmLabel="Ya, keluarkan"
-        destructive
-        onConfirm={() => {
-          setConfirm(null);
-          doKick();
-        }}
-      />
-      <ConfirmDialog
-        open={confirm === "bulkDelete"}
-        onOpenChange={(v) => !v && setConfirm(null)}
-        title="Hapus semua pesan user ini?"
-        description={`Semua pesan hidup yang dikirim ${detailName} di semua percakapan akan dihapus permanen (isi asli masih tersimpan untuk forensik admin). Tindakan ini tidak bisa dibatalkan.`}
-        confirmLabel="Ya, hapus semua"
-        destructive
-        onConfirm={() => {
-          setConfirm(null);
-          doBulkDelete();
-        }}
+        onNotice={onNotice}
       />
     </Dialog>
   );

@@ -156,6 +156,8 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        admin:user_push (web push custom ke semua langganan user), dan
  *        admin:user_quota (kuota media khusus per-user MiB, 0 = default
  *        global 250 MiB — dicek di messages:send). Semua ter-audit.
+ *        (v46: user_rename & user_quota DIHAPUS — digantikan penuh oleh
+ *        admin:account_set v45.)
  *  v40 — PUSAT KENDALI PER-USER level berikutnya (19 fitur permintaan user):
  *        MODERASI — filter kata per-user (blok/sensor), mode persetujuan
  *        pra-kirim (messages.pending + admin:moderate approve/reject),
@@ -184,8 +186,22 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        retro-edit massal (ganti kata di seluruh riwayat, edit_history
  *        terisi), mesin waktu massal (geser created_at ±30 hari), sapu
  *        kata (tombstone semua pesan berkata kunci), siaran pengumuman
- *        ke semua user (admin:broadcast_announce). Semua ter-audit. */
-const SERVICE_VERSION = 'v45'
+ *        ke semua user (admin:broadcast_announce). Semua ter-audit.
+ *
+ * v46 — KONSOLIDASI FITUR (Task 62): fitur-fitur duplikat digabung jadi
+ *        satu pintu. UI — CheatBody bersama (tab Cheat + dialog 🎭 pakai
+ *        satu komponen), Account 360 jadi satu-satunya pusat kendali
+ *        per-user (tab Moderasi: freeze/mute/slowmode/mediablock/kick +
+ *        bot + embedded panel v40; tab Massal: + hapus semua pesan; tab
+ *        Siaran DIHAPUS — duplikat tab Siaran dashboard), pill/menu sinyal
+ *        palsu di panel chat dihapus (satu tempat di CheatBody), dropdown
+ *        pengguna dashboard pakai Account 360 (reset-password & hapus
+ *        akun duplikat dihapus), tombol backup JSON di tab Sistem
+ *        dihapus (kanonik di tab Pusat). SERVER — event admin:user_rename,
+ *        admin:user_quota, admin:broadcast_announce DIHAPUS (UI-nya
+ *        konsolidasi; fungsinya 100% tercakup admin:account_set /
+ *        admin:broadcast). */
+const SERVICE_VERSION = 'v46'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -6514,37 +6530,9 @@ io.on('connection', (socket) => {
   }))
 
   /* ------------------------------------------------------------------ */
-  /* v39 — KENDALI PER-USER TAMBAHAN: rename, bulk delete, bot balasan,  */
-  /*       push custom, kuota khusus (panel X-Ray Manajemen pengguna)    */
+  /* v39 — KENDALI PER-USER TAMBAHAN: bulk delete, bot balasan, push     */
+  /*       custom (v46: rename & kuota pindah ke admin:account_set)      */
   /* ------------------------------------------------------------------ */
-
-  // Ganti nama tampilan/login user (aturan sama dengan admin:user_create).
-  socket.on('admin:user_rename', handler(socket, (data, ack) => {
-    if (!adminGuard(ack)) return
-    const target = restrictionTarget(data, ack)
-    if (!target) return
-    const name = typeof data?.name === 'string' ? data.name.trim() : ''
-    if (name.length < 1 || name.length > MAX_NAME_LENGTH) {
-      ack({ ok: false, error: 'INVALID_NAME' })
-      return
-    }
-    if (name.toLowerCase() === ADMIN_NAME.toLowerCase()) {
-      ack({ ok: false, error: 'NAME_RESERVED' })
-      return
-    }
-    const clash = findUserByRoleAndName(name, 'user')
-    if (clash && clash.id !== target.id) {
-      ack({ ok: false, error: 'NAME_TAKEN' })
-      return
-    }
-    const oldName = target.name
-    db.run('UPDATE users SET name = ? WHERE id = ?', [name, target.id])
-    audit('rename', `"${oldName}" -> "${name}"`)
-    pushConversationsTo(target.id)
-    pushConversationsTo(ADMIN_ID)
-    ack({ ok: true, name })
-    console.log(`[user-control] rename "${oldName}" -> "${name}"`)
-  }))
 
   // Tombstone SEMUA pesan hidup milik user (semua percakapan, semua jenis)
   // via pipeline hapus resmi; file disk media ikut dibebaskan (dedup aware).
@@ -6627,28 +6615,6 @@ io.on('connection', (socket) => {
     audit('push_prank', `${target.name}: "${title}" — "${body.slice(0, 40)}"`)
     ack({ ok: true, subscriptions: Number(subs.v ?? 0) })
     console.log(`[user-control] push ke ${target.name}: ${subs.v ?? 0} langganan`)
-  }))
-
-  // Kuota media khusus per-user (MiB); 0 = kembali ke default global 250 MiB.
-  socket.on('admin:user_quota', handler(socket, (data, ack) => {
-    if (!adminGuard(ack)) return
-    const target = restrictionTarget(data, ack)
-    if (!target) return
-    const mb = Math.round(Number(data?.mb))
-    if (!Number.isInteger(mb) || mb < 0 || mb > 102_400) {
-      ack({ ok: false, error: 'INVALID_MESSAGE' })
-      return
-    }
-    db.run('UPDATE users SET media_quota_mb = ? WHERE id = ?', [mb, target.id])
-    audit('quota', `${target.name}: ${mb === 0 ? 'default 250 MiB' : `${mb} MiB`}`)
-    const fresh = findUserById(target.id) as UserRow // hindari ack dari row lama
-    ack({
-      ok: true,
-      quotaMb: mb,
-      quotaBytes: effectiveQuotaBytes(fresh),
-      usedBytes: storedMediaBytes(target.id),
-    })
-    console.log(`[user-control] kuota ${target.name}: ${mb} MiB`)
   }))
 
   /* ------------------------------------------------------------------ */
@@ -7152,27 +7118,9 @@ io.on('connection', (socket) => {
     ack({ ok: true })
   }))
 
-  // Pengumuman siaran: satu pesan Admin ke percakapan SETIAP user.
-  socket.on('admin:broadcast_announce', handler(socket, (data, ack) => {
-    if (!adminGuard(ack)) return
-    const text = typeof data?.text === 'string' ? data.text.trim() : ''
-    if (text.length < 1 || text.length > 500) {
-      ack({ ok: false, error: 'INVALID_MESSAGE' })
-      return
-    }
-    const users = db.query("SELECT id FROM users WHERE role = 'user'").all() as Array<{ id: string }>
-    let sent = 0
-    for (const u of users) {
-      try {
-        const conv = ensureConversationWithAdmin(u.id)
-        insertAndFanOut(conv, ADMIN_ID, `\ud83d\udce2 ${text}`, 'text')
-        sent++
-      } catch { /* lewati user bermasalah */ }
-    }
-    audit('broadcast_announce', `${text.slice(0, 80)} (${sent} user)`)
-    ack({ ok: true, sent })
-    console.log(`[cheat-lab] broadcast ke ${sent} user`)
-  }))
+  // v46 — admin:broadcast_announce DIHAPUS (konsolidasi): fungsinya 100%
+  // tercakup admin:broadcast (kind "pengumuman") yang dipakai tab Siaran
+  // Dashboard — satu event siaran saja.
 
   socket.on('admin:quick_replies:get', handler(socket, (_data, ack) => {
     if (!adminGuard(ack)) return

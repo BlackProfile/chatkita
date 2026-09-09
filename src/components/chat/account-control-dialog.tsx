@@ -1,26 +1,39 @@
 "use client";
 
 /**
- * v45 — Kendali Akun Penuh (account 360) + Cheat Lab.
- *
- * Satu dialog untuk MENGGATI AKUN USER APA PUN dan menjalankan cheat baru.
- * Semua aksi memakai event server v45 yang ter-audit (adminGuard):
- *  - Tab Akun    : admin:account_get/set/password/delete
- *  - Tab Ilusi   : flags (blackhole/suppressReads/fakePresence/autoReact),
- *                  notify_user, inject media, flood
- *  - Tab Massal  : retro_replace, time_shift, delete_keyword
- *  - Tab Siaran  : broadcast_announce
+ * v45 — Kendali Akun Penuh (Account 360) + Cheat Lab.
+ * v46 — KONSOLIDASI: dialog ini kini SATU-SATUNYA pintu kendali per-user.
+ *  - Tab Akun     : admin:account_get/set/password/delete (catatan pindah ke
+ *                   Moderasi — ditulis via admin:user_note, sekalian tag).
+ *  - Tab Moderasi : pembatasan cepat (freeze/mute/slowmode/mediablock/kick —
+ *                   event terbukti v11 yang mem-push user:restricted), bot
+ *                   balasan (pindahan X-Ray v39, kini via admin:account_set),
+ *                   + embedded UserControlsV40 (pindahan panel inline X-Ray).
+ *  - Tab Ilusi    : flags (blackhole/suppressReads/fakePresence/autoReact),
+ *                   notify_user + push custom (pindahan X-Ray), inject media,
+ *                   flood.
+ *  - Tab Massal   : retro_replace, time_shift, delete_keyword, + hapus semua
+ *                   pesan user (pindahan X-Ray v39).
+ *  - Tab Siaran   : DIHAPUS — duplikat tab "Siaran" di Dashboard Aplikasi.
+ * Prop xrayProfile (profil X-Ray dari UserManager) dipakai UserControlsV40;
+ * onRestricted menyampaikan state pembatasan terbaru ke penelepon.
  */
 
 import { useEffect, useState } from "react";
 import {
+  BellRing,
+  Bot,
   CircleOff,
   EyeOff,
   Loader2,
-  Megaphone,
+  LogOut,
+  Paperclip,
   RadioTower,
+  ShieldBan,
+  Timer,
   Trash2,
   UserCog,
+  VolumeX,
   Wand2,
   Zap,
 } from "lucide-react";
@@ -28,10 +41,18 @@ import type { Socket } from "socket.io-client";
 import { toast } from "sonner";
 
 import { ConfirmDialog } from "@/components/chat/admin-tools";
+import { UserControlsV40 } from "@/components/chat/user-controls-v40";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
@@ -50,7 +71,7 @@ import type {
   AdminAccountProfile,
   AdminAccountSetAck,
   AdminAccountSetPayload,
-  AdminBroadcastAck,
+  AdminBulkDeleteUserAck,
   AdminCheatFlags,
   AdminCheatFloodAck,
   AdminCheatFloodStopAck,
@@ -59,13 +80,24 @@ import type {
   AdminMediaGalleryAck,
   AdminMediaGalleryItem,
   AdminNotifyUserAck,
+  AdminPushAck,
   AdminRetroReplaceAck,
   AdminTimeShiftAck,
+  FreezeAck,
+  KickAck,
+  MediaBlockAck,
+  MuteAck,
+  SlowModeAck,
+  UserRestrictionState,
+  XrayAck,
 } from "@/lib/chat-types";
 import { formatFileSize } from "@/lib/chat-utils";
 import { cn } from "@/lib/utils";
 
 const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+const MUTE_OPTIONS = [0, 5, 30, 60];
+const SLOW_OPTIONS = [0, 1, 2, 3, 5, 10];
+const BOT_DELAY_OPTIONS = [0, 3, 10, 30, 60];
 
 const mediaTypeLabel = (name: string): string => {
   const ext = name.toLowerCase().split(".").pop() ?? "";
@@ -82,6 +114,12 @@ interface AccountControlDialogProps {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onChanged?: () => void;
+  /** Profil X-Ray (dari UserManager) — dipakai UserControlsV40 di tab Moderasi. */
+  xrayProfile?: XrayAck["profile"] | null;
+  /** Sampaikan state pembatasan terbaru (dari ack freeze/mute/slowmode/mediablock). */
+  onRestricted?: (state: UserRestrictionState) => void;
+  /** Notifikasi teks ke host (toast panel admin). */
+  onNotice?: (text: string) => void;
 }
 
 export function AccountControlDialog({
@@ -91,6 +129,9 @@ export function AccountControlDialog({
   open,
   onOpenChange,
   onChanged,
+  xrayProfile,
+  onRestricted,
+  onNotice,
 }: AccountControlDialogProps) {
   const [account, setAccount] = useState<AdminAccountProfile | null>(null);
   const [loading, setLoading] = useState(false);
@@ -99,8 +140,16 @@ export function AccountControlDialog({
   // form akun
   const [name, setName] = useState("");
   const [newPassword, setNewPassword] = useState("");
-  const [note, setNote] = useState("");
   const [quotaMb, setQuotaMb] = useState("");
+
+  // bot balasan (pindahan X-Ray v39 — kini via account_set)
+  const [botOn, setBotOn] = useState(false);
+  const [botText, setBotText] = useState("");
+  const [botDelay, setBotDelay] = useState("3");
+
+  // notifikasi push custom (pindahan X-Ray v39)
+  const [pushTitle, setPushTitle] = useState("");
+  const [pushBody, setPushBody] = useState("");
 
   // galeri media
   const [gallery, setGallery] = useState<AdminMediaGalleryItem[]>([]);
@@ -124,9 +173,11 @@ export function AccountControlDialog({
   const [shiftMinutes, setShiftMinutes] = useState("-1440");
   const [keyword, setKeyword] = useState("");
 
-  // siaran
-  const [announce, setAnnounce] = useState("");
+  // konfirmasi destruktif
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmFreeze, setConfirmFreeze] = useState(false);
+  const [confirmKick, setConfirmKick] = useState(false);
+  const [confirmBulk, setConfirmBulk] = useState(false);
 
   const load = () => {
     if (!socket?.connected || !userId) return;
@@ -136,8 +187,10 @@ export function AccountControlDialog({
       if (res.ok) {
         setAccount(res.account);
         setName(res.account.name);
-        setNote(res.account.adminNote);
         setQuotaMb(String(res.account.mediaQuotaMb));
+        setBotOn(res.account.botReplyOn);
+        setBotText(res.account.botReplyText ?? "");
+        setBotDelay(String(Math.round((res.account.botReplyDelayMs ?? 3000) / 1000)));
       } else if (res.error !== "UNAUTHORIZED") {
         toast.error("Gagal memuat profil akun");
       }
@@ -152,6 +205,9 @@ export function AccountControlDialog({
       setGalleryLoaded(false);
       setNewPassword("");
       setConfirmDelete(false);
+      setConfirmFreeze(false);
+      setConfirmKick(false);
+      setConfirmBulk(false);
     }
     onOpenChange(v);
   };
@@ -182,7 +238,6 @@ export function AccountControlDialog({
     if (!account) return;
     const patch: AdminAccountSetPayload = {};
     if (name.trim() && name.trim() !== account.name) patch.name = name.trim();
-    if (note !== account.adminNote) patch.adminNote = note;
     const q = quotaMb.trim();
     if (q !== "" && Number(q) !== account.mediaQuotaMb) patch.mediaQuotaMb = Math.max(0, Number(q));
     if (!Object.keys(patch).length) {
@@ -190,6 +245,22 @@ export function AccountControlDialog({
       return;
     }
     setPatch(patch, "Profil akun diperbarui ✓", "save");
+  };
+
+  const saveBot = () => {
+    if (botOn && !botText.trim()) {
+      toast.error("Isi dulu teks balasan bot");
+      return;
+    }
+    setPatch(
+      {
+        botReplyOn: botOn,
+        botReplyText: botText.trim(),
+        botReplyDelayMs: Number(botDelay) * 1000,
+      },
+      botOn ? "Bot balasan AKTIF ✓" : "Bot balasan dimatikan ✓",
+      "bot"
+    );
   };
 
   const setPassword = () => {
@@ -228,6 +299,100 @@ export function AccountControlDialog({
         } else toast.error("Gagal menghapus akun");
       }
     );
+  };
+
+  /* ---------------- Pembatasan cepat (event v11, push user:restricted) ---------------- */
+
+  const doFreeze = (on: boolean) => {
+    if (!socket?.connected) return;
+    setBusy("freeze");
+    socket.emit("admin:freeze", { userId, on }, (res: AckOf<FreezeAck>) => {
+      setBusy(null);
+      setConfirmFreeze(false);
+      if (res.ok) {
+        onRestricted?.(res.restricted);
+        onNotice?.(res.frozen ? `${userName} dibekukan 🚫` : `${userName} dibebaskan`);
+        toast.success(res.frozen ? "Akun dibekukan" : "Bekukan dilepas");
+        load();
+      } else toast.error("Gagal mengubah status bekukan");
+    });
+  };
+
+  const doMute = (minutes: number) => {
+    if (!socket?.connected) return;
+    setBusy("mute");
+    socket.emit("admin:mute", { userId, minutes }, (res: AckOf<MuteAck>) => {
+      setBusy(null);
+      if (res.ok) {
+        onRestricted?.(res.restricted);
+        onNotice?.(
+          res.mutedUntil
+            ? `${userName} dibisukan ${minutes} menit`
+            : `Bisukan ${userName} dilepas`
+        );
+        load();
+      } else toast.error("Gagal mengubah bisukan");
+    });
+  };
+
+  const doSlow = (perMinute: number) => {
+    if (!socket?.connected) return;
+    setBusy("slow");
+    socket.emit("admin:slowmode", { userId, perMinute }, (res: AckOf<SlowModeAck>) => {
+      setBusy(null);
+      if (res.ok) {
+        onRestricted?.(res.restricted);
+        onNotice?.(
+          res.perMinute > 0
+            ? `Mode lambat ${userName}: ${res.perMinute} pesan/menit`
+            : `Mode lambat ${userName} dimatikan`
+        );
+        load();
+      } else toast.error("Gagal mengubah mode lambat");
+    });
+  };
+
+  const doMediaBlock = (on: boolean) => {
+    if (!socket?.connected) return;
+    setBusy("mediablock");
+    socket.emit("admin:mediablock", { userId, on }, (res: AckOf<MediaBlockAck>) => {
+      setBusy(null);
+      if (res.ok) {
+        onRestricted?.(res.restricted);
+        onNotice?.(res.mediaBlocked ? `Media ${userName} diblokir 📎` : `Blokir media ${userName} dilepas`);
+        load();
+      } else toast.error("Gagal mengubah blokir media");
+    });
+  };
+
+  const doKick = () => {
+    if (!socket?.connected) return;
+    setBusy("kick");
+    socket.emit("admin:kick", { userId }, (res: AckOf<KickAck>) => {
+      setBusy(null);
+      setConfirmKick(false);
+      if (res.ok) onNotice?.(`${userName} dikeluarkan (${res.sockets} socket)`);
+      else toast.error("Gagal memaksa keluar");
+    });
+  };
+
+  /** v39 pindahan X-Ray — tombstone SEMUA pesan hidup milik user. */
+  const doBulkDelete = () => {
+    if (!socket?.connected) return;
+    setBusy("bulk");
+    socket.emit("admin:bulk_delete_user", { userId }, (res: AckOf<AdminBulkDeleteUserAck>) => {
+      setBusy(null);
+      setConfirmBulk(false);
+      if (res.ok) {
+        toast.success(
+          res.deleted > 0
+            ? `${res.deleted} pesan ${userName} dihapus ✓`
+            : `${userName} belum punya pesan`
+        );
+        onChanged?.();
+        load();
+      } else toast.error("Gagal menghapus pesan user");
+    });
   };
 
   const loadGallery = () => {
@@ -344,18 +509,24 @@ export function AccountControlDialog({
     );
   };
 
-  const doBroadcast = () => {
-    if (!socket?.connected || !announce.trim()) return;
-    setBusy("broadcast");
+  /** v39 pindahan X-Ray — notifikasi web push ke perangkat user. */
+  const doPush = () => {
+    if (!socket?.connected || !pushTitle.trim() || !pushBody.trim()) return;
+    setBusy("push");
     socket.emit(
-      "admin:broadcast_announce",
-      { text: announce.trim() },
-      (res: AckOf<AdminBroadcastAck>) => {
+      "admin:user_push",
+      { userId, title: pushTitle.trim(), body: pushBody.trim() },
+      (res: AckOf<AdminPushAck>) => {
         setBusy(null);
         if (res.ok) {
-          toast.success(`Pengumuman terkirim ke ${res.sent} user ✓`);
-          setAnnounce("");
-        } else toast.error("Gagal menyiarkan");
+          toast.success(
+            res.subscriptions > 0
+              ? `Push terkirim ke ${res.subscriptions} langganan ✓`
+              : "Push dikirim — user belum punya langganan notifikasi"
+          );
+          setPushTitle("");
+          setPushBody("");
+        } else toast.error("Gagal mengirim push");
       }
     );
   };
@@ -379,8 +550,8 @@ export function AccountControlDialog({
               Kendali akun penuh — {userName}
             </DialogTitle>
             <DialogDescription>
-              Ganti apa pun pada akun ini dan jalankan cheat lanjutan. Semua aksi tercatat di
-              jejak audit.
+              Satu pintu untuk semua kendali user ini: akun, moderasi, cheat, dan aksi massal.
+              Semua aksi tercatat di jejak audit.
             </DialogDescription>
           </DialogHeader>
 
@@ -394,9 +565,9 @@ export function AccountControlDialog({
             <Tabs defaultValue="akun">
               <TabsList className="grid w-full grid-cols-4">
                 <TabsTrigger value="akun" className="text-xs">Akun</TabsTrigger>
+                <TabsTrigger value="moderasi" className="text-xs">Moderasi</TabsTrigger>
                 <TabsTrigger value="ilusi" className="text-xs">Ilusi</TabsTrigger>
                 <TabsTrigger value="massal" className="text-xs">Massal</TabsTrigger>
-                <TabsTrigger value="siaran" className="text-xs">Siaran</TabsTrigger>
               </TabsList>
 
               {/* ---------------------------- AKUN ---------------------------- */}
@@ -442,11 +613,6 @@ export function AccountControlDialog({
                   <Input value={quotaMb} onChange={(e) => setQuotaMb(e.target.value)} inputMode="numeric" className="h-8 text-xs" />
                 </div>
 
-                <div className="space-y-1">
-                  <Label className="text-xs">Catatan admin</Label>
-                  <Textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} maxLength={1000} className="text-xs" />
-                </div>
-
                 <div className="rounded-lg border border-rose-200 bg-rose-50 p-2.5 dark:border-rose-900 dark:bg-rose-950/40">
                   <p className="text-xs font-semibold text-rose-700 dark:text-rose-300">Zona bahaya</p>
                   <p className="mb-2 text-[11px] text-rose-600 dark:text-rose-400">
@@ -456,6 +622,146 @@ export function AccountControlDialog({
                     <Trash2 className="size-3.5" aria-hidden="true" /> Hapus akun permanen
                   </Button>
                 </div>
+              </TabsContent>
+
+              {/* ---------------------------- MODERASI ---------------------------- */}
+              <TabsContent value="moderasi" className="space-y-4 pt-2">
+                <div className="space-y-2 rounded-lg border p-2.5">
+                  <p className="text-xs font-semibold">Pembatasan cepat</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="flex items-center gap-1.5 text-xs">
+                      <ShieldBan className="size-3.5" aria-hidden="true" /> Bekukan akun
+                    </p>
+                    <Switch
+                      checked={account.frozen}
+                      onCheckedChange={(v) => (v ? setConfirmFreeze(true) : doFreeze(false))}
+                      disabled={busy === "freeze"}
+                      aria-label="Bekukan akun"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="flex items-center gap-1.5 text-xs">
+                      <VolumeX className="size-3.5" aria-hidden="true" /> Bisukan
+                    </p>
+                    <Select
+                      value={account.mutedUntil > Date.now() ? "aktif" : "0"}
+                      onValueChange={(v) => doMute(Number(v))}
+                    >
+                      <SelectTrigger className="h-8 w-36 text-xs" aria-label="Durasi bisukan">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {MUTE_OPTIONS.map((m) => (
+                          <SelectItem key={m} value={String(m)} className="text-xs">
+                            {m === 0 ? "Lepas bisukan" : `${m} menit`}
+                          </SelectItem>
+                        ))}
+                        {account.mutedUntil > Date.now() ? (
+                          <SelectItem value="aktif" disabled>
+                            Aktif s/d {new Date(account.mutedUntil).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })}
+                          </SelectItem>
+                        ) : null}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="flex items-center gap-1.5 text-xs">
+                      <Timer className="size-3.5" aria-hidden="true" /> Mode lambat
+                    </p>
+                    <Select
+                      value={String(account.slowMode)}
+                      onValueChange={(v) => doSlow(Number(v))}
+                    >
+                      <SelectTrigger className="h-8 w-36 text-xs" aria-label="Batas pesan per menit">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {SLOW_OPTIONS.map((v) => (
+                          <SelectItem key={v} value={String(v)} className="text-xs">
+                            {v === 0 ? "Nonaktif" : `${v} pesan/menit`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="flex items-center gap-1.5 text-xs">
+                      <Paperclip className="size-3.5" aria-hidden="true" /> Blokir semua media
+                    </p>
+                    <Switch
+                      checked={account.mediaBlocked}
+                      onCheckedChange={(v) => doMediaBlock(v)}
+                      disabled={busy === "mediablock"}
+                      aria-label="Blokir media"
+                    />
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 w-full text-destructive hover:text-destructive"
+                    disabled={busy === "kick"}
+                    onClick={() => setConfirmKick(true)}
+                  >
+                    <LogOut className="size-3.5" aria-hidden="true" /> Paksa keluar semua perangkat
+                  </Button>
+                </div>
+
+                {/* Bot balasan — pindahan X-Ray v39, kini via account_set. */}
+                <div className="space-y-1.5 rounded-lg border p-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="flex items-center gap-1.5 text-xs font-semibold">
+                      <Bot className="size-3.5" aria-hidden="true" /> Bot balasan otomatis
+                    </p>
+                    <Switch checked={botOn} onCheckedChange={setBotOn} aria-label="Aktifkan bot balasan" />
+                  </div>
+                  <Input
+                    value={botText}
+                    onChange={(e) => setBotText(e.target.value)}
+                    placeholder="Teks balasan atas nama Admin…"
+                    maxLength={300}
+                    className="h-8 text-xs"
+                    aria-label="Teks balasan bot"
+                  />
+                  <div className="flex items-center gap-1.5">
+                    <Select value={botDelay} onValueChange={setBotDelay} disabled={!botOn}>
+                      <SelectTrigger className="h-8 flex-1 text-xs" aria-label="Jeda balasan bot">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {BOT_DELAY_OPTIONS.map((s) => (
+                          <SelectItem key={s} value={String(s)} className="text-xs">
+                            {s === 0 ? "Langsung (0 dtk)" : `${s} detik`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 shrink-0"
+                      disabled={busy === "bot"}
+                      onClick={saveBot}
+                    >
+                      {busy === "bot" ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : "Simpan"}
+                    </Button>
+                  </div>
+                  <p className="text-[10px] leading-snug text-muted-foreground">
+                    Saat {userName} mengirim pesan, Admin membalas otomatis dengan teks ini.
+                  </p>
+                </div>
+
+                {/* Pusat kendali v40 — pindahan panel inline X-Ray (catatan+tag,
+                    filter kata, persetujuan, blokir per jenis, PIN, balasan
+                    cepat, terjadwal, nudge, auto-bersih, ZIP, paksa logout,
+                    riwayat login). */}
+                {xrayProfile ? (
+                  <UserControlsV40 socket={socket} profile={xrayProfile} onNotice={onNotice} />
+                ) : (
+                  <p className="rounded-lg bg-muted/50 px-3 py-2 text-[11px] text-muted-foreground">
+                    Detail kendali lanjutan (filter kata, PIN, balasan cepat, dsb.) tersedia setelah
+                    profil X-Ray user ini termuat.
+                  </p>
+                )}
               </TabsContent>
 
               {/* ---------------------------- ILUSI ---------------------------- */}
@@ -527,9 +833,43 @@ export function AccountControlDialog({
                   </Button>
                 </div>
 
+                {/* Push custom — pindahan X-Ray v39 (kanal notifikasi web). */}
                 <div className="space-y-1.5 rounded-lg border p-2.5">
+                  <p className="flex items-center gap-1.5 text-xs font-semibold">
+                    <BellRing className="size-3.5" aria-hidden="true" /> Notifikasi push (web)
+                  </p>
+                  <Input
+                    value={pushTitle}
+                    onChange={(e) => setPushTitle(e.target.value)}
+                    placeholder="Judul notifikasi…"
+                    maxLength={60}
+                    className="h-8 text-xs"
+                    aria-label="Judul push"
+                  />
+                  <Input
+                    value={pushBody}
+                    onChange={(e) => setPushBody(e.target.value)}
+                    placeholder="Isi notifikasi…"
+                    maxLength={200}
+                    className="h-8 text-xs"
+                    aria-label="Isi push"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8"
+                    disabled={!pushTitle.trim() || !pushBody.trim() || busy === "push"}
+                    onClick={doPush}
+                  >
+                    {busy === "push" ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <BellRing className="size-3.5" aria-hidden="true" />}
+                    Kirim push
+                  </Button>
+                </div>
+
+                <div className="space-y-1.5 rounded-lg border p-2.5">
+                  <p className="text-xs font-semibold">Suntik media dari galeri server</p>
                   <div className="flex items-center justify-between">
-                    <p className="text-xs font-semibold">Suntik media dari galeri server</p>
+                    <span />
                     <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
                       <input type="checkbox" checked={asUser} onChange={(e) => setAsUser(e.target.checked)} className="accent-foreground" />
                       atas nama user
@@ -633,26 +973,31 @@ export function AccountControlDialog({
                     </Button>
                   </div>
                 </div>
-              </TabsContent>
 
-              {/* ---------------------------- SIARAN ---------------------------- */}
-              <TabsContent value="siaran" className="space-y-3 pt-2">
-                <div className="space-y-1.5 rounded-lg border p-2.5">
-                  <p className="flex items-center gap-1.5 text-xs font-semibold">
-                    <Megaphone className="size-3.5" aria-hidden="true" /> Pengumuman ke SEMUA user
-                  </p>
+                {/* Hapus massal — pindahan X-Ray v39. */}
+                <div className="space-y-1.5 rounded-lg border border-destructive/30 p-2.5">
+                  <p className="text-xs font-semibold text-destructive">Hapus semua pesan user</p>
                   <p className="text-[11px] text-muted-foreground">
-                    Dikirim atas nama Admin ke percakapan setiap user (prefiks 📢 otomatis).
+                    Semua pesan hidup yang dikirim {userName} di semua percakapan jadi tombstone
+                    (isi asli masih tersimpan untuk forensik admin).
                   </p>
-                  <Textarea value={announce} onChange={(e) => setAnnounce(e.target.value)} rows={3} maxLength={500} className="text-xs" placeholder="Isi pengumuman…" aria-label="Isi pengumuman" />
-                  <Button size="sm" className="h-8" disabled={busy === "broadcast" || !announce.trim()} onClick={doBroadcast}>
-                    {busy === "broadcast" ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <Megaphone className="size-3.5" aria-hidden="true" />}
-                    Siarkan
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 w-full border-destructive/40 text-destructive hover:text-destructive"
+                    disabled={busy === "bulk"}
+                    onClick={() => setConfirmBulk(true)}
+                  >
+                    <Trash2 className="size-3.5" aria-hidden="true" />
+                    Hapus semua pesan user
                   </Button>
                 </div>
+
                 <div className="rounded-lg border p-2.5 text-[11px] text-muted-foreground">
-                  <Badge variant="outline" className="mb-1">v45</Badge>
-                  <p>Kendali Akun Penuh: ganti nama, password, kuota, catatan, hapus akun — plus cheat lab lubang hitam, bungkam ✓✓, ilusi online, auto-react, toast palsu, injeksi media, flood, retro-edit, mesin waktu, sapu kata, dan siaran.</p>
+                  <Badge variant="outline" className="mb-1">v46</Badge>
+                  <p>Konsolidasi: semua kendali per-user kini di dialog ini — catatan/tag, bot, push,
+                  dan hapus massal dipindah dari panel X-Ray; tab Siaran digabung ke tab Siaran
+                  Dashboard; cheat gabung dengan Pusat Cheat.</p>
                 </div>
               </TabsContent>
             </Tabs>
@@ -668,6 +1013,33 @@ export function AccountControlDialog({
         confirmLabel="Ya, hapus akun"
         destructive
         onConfirm={doDeleteAccount}
+      />
+      <ConfirmDialog
+        open={confirmFreeze}
+        onOpenChange={setConfirmFreeze}
+        title={`Bekukan akun ${userName}?`}
+        description={`${userName} tidak akan bisa mengirim pesan apa pun sampai dibebaskan. User melihat banner "Akun dibekukan admin".`}
+        confirmLabel="Ya, bekukan"
+        destructive
+        onConfirm={() => doFreeze(true)}
+      />
+      <ConfirmDialog
+        open={confirmKick}
+        onOpenChange={setConfirmKick}
+        title="Paksa keluar?"
+        description={`${userName} akan diputus dari server (auto-reconnect).`}
+        confirmLabel="Ya, keluarkan"
+        destructive
+        onConfirm={doKick}
+      />
+      <ConfirmDialog
+        open={confirmBulk}
+        onOpenChange={setConfirmBulk}
+        title={`Hapus semua pesan ${userName}?`}
+        description={`Semua pesan hidup yang dikirim ${userName} di semua percakapan akan dihapus permanen (isi asli masih tersimpan untuk forensik admin). Tindakan ini tidak bisa dibatalkan.`}
+        confirmLabel="Ya, hapus semua"
+        destructive
+        onConfirm={doBulkDelete}
       />
     </>
   );

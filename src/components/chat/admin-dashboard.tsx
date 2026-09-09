@@ -17,6 +17,7 @@ import {
   HardDrive,
   Hourglass,
   Image as ImageIcon,
+  UserCog,
   KeyRound,
   Landmark,
   Link2,
@@ -50,6 +51,7 @@ import {
 } from "lucide-react";
 
 import { AdminCheat } from "@/components/chat/admin-cheat";
+import { AccountControlDialog } from "@/components/chat/account-control-dialog";
 import { AdminPusat } from "@/components/chat/admin-pusat";
 import { AdminStorage } from "@/components/chat/admin-storage";
 import { DashboardV40 } from "@/components/chat/dashboard-v40";
@@ -86,14 +88,11 @@ import type {
   AdminInviteListAck,
   AdminInvitesClearAck,
   AdminPasswordChangeAck,
-  AdminResetPasswordAck,
   AdminSettingsResetAck,
   AdminUnbindDevicesAck,
   AdminUserCreateAck,
-  AdminUserDeleteAck,
   AppSettings,
   AppSettingsAck,
-  BackupAck,
   BroadcastAck,
   ChatErrorAck,
   CleanupAck,
@@ -397,18 +396,17 @@ export function AdminDashboard({
   const [userQuery, setUserQuery] = useState("");
   const [userSort, setUserSort] = useState<"messages" | "recent" | "name" | "new">("messages");
   const [onlineOnly, setOnlineOnly] = useState(false);
-  // v27 — 1 orang 1 akun: buat akun, reset password, lepas perangkat, kode undangan.
+  // v27 — 1 orang 1 akun: buat akun, lepas perangkat, kode undangan.
   const [userCreateOpen, setUserCreateOpen] = useState(false);
   const [newUserName, setNewUserName] = useState("");
   const [newUserPw, setNewUserPw] = useState("");
   const [newUserMsg, setNewUserMsg] = useState<string | null>(null);
   const [userCreating, setUserCreating] = useState(false);
-  const [resetTarget, setResetTarget] = useState<DashboardUserRow | null>(null);
+  /* v46 — target dialog Kendali Akun Penuh (menggantikan reset-password &
+   * hapus-akun duplikat: semuanya kini di satu dialog Account 360). */
+  const [acctTarget, setAcctTarget] = useState<DashboardUserRow | null>(null);
   /* v37 — target dialog "Insight pengguna". */
   const [insightTarget, setInsightTarget] = useState<DashboardUserRow | null>(null);
-  const [resetPw, setResetPw] = useState("");
-  const [resetMsg, setResetMsg] = useState<string | null>(null);
-  const [resetBusy, setResetBusy] = useState(false);
   const [unbindTarget, setUnbindTarget] = useState<DashboardUserRow | null>(null);
   const [unbindBusy, setUnbindBusy] = useState(false);
   const [invites, setInvites] = useState<InviteCodeInfo[] | null>(null);
@@ -416,9 +414,6 @@ export function AdminDashboard({
   const [inviteLabel, setInviteLabel] = useState("");
   const [inviteBusy, setInviteBusy] = useState(false);
   const [inviteMsg, setInviteMsg] = useState<string | null>(null);
-  // v29 — hapus akun permanen + kembalikan default pengaturan.
-  const [deleteTarget, setDeleteTarget] = useState<DashboardUserRow | null>(null);
-  const [deleteBusy, setDeleteBusy] = useState(false);
   const [settingsResetOpen, setSettingsResetOpen] = useState(false);
   const [settingsResetBusy, setSettingsResetBusy] = useState(false);
 
@@ -532,31 +527,6 @@ export function AdminDashboard({
     );
   };
 
-  /** Reset password user dari dashboard. */
-  const submitResetPassword = () => {
-    if (!socket || !resetTarget || resetBusy) return;
-    if (resetPw.length < 4) {
-      setResetMsg("Password minimal 4 karakter.");
-      return;
-    }
-    setResetBusy(true);
-    setResetMsg(null);
-    socket.emit(
-      "admin:user_reset_password",
-      { userId: resetTarget.id, password: resetPw },
-      (res: AckOf<AdminResetPasswordAck>) => {
-        setResetBusy(false);
-        if (res.ok) {
-          toast.success(`Password "${resetTarget.name}" direset`);
-          setResetTarget(null);
-          setResetPw("");
-        } else {
-          setResetMsg(res.error === "WEAK_PASSWORD" ? "Password minimal 4 karakter." : "Gagal reset password.");
-        }
-      }
-    );
-  };
-
   /** Lepas semua kunci perangkat user (1 perangkat 1 akun). */
   const submitUnbindDevices = () => {
     if (!socket || !unbindTarget || unbindBusy) return;
@@ -633,28 +603,6 @@ export function AdminDashboard({
         setInviteMsg("Gagal menghapus kode.");
       }
     });
-  };
-
-  /** v29 — hapus PERMANEN akun user + seluruh datanya. */
-  const submitDeleteUser = () => {
-    if (!socket || !deleteTarget || deleteBusy) return;
-    setDeleteBusy(true);
-    socket.emit(
-      "admin:user_delete",
-      { userId: deleteTarget.id },
-      (res: AckOf<AdminUserDeleteAck>) => {
-        setDeleteBusy(false);
-        if (res.ok) {
-          toast.success(`Akun "${deleteTarget.name}" dihapus permanen`);
-          setDeleteTarget(null);
-          fetchStats();
-        } else {
-          toast.error(
-            res.error === "NOT_FOUND" ? "Akun tidak ditemukan." : "Gagal menghapus akun."
-          );
-        }
-      }
-    );
   };
 
   /** v29 — kembalikan seluruh pengaturan aplikasi ke default. */
@@ -790,28 +738,6 @@ export function AdminDashboard({
     );
   };
 
-  const downloadBackup = () => {
-    if (!socket || busy) return;
-    setBusy("backup");
-    socket.emit("admin:backup", {}, (res: AckOf<BackupAck>) => {
-      setBusy(null);
-      if (!res.ok) return;
-      try {
-        const blob = new Blob([JSON.stringify(res, null, 2)], {
-          type: "application/json",
-        });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `chatkita-backup-${res.exportedAt.slice(0, 10)}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
-      } catch {
-        /* ignore */
-      }
-    });
-  };
-
   const runVacuum = () => {
     if (!socket || busy) return;
     setBusy("vacuum");
@@ -895,25 +821,15 @@ export function AdminDashboard({
               <Lightbulb className="size-4" aria-hidden="true" />
               Insight pengguna
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => {
-              setResetTarget(u);
-              setResetPw("");
-              setResetMsg(null);
-            }}>
-              <KeyRound className="size-4" aria-hidden="true" />
-              Reset password…
+            {/* v46 — SATU pintu: ganti nama/password/kuota/catatan, moderasi,
+                cheat, hingga hapus akun permanen (Account 360). */}
+            <DropdownMenuItem onSelect={() => setAcctTarget(u)}>
+              <UserCog className="size-4" aria-hidden="true" />
+              Kendali akun penuh
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setUnbindTarget(u)}>
               <Smartphone className="size-4" aria-hidden="true" />
               Lepas kunci perangkat
-            </DropdownMenuItem>
-            {/* v29 — hapus permanen akun + seluruh datanya. */}
-            <DropdownMenuItem
-              onSelect={() => setDeleteTarget(u)}
-              className="text-destructive focus:text-destructive"
-            >
-              <Trash2 className="size-4" aria-hidden="true" />
-              Hapus akun…
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -2017,20 +1933,8 @@ export function AdminDashboard({
               </div>
 
               <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-9"
-                  onClick={downloadBackup}
-                  disabled={busy !== null}
-                >
-                  {busy === "backup" ? (
-                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                  ) : (
-                    <Download className="size-4" aria-hidden="true" />
-                  )}
-                  Unduh backup JSON
-                </Button>
+                {/* v46 — tombol "Unduh backup JSON" dipindah konsolidasi:
+                    backup/restore/reset kini hanya di tab Pusat. */}
                 <Button
                   size="sm"
                   variant="outline"
@@ -2193,58 +2097,18 @@ export function AdminDashboard({
           onClose={() => setInsightTarget(null)}
         />
 
-        {/* v27 — dialog reset password user. */}
-        <Dialog
-          open={!!resetTarget}
-          onOpenChange={(o) => {
-            if (!o) setResetTarget(null);
+        {/* v46 — Kendali Akun Penuh (Account 360): satu pintu aksi per akun
+            (menggantikan dialog reset password & hapus akun yang lama). */}
+        <AccountControlDialog
+          socket={socket}
+          userId={acctTarget?.id ?? ""}
+          userName={acctTarget?.name ?? ""}
+          open={!!acctTarget}
+          onOpenChange={(v) => {
+            if (!v) setAcctTarget(null);
           }}
-        >
-          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <KeyRound className="size-5 text-emerald-600" aria-hidden="true" />
-                Reset password
-              </DialogTitle>
-              <DialogDescription>
-                Password baru untuk akun{" "}
-                <span className="font-semibold">{resetTarget?.name}</span>. Kabari
-                pemakainya setelah direset.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="space-y-3">
-              <div className="space-y-2">
-                <Label htmlFor="reset-pw">Password baru (min. 4 karakter)</Label>
-                <Input
-                  id="reset-pw"
-                  type="text"
-                  value={resetPw}
-                  maxLength={72}
-                  placeholder="Password baru"
-                  onChange={(e) => {
-                    setResetPw(e.target.value);
-                    setResetMsg(null);
-                  }}
-                />
-              </div>
-              {resetMsg ? <p className="text-sm text-destructive">{resetMsg}</p> : null}
-              <Button
-                className="h-10 w-full bg-emerald-600 text-white hover:bg-emerald-600/90"
-                disabled={resetBusy || resetPw.length < 4}
-                onClick={submitResetPassword}
-              >
-                {resetBusy ? (
-                  <>
-                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                    Menyimpan…
-                  </>
-                ) : (
-                  "Reset password"
-                )}
-              </Button>
-            </div>
-          </DialogContent>
-        </Dialog>
+          onChanged={fetchStats}
+        />
 
         {/* v27 — konfirmasi lepas kunci perangkat. */}
         <Dialog
@@ -2285,44 +2149,8 @@ export function AdminDashboard({
           </DialogContent>
         </Dialog>
 
-        {/* v29 — konfirmasi hapus PERMANEN akun user + seluruh datanya. */}
-        <Dialog
-          open={!!deleteTarget}
-          onOpenChange={(o) => {
-            if (!o) setDeleteTarget(null);
-          }}
-        >
-          <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <Trash2 className="size-5 text-destructive" aria-hidden="true" />
-                Hapus akun permanen
-              </DialogTitle>
-              <DialogDescription>
-                Akun <span className="font-semibold">{deleteTarget?.name}</span> beserta
-                SELURUH pesan, media, percakapan, perangkat, dan langganan push-nya akan
-                dihapus permanen dan tidak bisa dikembalikan. Nama akun bebas dipakai
-                lagi setelah ini. Lanjutkan?
-              </DialogDescription>
-            </DialogHeader>
-            <div className="flex gap-2">
-              <Button variant="outline" className="h-10 flex-1" onClick={() => setDeleteTarget(null)}>
-                Batal
-              </Button>
-              <Button
-                className="h-10 flex-1 bg-rose-600 text-white hover:bg-rose-600/90"
-                disabled={deleteBusy}
-                onClick={submitDeleteUser}
-              >
-                {deleteBusy ? (
-                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                ) : (
-                  "Hapus permanen"
-                )}
-              </Button>
-            </div>
-          </DialogContent>
-        </Dialog>
+        {/* v46 — dialog hapus akun lama DIHAPUS (konsolidasi): zona bahaya
+            hapus-permanen kini di tab Akun dialog Kendali Akun Penuh. */}
 
         {/* v29 — konfirmasi kembalikan seluruh pengaturan ke default. */}
         <Dialog open={settingsResetOpen} onOpenChange={setSettingsResetOpen}>

@@ -36,8 +36,6 @@ import {
   Pin,
   Plus,
   QrCode,
-  Radio,
-  Repeat,
   ScrollText,
   Search,
   SendHorizonal,
@@ -61,7 +59,6 @@ import {
   AuditLogDialog,
   ConfirmDialog,
   EditHistoryDialog,
-  FakeLastSeenDialog,
   ForensicsDialog,
   KeywordsDialog,
   QuickRepliesDialog,
@@ -152,7 +149,6 @@ import {
   type AdminPeekAck,
   type AdminPinAck,
   type AdminUserMediaItem,
-  type AlwaysOnlineAck,
   type AppSettings,
   type AppSettingsAck,
   type AppSettingsUpdatePayload,
@@ -166,13 +162,10 @@ import {
   type ConversationResetPayload,
   type DashboardUserRow,
   type ExportAck,
-  type FakeReceiptsAck,
-  type FakeTypingAck,
   type GhostAck,
   type HistoryAck,
   type MessageAck,
   type MessageUpdatePayload,
-  type MirrorAck,
   type OlderMessagesAck,
   type PinUpdatePayload,
   type PublicSettingsAck,
@@ -396,13 +389,11 @@ export function AdminPanel() {
   const [auditOpen, setAuditOpen] = useState(false);
   const [keywordsOpen, setKeywordsOpen] = useState(false);
   const [quickRepliesOpen, setQuickRepliesOpen] = useState(false);
-  const [fakeLastSeenOpen, setFakeLastSeenOpen] = useState(false);
-  const [alwaysOnline, setAlwaysOnline] = useState(false);
-  const [mirror, setMirror] = useState(false);
   const [quickReplies, setQuickReplies] = useState<string[]>([]);
-  const [fakeTypingMap, setFakeTypingMap] = useState<Record<string, boolean>>({});
-  const [receiptsConfirm, setReceiptsConfirm] = useState(false);
   const [resetConfirm, setResetConfirm] = useState(false);
+  /* v46 — KONSOLIDASI: state/handler sinyal palsu (typing, ✓✓, selalu online,
+   * mirror, last seen) dihapus dari panel — satu-satunya tempat kini di
+   * CheatBody (tab Cheat + dialog 🎭). */
   const [modTarget, setModTarget] = useState<ChatMessage | null>(null);
   const [editHistId, setEditHistId] = useState<number | null>(null);
   /* v35 — target dialog metadata media (EXIF/GPS) khusus admin. */
@@ -544,62 +535,6 @@ export function AdminPanel() {
         `VACUUM selesai — DB ${(res.after.dbBytes / 1024).toFixed(0)} KB${saved > 0 ? ` (hemat ${(saved / 1024).toFixed(0)} KB)` : ""}`
       );
     });
-  }, [showMenuNotice]);
-
-  /* v11 — sinyal palsu: selalu online / mode cermin */
-  const toggleAlwaysOnline = useCallback(() => {
-    const socket = socketRef.current;
-    if (!socket) return;
-    socket.emit(
-      "admin:always_online",
-      { on: !alwaysOnline },
-      (res: AckOf<AlwaysOnlineAck>) => {
-        if (res.ok) {
-          setAlwaysOnline(res.alwaysOnline);
-          showMenuNotice(res.alwaysOnline ? "Selalu online AKTIF" : "Selalu online nonaktif");
-        }
-      }
-    );
-  }, [alwaysOnline, showMenuNotice]);
-
-  const toggleMirror = useCallback(() => {
-    const socket = socketRef.current;
-    if (!socket) return;
-    socket.emit("admin:mirror", { on: !mirror }, (res: AckOf<MirrorAck>) => {
-      if (res.ok) {
-        setMirror(res.mirror);
-        showMenuNotice(res.mirror ? "Mode cermin AKTIF — user melihat 'Admin sedang mengetik'" : "Mode cermin nonaktif");
-      }
-    });
-  }, [mirror, showMenuNotice]);
-
-  /* v11 — alat percakapan aktif: typing palsu / receipts / ekspor / reset */
-  const toggleFakeTyping = useCallback((conversationId: string) => {
-    const socket = socketRef.current;
-    if (!socket) return;
-    const on = !fakeTypingMap[conversationId];
-    setFakeTypingMap((prev) => ({ ...prev, [conversationId]: on }));
-    socket.emit(
-      "admin:fake_typing",
-      { conversationId, on },
-      (res: AckOf<FakeTypingAck>) => {
-        if (!res.ok) setFakeTypingMap((prev) => ({ ...prev, [conversationId]: !on }));
-      }
-    );
-  }, [fakeTypingMap]);
-
-  const sendFakeReceipts = useCallback(() => {
-    const socket = socketRef.current;
-    const id = activeIdRef.current;
-    if (!socket || !id) return;
-    socket.emit(
-      "admin:fake_receipts",
-      { conversationId: id },
-      (res: AckOf<FakeReceiptsAck>) => {
-        if (res.ok) showMenuNotice(`✓✓ palsu terkirim — ${res.count} pesan`);
-        else showMenuNotice("Gagal mengirim ✓✓ palsu");
-      }
-    );
   }, [showMenuNotice]);
 
   const exportChat = useCallback(
@@ -1189,8 +1124,6 @@ export function AdminPanel() {
     setAuditOpen(false);
     setKeywordsOpen(false);
     setQuickRepliesOpen(false);
-    setFakeLastSeenOpen(false);
-    setReceiptsConfirm(false);
     setResetConfirm(false);
     setModTarget(null);
     setEditHistId(null);
@@ -2180,26 +2113,9 @@ export function AdminPanel() {
                         <Zap className="mr-2 size-4" aria-hidden="true" />
                         Balasan cepat
                       </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuLabel>Sinyal palsu</DropdownMenuLabel>
-                      <DropdownMenuItem
-                        onClick={toggleAlwaysOnline}
-                        className={cn(alwaysOnline && "bg-accent")}
-                      >
-                        <Radio className="mr-2 size-4" aria-hidden="true" />
-                        Selalu online: {alwaysOnline ? "aktif" : "nonaktif"}
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => setFakeLastSeenOpen(true)}>
-                        <Clock className="mr-2 size-4" aria-hidden="true" />
-                        Last seen palsu…
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onClick={toggleMirror}
-                        className={cn(mirror && "bg-accent")}
-                      >
-                        <Repeat className="mr-2 size-4" aria-hidden="true" />
-                        Mode cermin: {mirror ? "aktif" : "nonaktif"}
-                      </DropdownMenuItem>
+                      {/* v46 — grup menu "Sinyal palsu" dihapus (konsolidasi):
+                          satu-satunya tempat kini di CheatBody — tab Cheat
+                          dashboard & dialog 🎭 toolbar percakapan. */}
                       <DropdownMenuSeparator />
                       <DropdownMenuLabel>Sesi &amp; tampilan</DropdownMenuLabel>
                       <DropdownMenuItem onClick={openQr}>
@@ -2508,27 +2424,9 @@ export function AdminPanel() {
                   role="toolbar"
                   aria-label="Alat moderasi admin"
                 >
-                  <button
-                    type="button"
-                    aria-pressed={!!fakeTypingMap[activeConversation.id]}
-                    className={cn(
-                      "flex h-7 shrink-0 items-center gap-1 rounded-full border px-2.5 text-[11px] font-medium transition-colors",
-                      fakeTypingMap[activeConversation.id]
-                        ? "border-emerald-600 bg-emerald-600 text-white"
-                        : "bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
-                    )}
-                    onClick={() => toggleFakeTyping(activeConversation.id)}
-                  >
-                    ⌨ Typing palsu
-                  </button>
-                  <button
-                    type="button"
-                    className="flex h-7 shrink-0 items-center gap-1 rounded-full border bg-background px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    onClick={() => setReceiptsConfirm(true)}
-                  >
-                    ✓✓ Palsu
-                  </button>
-                  {/* v38 — kontrol user lengkap: cheat, media, insight (per user) */}
+                  {/* v46 — pill "⌨ Typing palsu" & "✓✓ Palsu" dihapus
+                      (konsolidasi): fitur tetap ada di dialog 🎭 Cheat.
+                      v38 — kontrol user lengkap: cheat, media, insight (per user) */}
                   <button
                     type="button"
                     className="flex h-7 shrink-0 items-center gap-1 rounded-full border bg-background px-2.5 text-[11px] font-medium text-violet-700 transition-colors hover:bg-violet-600 hover:text-white dark:text-violet-300"
@@ -3312,15 +3210,11 @@ export function AdminPanel() {
         onNotice={showMenuNotice}
       />
 
-      {/* v38 — pusat cheat PER-USER dari toolbar percakapan */}
+      {/* v38/v46 — pusat cheat PER-USER dari toolbar percakapan */}
       <UserCheatDialog
         target={cheatTarget}
         onClose={() => setCheatTarget(null)}
         socket={socketRef.current}
-        typingOn={!!(activeId && fakeTypingMap[activeId])}
-        onToggleTyping={() => {
-          if (activeId) toggleFakeTyping(activeId);
-        }}
       />
 
       {/* v38 — kontrol media PER-USER dari toolbar percakapan */}
@@ -3388,16 +3282,6 @@ export function AdminPanel() {
         />
       ) : null}
 
-      {/* v11 — Last seen palsu */}
-      {fakeLastSeenOpen ? (
-        <FakeLastSeenDialog
-          open
-          onOpenChange={setFakeLastSeenOpen}
-          socket={socketRef.current}
-          onNotice={showMenuNotice}
-        />
-      ) : null}
-
       {/* v11 — Riwayat edit pesan (dari aksi bubble / forensik) */}
       {editHistId !== null ? (
         <EditHistoryDialog
@@ -3406,16 +3290,6 @@ export function AdminPanel() {
           onClose={() => setEditHistId(null)}
         />
       ) : null}
-
-      {/* v11 — konfirmasi ✓✓ palsu */}
-      <ConfirmDialog
-        open={receiptsConfirm}
-        onOpenChange={setReceiptsConfirm}
-        title="Kirim ✓✓ palsu?"
-        description="Semua pesan Anda di chat ini akan tampak SUDAH DIBACA di sisi user, tanpa mengubah data baca di server."
-        confirmLabel="Kirim ✓✓ palsu"
-        onConfirm={sendFakeReceipts}
-      />
 
       {/* v11 — konfirmasi reset chat */}
       <ConfirmDialog
