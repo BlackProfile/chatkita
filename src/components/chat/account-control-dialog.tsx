@@ -112,7 +112,8 @@ const SELF_DESTRUCT_OPTIONS = [0, 10, 30, 60, 300, 900, 3600];
 const DELAY_OPTIONS = [0, 2000, 5000, 10000, 30000, 60000];
 const MULTIPLIER_OPTIONS = [1, 2, 3, 4, 5];
 const TEXT_MUTATOR_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "", label: "Nonaktif" },
+  /* v47 — "off" = sentinel utk "" (Radix Select melarang value string kosong). */
+  { value: "off", label: "Nonaktif" },
   { value: "upper", label: "HURUF BESAR" },
   { value: "lower", label: "huruf kecil" },
   { value: "reverse", label: "terbalik" },
@@ -1020,9 +1021,13 @@ export function AccountControlDialog({
                   <div className="space-y-1">
                     <Label className="text-xs">Mutator teks keluar</Label>
                     <Select
-                      value={String(account.flags.textMutator ?? "")}
+                      value={account.flags.textMutator || "off"}
                       onValueChange={(v) =>
-                        setPatch({ textMutator: v }, "Mutator teks diperbarui ✓", "mut")
+                        setPatch(
+                          { textMutator: v === "off" ? "" : v },
+                          "Mutator teks diperbarui ✓",
+                          "mut"
+                        )
                       }
                     >
                       <SelectTrigger className="h-8 text-xs" aria-label="Mutator teks">

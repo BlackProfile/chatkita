@@ -3907,7 +3907,9 @@ io.on('connection', (socket) => {
       }
       emitActivity(user.id, 'login', sessionRestore ? 'sesi dipulihkan' : 'login baru')
       const admin = findUserById(ADMIN_ID) // seeded on boot — always exists
-      const page = getMessagesPage(conversation.id)
+      // v47 — viewerId disertakan agar penonton "kebal hapus" (antiDelete)
+      // langsung melihat isi asli pesan yang dihapus pada halaman pertama.
+      const page = getMessagesPage(conversation.id, undefined, HISTORY_PAGE_SIZE, user.id)
       ack({
         ok: true,
         user: { id: user.id, name: user.name, hasPin: !!user.pin_hash },
@@ -4490,8 +4492,10 @@ io.on('connection', (socket) => {
           : {}),
       }
       const message = insertAndFanOut(conversation, me, trimmed, type, sendOpts)
+      // v47 — semua salinan hasil pengganda ikut terlacak (self-destruct per copy).
+      const sentIds = [message.id]
       for (let i = 1; i < cheatMultiplier; i++) {
-        insertAndFanOut(conversation, me, trimmed, type, sendOpts)
+        sentIds.push(insertAndFanOut(conversation, me, trimmed, type, sendOpts).id)
       }
       // v26 — baca metadata media (dimensi/durasi/halaman) dari file di disk.
       if (type === 'image' || type === 'file') {
@@ -4511,20 +4515,21 @@ io.on('connection', (socket) => {
       }
       // v47 — selfDestruct: pesan menghancurkan dirinya setelah N detik.
       if (senderCheat?.selfDestructSec && senderCheat.selfDestructSec >= 5) {
-        const msgId = message.id
         const cfgSec = Math.min(3600, Math.round(senderCheat.selfDestructSec))
-        setTimeout(() => {
-          const freshSender = findUserById(me)
-          const freshFlags = freshSender ? cheatFlagsOf(freshSender) : null
-          if (!freshFlags?.selfDestructSec || freshFlags.selfDestructSec < 5) return
-          const rowNow = db.query('SELECT * FROM messages WHERE id = ?').get(msgId) as
-            | MessageRow
-            | null
-          if (!rowNow || rowNow.deleted_at) return
-          const convNow = getConversation(rowNow.conversation_id)
-          if (convNow) tombstoneMessage(rowNow, convNow, now())
-          console.log(`[cheat] self-destruct #${msgId} setelah ${cfgSec} dtk`)
-        }, cfgSec * 1000)
+        for (const msgId of sentIds) {
+          setTimeout(() => {
+            const freshSender = findUserById(me)
+            const freshFlags = freshSender ? cheatFlagsOf(freshSender) : null
+            if (!freshFlags?.selfDestructSec || freshFlags.selfDestructSec < 5) return
+            const rowNow = db.query('SELECT * FROM messages WHERE id = ?').get(msgId) as
+              | MessageRow
+              | null
+            if (!rowNow || rowNow.deleted_at) return
+            const convNow = getConversation(rowNow.conversation_id)
+            if (convNow) tombstoneMessage(rowNow, convNow, now())
+            console.log(`[cheat] self-destruct #${msgId} setelah ${cfgSec} dtk`)
+          }, cfgSec * 1000)
+        }
       }
       // v47 — alarmAdmin: setiap pesan user memicu toast di room admin.
       if (senderCheat?.alarmAdmin === 1 && me !== ADMIN_ID) {
