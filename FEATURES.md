@@ -356,3 +356,20 @@
 - Dialog berstruktur (viewer media, viewer tautan, panel media user, Account 360) tetap memakai tata letak flex internal — bingkai popup tetap, area dalam menyesuaikan.
 - Layar kunci admin (overlay penuh) & menu menempel (popover/picker/dropdown) tidak diubah — bukan popup modal.
 - Skrip: `.zscripts/t65-sweep-popup.ts` (pola sweep untuk pengembangan berikutnya).
+
+---
+
+## v50 — Ganti Nama Tampilan Admin (Task 66)
+
+**Masalah:** nama "Admin" yang tampil pada pengguna (header obrolan, kartu profil) adalah konstanta hardcoded `ADMIN_NAME = 'Admin'` di server — tidak ada UI untuk menggantinya, dan daftar pengguna dashboard menyaring `role='user'` sehingga akun Admin tidak muncul di sana.
+
+**Solusi:**
+- **Server** (`index.ts`, SERVICE_VERSION 'v50'):
+  - Helper `adminName()` — nama tampilan Admin kini **dinamis dari DB** (tabel `users`, baris admin) dengan cache in-memory + `invalidateAdminName()`; fallback ke konstanta bawaan.
+  - Payload yang tadinya memakai konstanta kini dinamis: fallback partner `user:auth`, `originName` teruskan pesan, `senderName` daftar file panel media. Nama pengirim pesan memang selalu JOIN live (`u.name`) sehingga bubble lama otomatis ikut berganti.
+  - `admin:account_set` kini **boleh menarget akun Admin sendiri** asalkan patch hanya `{name}` (patch lain tetap FORBIDDEN); nama "Admin" tetap tidak boleh dipakai USER biasa (NAME_RESERVED), tapi admin boleh kembali ke "Admin".
+  - Broadcast baru **`admin:renamed {name}` ke semua klien** — header obrolan user terbarui live tanpa refresh; `users:changed` tetap untuk room admin.
+- **Klien:**
+  - `AdminPanel.tsx`: **kartu profil sidebar kini bisa diklik** (avatar + nama + ikon pensil) → dialog "Ganti nama saya"; item baru **"Ganti nama saya"** di menu ⋮ Panel aplikasi; nama di kartu dinamis (state `myName`), inisial avatar ikut berganti; listener `admin:renamed` (sinkron antar sesi admin).
+  - `Messenger.tsx` (user): listener `admin:renamed` → perbarui header partner & daftar percakapan live.
+- Verifikasi: verify-integrity segmen v50 (+6 cek; cek versi generik dibuat future-proof `'v`/`rescue-v`).
