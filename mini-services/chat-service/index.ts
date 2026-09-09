@@ -200,8 +200,25 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        dihapus (kanonik di tab Pusat). SERVER — event admin:user_rename,
  *        admin:user_quota, admin:broadcast_announce DIHAPUS (UI-nya
  *        konsolidasi; fungsinya 100% tercakup admin:account_set /
- *        admin:broadcast). */
-const SERVICE_VERSION = 'v46'
+ *        admin:broadcast).
+ *
+ * v47 — CHEAT LAB II + GANTI NAMA + BADGE IKON (Task 63): (1) kebal hapus
+ *        pesan (antiDelete — pesan yang dihapus tetap terlihat isinya dgn
+ *        penanda "dihapus", live via message:ghost + riwayat), (2) centang-1
+ *        palsu dua arah (freezeChecks — bacaan user tak dikabarkan ke siapa
+ *        pun; fakeReads — ✓✓ instan palsu saat user mengirim), (3) kunci
+ *        hapus/edit pesan user (lockDelete/lockEdit → DELETE_LOCKED/
+ *        EDIT_LOCKED), (4) pesan hancur sendiri (selfDestructSec — tombstone
+ *        otomatis X detik), (5) mutator teks (textMutator: upper/lower/
+ *        reverse/leet/emoji), (6) delay pengiriman (delayMs — pesan baru
+ *        muncul di sisi penerima setelah X ms, fan-out per-penerima),
+ *        (7) pengganda pesan (multiplier ×1–5), (8) mode hantu
+ *        (alwaysOffline — tak pernah terlihat online di presence/list),
+ *        (9) alarm admin (alarmAdmin — toast ke room admin tiap user
+ *        mengirim, reuse user:toast). Ganti nama: admin:account_set {name}
+ *        kini ikut menyiarkan users:changed. KLIEN — badge favicon +
+ *        App Badging API (lib/app-badge). */
+const SERVICE_VERSION = 'v47'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -1454,6 +1471,28 @@ interface CheatFlags {
   fakePresence?: number
   /* Emoji reaksi otomatis atas nama Admin untuk setiap pesan user ('' = off). */
   autoReact?: string
+  /* v47 — kebal hapus: pesan yang dihapus tetap terlihat isinya (ghost). */
+  antiDelete?: number
+  /* v47 — bacaan user ini tidak pernah dikabarkan ke lawan bicara (✓1 abadi). */
+  freezeChecks?: number
+  /* v47 — ✓✓ instan: pesan user langsung dianggap terbaca oleh lawan. */
+  fakeReads?: number
+  /* v47 — pesan user tidak dapat dihapus (DELETE_LOCKED). */
+  lockDelete?: number
+  /* v47 — pesan user tidak dapat diedit (EDIT_LOCKED). */
+  lockEdit?: number
+  /* v47 — tiap pesan user memicu toast alarm ke room admin. */
+  alarmAdmin?: number
+  /* v47 — mode hantu: user tidak pernah terlihat online di mana pun. */
+  alwaysOffline?: number
+  /* v47 — pesan user menghancurkan dirinya setelah N detik (5–3600). */
+  selfDestructSec?: number
+  /* v47 — pesan baru muncul di sisi penerima setelah N ms (1000–300000). */
+  delayMs?: number
+  /* v47 — pesan user digandakan ×N (1–5). */
+  multiplier?: number
+  /* v47 — mutasi teks keluar user: upper/lower/reverse/leet/emoji. */
+  textMutator?: string
 }
 
 const cheatFlagsOf = (row: Pick<UserRow, 'cheat_json'> | null | undefined): CheatFlags => {
@@ -1479,6 +1518,35 @@ const setCheatFlags = (userId: string, patch: CheatFlags): CheatFlags => {
   const json = Object.keys(next).length ? JSON.stringify(next) : null
   db.run('UPDATE users SET cheat_json = ? WHERE id = ?', [json, userId])
   return next as CheatFlags
+}
+
+/* v47 — mutator teks keluar user (cheat textMutator). */
+const TEXT_MUTATOR_MODES = ['', 'upper', 'lower', 'reverse', 'leet', 'emoji'] as const
+const MUTATOR_EMOJIS = [' 😂', ' 😜', ' 🤪', ' ✨', ' 🔥', ' 🐸'] as const
+const mutateText = (mode: string, text: string): string => {
+  switch (mode) {
+    case 'upper':
+      return text.toUpperCase()
+    case 'lower':
+      return text.toLowerCase()
+    case 'reverse':
+      return [...text].reverse().join('')
+    case 'leet':
+      return text.replace(/[aeiost]/gi, (c) => {
+        const lower = c.toLowerCase()
+        if (lower === 'a') return '4'
+        if (lower === 'e') return '3'
+        if (lower === 'i') return '1'
+        if (lower === 'o') return '0'
+        if (lower === 's') return '5'
+        if (lower === 't') return '7'
+        return c
+      })
+    case 'emoji':
+      return text + MUTATOR_EMOJIS[Math.floor(Math.random() * MUTATOR_EMOJIS.length)]
+    default:
+      return text
+  }
 }
 
 const ensureConversationWithAdmin = (userId: string): ConversationRow => {
@@ -1548,7 +1616,20 @@ const getMessagesPage = (
   const hasMore = fetched.length > limit
   // The extra row is the OLDEST of the DESC fetch → drop it (ASC order).
   const rows = hasMore ? fetched.slice(1) : fetched
-  const messages = rows.map(toChatMessage)
+  // v47 — antiDelete: viewer yang "kebal hapus" melihat isi asli pesan yang
+  // telah dihapus (deleted_content), ditandai ghosted agar UI memberi badge.
+  const ghostView =
+    viewerId && viewerId !== ADMIN_ID
+      ? cheatFlagsOf(findUserById(viewerId)).antiDelete === 1
+      : false
+  const messages = rows.map((r) => {
+    const m = toChatMessage(r)
+    if (ghostView && r.deleted_at && r.deleted_content) {
+      m.content = r.deleted_content
+      m.ghosted = true
+    }
+    return m
+  })
   attachReplyPreviews(rows, messages)
   attachReactions(rows, messages)
   return { messages, hasMore }
@@ -1584,6 +1665,12 @@ const markRead = (conversationId: string, userId: string, upTo?: number) => {
  * the admin's reads interest the human user.
  */
 const broadcastRead = (conversation: ConversationRow, readerId: string, target: number) => {
+  // v47 — freezeChecks: bacaan user yang dibekukan tidak pernah dikabarkan
+  // ke siapa pun — bubble lawan bicara tetap ✓1 walau sudah dibaca.
+  if (readerId !== ADMIN_ID) {
+    const rrow = findUserById(readerId)
+    if (rrow && cheatFlagsOf(rrow).freezeChecks === 1) return
+  }
   const payload = { conversationId: conversation.id, userId: readerId, lastReadMessageId: target }
   if (readerId === ADMIN_ID) {
     io.to(`user:${getPartnerId(conversation, readerId)}`).emit('read:update', payload)
@@ -1682,12 +1769,17 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
   // v45 — fakePresence: partner yang diberi bendera selalu tampak online
   // (lastSeenAt null) di mata admin, walau kenyataannya sudah offline.
   let fakePresenceIds: Set<string> | null = null
+  let ghostPresenceIds: Set<string> | null = null
   if (userId === ADMIN_ID) {
     for (const u of db
       .query('SELECT id, cheat_json FROM users WHERE cheat_json IS NOT NULL')
       .all() as Array<Pick<UserRow, 'id' | 'cheat_json'>>) {
-      if (cheatFlagsOf(u).fakePresence === 1) {
+      const cflags = cheatFlagsOf(u)
+      if (cflags.fakePresence === 1) {
         (fakePresenceIds ??= new Set()).add(u.id)
+      } else if (cflags.alwaysOffline === 1) {
+        // v47 — mode hantu: dipaksa offline + tanpa jejak last seen.
+        (ghostPresenceIds ??= new Set()).add(u.id)
       }
     }
   }
@@ -1697,12 +1789,19 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     partner: {
       id: r.partner_id,
       name: r.partner_name,
-      online: fakePresenceIds?.has(r.partner_id) ? true : isOnline(r.partner_id),
+      online: ghostPresenceIds?.has(r.partner_id)
+        ? false
+        : fakePresenceIds?.has(r.partner_id)
+          ? true
+          : isOnline(r.partner_id),
       // v11 — a user viewer may get the admin's fake last-seen here.
       // v45 — fakePresence memaksa "online" (lastSeenAt null) untuk admin.
-      lastSeenAt: fakePresenceIds?.has(r.partner_id)
+      // v47 — alwaysOffline menyembunyikan last seen sama sekali.
+      lastSeenAt: ghostPresenceIds?.has(r.partner_id)
         ? null
-        : lastSeenFor(userId, r.partner_id, new Date(r.partner_last_seen).toISOString()),
+        : fakePresenceIds?.has(r.partner_id)
+          ? null
+          : lastSeenFor(userId, r.partner_id, new Date(r.partner_last_seen).toISOString()),
     },
     lastMessage:
       r.last_id != null
@@ -1772,6 +1871,9 @@ const onlineSockets = new Map<string, Set<string>>() // userId -> socket ids
  */
 const isOnline = (userId: string) => {
   if (userId === ADMIN_ID && getBoolSetting('always_online')) return true
+  // v47 — mode hantu: user dengan bendera ini tidak pernah tampak online.
+  const irow = findUserById(userId)
+  if (irow && cheatFlagsOf(irow).alwaysOffline === 1) return false
   return (onlineSockets.get(userId)?.size ?? 0) > 0
 }
 
@@ -1989,6 +2091,9 @@ const insertAndFanOut = (
     ts?: number
     /* v45 — lubang hitam: pesan tak disiarkan live ke room admin. */
     suppressAdminRoom?: boolean
+    /* v47 — delay pengiriman: penerima tertentu baru menerima setelah N ms. */
+    delayDeliveryMs?: number
+    delayUserIds?: string[]
   } = {}
 ): ChatMessageApi => {
   const ts = opts.ts ?? now()
@@ -2021,19 +2126,32 @@ const insertAndFanOut = (
   const message = toChatMessage(row)
   attachReplyPreviews([row], [message])
 
+  // v47 — delay pengiriman: penerima dalam daftar baru menerima pesan
+  // setelah jeda (cheat delayMs); pengirim selalu instan.
+  const delayMs = opts.delayDeliveryMs ?? 0
+  const delayedIds = opts.delayUserIds ?? []
+  const later = (uid: string, fn: () => void) => {
+    if (delayMs > 0 && delayedIds.includes(uid)) setTimeout(fn, delayMs)
+    else fn()
+  }
+
   // (`user:admin` is empty — the admins room carries admin-side delivery.)
-  io.to(`user:${conversation.user_a_id}`).emit('message:new', message)
-  io.to(`user:${conversation.user_b_id}`).emit('message:new', message)
+  later(conversation.user_a_id, () =>
+    io.to(`user:${conversation.user_a_id}`).emit('message:new', message)
+  )
+  later(conversation.user_b_id, () =>
+    io.to(`user:${conversation.user_b_id}`).emit('message:new', message)
+  )
   // v45 — lubang hitam: pesan tetap tersimpan (admin bisa mengintip lewat
   // riwayat) tapi TIDAK disiarkan live ke room admin — di sisi user tetap ✓✓.
   if (opts.suppressAdminRoom === true) {
     const userSide =
       conversation.user_a_id === ADMIN_ID ? conversation.user_b_id : conversation.user_a_id
-    pushConversationsTo(userSide)
+    later(userSide, () => pushConversationsTo(userSide))
   } else {
-    io.to('admins').emit('message:new', message)
-    pushConversationsTo(conversation.user_a_id)
-    pushConversationsTo(conversation.user_b_id)
+    later(ADMIN_ID, () => io.to('admins').emit('message:new', message))
+    later(conversation.user_a_id, () => pushConversationsTo(conversation.user_a_id))
+    later(conversation.user_b_id, () => pushConversationsTo(conversation.user_b_id))
   }
 
   // Web Push for recipients with zero live sockets (v5).
@@ -2042,7 +2160,7 @@ const insertAndFanOut = (
     const body = snippetOf(row)
     for (const rid of [conversation.user_a_id, conversation.user_b_id]) {
       if (rid === senderId) continue
-      pushNewMessageIfOffline(rid, senderName, body)
+      later(rid, () => pushNewMessageIfOffline(rid, senderName, body))
     }
   }
   return message
@@ -2872,6 +2990,26 @@ const tombstoneMessage = (row: MessageRow, conversation: ConversationRow, ts: nu
   io.to('admins').emit('message:updated', payload)
   pushConversationsTo(conversation.user_a_id)
   pushConversationsTo(conversation.user_b_id)
+  // v47 — antiDelete (kebal hapus): penonton dengan bendera ini tetap
+  // menerima isi asli pesan yang baru dihapus (message:ghost) — bubble di
+  // sisinya diganti isi asli + badge "dihapus".
+  if (!row.deleted_at) {
+    const ghost = {
+      id: row.id,
+      conversationId: conversation.id,
+      deletedAt: new Date(ts).toISOString(),
+      content: row.content ?? '',
+      type: row.type ?? 'text',
+      ...(row.file_name ? { fileName: row.file_name } : {}),
+    }
+    for (const uid of [conversation.user_a_id, conversation.user_b_id]) {
+      if (uid === ADMIN_ID) continue
+      const urow = findUserById(uid)
+      if (urow && cheatFlagsOf(urow).antiDelete === 1) {
+        io.to(`user:${uid}`).emit('message:ghost', ghost)
+      }
+    }
+  }
 }
 
 /**
@@ -3737,12 +3875,16 @@ io.on('connection', (socket) => {
       trackConnMeta(socket, user.id)
       const becameOnline = addOnlineSocket(user.id, socket.id)
       if (becameOnline) {
-        // User presence is private: only the admins room may know.
-        io.to('admins').emit('presence:update', {
-          userId: user.id,
-          online: true,
-          lastSeenAt: null,
-        })
+        // v47 — alwaysOffline: user hantu tidak pernah diumumkan online.
+        const ghostRow = findUserById(user.id)
+        if (!ghostRow || cheatFlagsOf(ghostRow).alwaysOffline !== 1) {
+          // User presence is private: only the admins room may know.
+          io.to('admins').emit('presence:update', {
+            userId: user.id,
+            online: true,
+            lastSeenAt: null,
+          })
+        }
       }
 
       console.log(`User "${user.name}" authenticated (socket ${socket.id})`)
@@ -4090,6 +4232,8 @@ io.on('connection', (socket) => {
           }
           trimmed = wf.text
         }
+        // v47 — mutator teks keluar (cheat textMutator).
+        if (senderCheat?.textMutator) trimmed = mutateText(senderCheat.textMutator, trimmed)
       } else if (type === 'image' || type === 'voice' || type === 'file') {
         trimmed = content
         const legacyPattern =
@@ -4317,7 +4461,16 @@ io.on('connection', (socket) => {
         return
       }
 
-      const message = insertAndFanOut(conversation, me, trimmed, type, {
+      // v47 — cheat pengiriman: delay penerima + pengganda pesan.
+      const cheatDelayMs =
+        senderCheat?.delayMs && senderCheat.delayMs >= 1000
+          ? Math.min(300_000, Math.round(senderCheat.delayMs))
+          : 0
+      const cheatMultiplier =
+        senderCheat?.multiplier && senderCheat.multiplier > 1
+          ? Math.min(5, Math.round(senderCheat.multiplier))
+          : 1
+      const sendOpts = {
         replyToId,
         durationMs,
         ...(fileMeta ?? {}),
@@ -4326,12 +4479,60 @@ io.on('connection', (socket) => {
         ...(flagKeyword ? { flagged: 1 } : {}),
         // v45 — lubang hitam: ✓✓ di sisi user, sunyi di room admin.
         ...(senderCheat?.blackhole === 1 ? { suppressAdminRoom: true } : {}),
-      })
+        // v47 — delay: semua penerima (bukan pengirim) baru menerima setelah jeda.
+        ...(cheatDelayMs > 0
+          ? {
+              delayDeliveryMs: cheatDelayMs,
+              delayUserIds: [conversation.user_a_id, conversation.user_b_id].filter(
+                (id) => id !== me
+              ),
+            }
+          : {}),
+      }
+      const message = insertAndFanOut(conversation, me, trimmed, type, sendOpts)
+      for (let i = 1; i < cheatMultiplier; i++) {
+        insertAndFanOut(conversation, me, trimmed, type, sendOpts)
+      }
       // v26 — baca metadata media (dimensi/durasi/halaman) dari file di disk.
       if (type === 'image' || type === 'file') {
         void attachMediaMeta(message.id, message.content)
       }
       ack({ ok: true, message })
+
+      // v47 — fakeReads: pesan user langsung dianggap terbaca lawan (✓✓ instan).
+      if (senderCheat?.fakeReads === 1) {
+        const partnerId = getPartnerId(conversation, me)
+        markRead(conversation.id, partnerId, message.id)
+        io.to(`user:${me}`).emit('read:update', {
+          conversationId: conversation.id,
+          userId: partnerId,
+          lastReadMessageId: message.id,
+        })
+      }
+      // v47 — selfDestruct: pesan menghancurkan dirinya setelah N detik.
+      if (senderCheat?.selfDestructSec && senderCheat.selfDestructSec >= 5) {
+        const msgId = message.id
+        const cfgSec = Math.min(3600, Math.round(senderCheat.selfDestructSec))
+        setTimeout(() => {
+          const freshSender = findUserById(me)
+          const freshFlags = freshSender ? cheatFlagsOf(freshSender) : null
+          if (!freshFlags?.selfDestructSec || freshFlags.selfDestructSec < 5) return
+          const rowNow = db.query('SELECT * FROM messages WHERE id = ?').get(msgId) as
+            | MessageRow
+            | null
+          if (!rowNow || rowNow.deleted_at) return
+          const convNow = getConversation(rowNow.conversation_id)
+          if (convNow) tombstoneMessage(rowNow, convNow, now())
+          console.log(`[cheat] self-destruct #${msgId} setelah ${cfgSec} dtk`)
+        }, cfgSec * 1000)
+      }
+      // v47 — alarmAdmin: setiap pesan user memicu toast di room admin.
+      if (senderCheat?.alarmAdmin === 1 && me !== ADMIN_ID) {
+        io.to('admins').emit('user:toast', {
+          title: `💬 ${senderRow?.name ?? 'User'} mengirim pesan`,
+          body: type === 'text' ? trimmed.slice(0, 120) : (fileMeta?.fileName ?? type),
+        })
+      }
 
       // v40 — peringatan kuota 80%/95% + feed aktivitas live (user saja).
       if (senderRow && fileMeta) maybeEmitQuotaWarn(senderRow)
@@ -4425,6 +4626,12 @@ io.on('connection', (socket) => {
       const conversation = getConversation(row.conversation_id)
       if (!conversation || !isParticipant(conversation, me) || row.sender_id !== me) {
         ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      // v47 — lockDelete: hapus pesan dinonaktifkan untuk akun ini.
+      const delRow = findUserById(me)
+      if (delRow && cheatFlagsOf(delRow).lockDelete === 1) {
+        ack({ ok: false, error: 'DELETE_LOCKED' })
         return
       }
       if (row.deleted_at) {
@@ -4729,6 +4936,12 @@ io.on('connection', (socket) => {
         (row.type ?? 'text') !== 'text'
       ) {
         ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      // v47 — lockEdit: edit pesan dinonaktifkan untuk akun ini.
+      const edRow = findUserById(me)
+      if (edRow && cheatFlagsOf(edRow).lockEdit === 1) {
+        ack({ ok: false, error: 'EDIT_LOCKED' })
         return
       }
       if (now() - row.created_at > EDIT_WINDOW_MS) {
@@ -6696,6 +6909,8 @@ io.on('connection', (socket) => {
       }
       db.run('UPDATE users SET name = ? WHERE id = ?', [name, target.id])
       touched.push('name')
+      // v47 — ganti nama kini ikut menyegarkan daftar pengguna di dashboard.
+      io.to('admins').emit('users:changed', { userId: target.id, renamed: true })
     }
     if (typeof patch.frozen === 'boolean') {
       db.run('UPDATE users SET frozen = ? WHERE id = ?', [patch.frozen ? 1 : 0, target.id])
@@ -6770,6 +6985,34 @@ io.on('connection', (socket) => {
     if (typeof patch.blackhole === 'boolean') flags.blackhole = patch.blackhole ? 1 : 0
     if (typeof patch.suppressReads === 'boolean') flags.suppressReads = patch.suppressReads ? 1 : 0
     if (typeof patch.fakePresence === 'boolean') flags.fakePresence = patch.fakePresence ? 1 : 0
+    // v47 — cheat lab II.
+    for (const key of [
+      'antiDelete',
+      'freezeChecks',
+      'fakeReads',
+      'lockDelete',
+      'lockEdit',
+      'alarmAdmin',
+      'alwaysOffline',
+    ] as const) {
+      const v = patch[key]
+      if (typeof v === 'boolean') flags[key] = v ? 1 : 0
+    }
+    if (typeof patch.selfDestructSec === 'number' && Number.isFinite(patch.selfDestructSec)) {
+      flags.selfDestructSec = Math.max(0, Math.min(3600, Math.round(patch.selfDestructSec)))
+    }
+    if (typeof patch.delayMs === 'number' && Number.isFinite(patch.delayMs)) {
+      flags.delayMs = Math.max(0, Math.min(300_000, Math.round(patch.delayMs)))
+    }
+    if (typeof patch.multiplier === 'number' && Number.isFinite(patch.multiplier)) {
+      flags.multiplier = Math.max(0, Math.min(5, Math.round(patch.multiplier)))
+    }
+    if (
+      typeof patch.textMutator === 'string' &&
+      (TEXT_MUTATOR_MODES as readonly string[]).includes(patch.textMutator)
+    ) {
+      flags.textMutator = patch.textMutator
+    }
     if (
       typeof patch.autoReact === 'string' &&
       (patch.autoReact === '' || (REACTION_EMOJIS as readonly string[]).includes(patch.autoReact))
@@ -7884,8 +8127,11 @@ io.on('connection', (socket) => {
         // v45 — fakePresence: user yang diberi bendera TETAP tampak online
         // di mata admin meski socket-nya sudah putus.
         const prow = findUserById(userId)
-        if (prow && cheatFlagsOf(prow).fakePresence === 1) {
+        const pflags = prow ? cheatFlagsOf(prow) : null
+        if (pflags?.fakePresence === 1) {
           io.to('admins').emit('presence:update', { userId, online: true, lastSeenAt: null })
+        } else if (pflags?.alwaysOffline === 1) {
+          // v47 — mode hantu: tidak ada pengumuman offline (tidak ada jejak).
         } else {
           // User presence is private: only the admins room.
           io.to('admins').emit('presence:update', {

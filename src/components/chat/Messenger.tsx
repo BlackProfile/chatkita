@@ -115,7 +115,9 @@ import {
   type UserRestrictedPayload,
   type UserToastPayload,
   type UserSetPasswordAck,
+  type GhostMessagePayload,
 } from "@/lib/chat-types";
+import { applyAppBadge } from "@/lib/app-badge";
 import {
   avatarColorClass,
   canEditMessage,
@@ -906,6 +908,19 @@ export function Messenger() {
       setMessages((prev) => prev.filter((m) => m.id !== p.id));
     });
 
+    // v47 — antiDelete (kebal hapus): isi asli pesan yang dihapus tetap
+    // tampil di bubble (ditandai ghosted) untuk penonton dengan cheat ini.
+    socket.on("message:ghost", (g: GhostMessagePayload) => {
+      if (!g || typeof g.id !== "number") return;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === g.id
+            ? { ...m, content: g.content, deletedAt: g.deletedAt, ghosted: true }
+            : m
+        )
+      );
+    });
+
     // Live ✓✓: the admin read up to `lastReadMessageId`.
     socket.on(
       "read:update",
@@ -999,6 +1014,8 @@ export function Messenger() {
   /* v22 — badge unread di judul tab: "(n) ChatKita" selama ada backlog. */
   useEffect(() => {
     document.title = unread > 0 ? `(${unread}) ChatKita` : "ChatKita — Chat Sederhana";
+    // v47 — badge notifikasi di ikon aplikasi (favicon + App Badging API).
+    applyAppBadge(unread);
   }, [unread]);
 
   /* v28 — cek nama pre-login (debounce 300 ms): akun sudah ada → sembunyikan
@@ -1277,7 +1294,12 @@ export function Messenger() {
         "message:edit",
         { messageId: target.id, content },
         (res: AckOf<{ ok: true }>) => {
-          if (!res.ok) setSendError(true);
+          if (!res.ok) {
+            setSendError(true);
+            if ((res as { error?: string }).error === "EDIT_LOCKED") {
+              setSendErrorDetail("Admin mengunci pengeditan pesan untuk akun ini.");
+            }
+          }
         }
       );
       setEditing(null);
@@ -1685,7 +1707,18 @@ export function Messenger() {
   };
 
   const handleDelete = (msg: ChatMessage) => {
-    socketRef.current?.emit("messages:delete", { messageId: msg.id });
+    socketRef.current?.emit(
+      "messages:delete",
+      { messageId: msg.id },
+      (res: AckOf<{ ok: true }>) => {
+        // v47 — lockDelete: admin dapat melarang user menghapus pesan.
+        if (res && typeof res === "object" && !(res as { ok?: boolean }).ok) {
+          if ((res as { error?: string }).error === "DELETE_LOCKED") {
+            toast.error("🔒 Penghapusan pesan dinonaktifkan admin untuk akun ini.");
+          }
+        }
+      }
+    );
   };
 
   const handleInputChange = (value: string) => {
@@ -2381,6 +2414,7 @@ export function Messenger() {
                   side={m.senderId === me.userId ? "right" : "left"}
                   type={m.type}
                   deleted={!!m.deletedAt}
+                  ghosted={!!m.ghosted}
                   fileName={m.fileName}
                   fileSize={m.fileSize}
                   mimeType={m.mimeType}

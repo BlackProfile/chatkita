@@ -175,6 +175,18 @@ export interface ChatMessage {
   forwardedFrom?: string;
   /** v40 — true saat pesan menunggu persetujuan admin (moderasi pra-kirim). */
   pending?: boolean;
+  /** v47 — isi asli pesan yang telah dihapus (cheat antiDelete). */
+  ghosted?: boolean;
+}
+
+/** v47 — isi asli pesan yang dihapus, dikirim ke penonton "kebal hapus". */
+export interface GhostMessagePayload {
+  id: number;
+  conversationId: string;
+  deletedAt: string;
+  content: string;
+  type: MessageContentType;
+  fileName?: string;
 }
 
 /** A chat partner including live presence info. */
@@ -472,6 +484,18 @@ export interface AdminCheatFlags {
   suppressReads?: number;
   fakePresence?: number;
   autoReact?: string;
+  /* v47 — cheat lab II. */
+  antiDelete?: number;
+  freezeChecks?: number;
+  fakeReads?: number;
+  lockDelete?: number;
+  lockEdit?: number;
+  alarmAdmin?: number;
+  alwaysOffline?: number;
+  selfDestructSec?: number;
+  delayMs?: number;
+  multiplier?: number;
+  textMutator?: string;
 }
 
 /** Profil akun penuh satu user (admin:account_get). */
@@ -529,6 +553,18 @@ export interface AdminAccountSetPayload {
   suppressReads?: boolean;
   fakePresence?: boolean;
   autoReact?: string;
+  /* v47 — cheat lab II. */
+  antiDelete?: boolean;
+  freezeChecks?: boolean;
+  fakeReads?: boolean;
+  lockDelete?: boolean;
+  lockEdit?: boolean;
+  alarmAdmin?: boolean;
+  alwaysOffline?: boolean;
+  selfDestructSec?: number;
+  delayMs?: number;
+  multiplier?: number;
+  textMutator?: string;
 }
 
 export interface AdminAccountSetAck {
@@ -560,7 +596,7 @@ export interface AdminMediaGalleryAck {
 
 export interface AdminInjectMediaAck {
   ok: true;
-  message: ChatMessageApi;
+  message: ChatMessage;
 }
 
 export interface AdminCheatFloodAck {
@@ -1250,7 +1286,7 @@ export interface AdminQuickReplyAck {
 /** v40 — ack `admin:quick_send` — template terkirim sebagai Admin. */
 export interface AdminQuickSendAck {
   ok: true;
-  message: ChatMessageApi;
+  message: ChatMessage;
 }
 
 /** v40 — ack `admin:user_nudge` — pengingat otomatis dikonfigurasi. */

@@ -4,14 +4,18 @@
  * v45 — Kendali Akun Penuh (Account 360) + Cheat Lab.
  * v46 — KONSOLIDASI: dialog ini kini SATU-SATUNYA pintu kendali per-user.
  *  - Tab Akun     : admin:account_get/set/password/delete (catatan pindah ke
- *                   Moderasi — ditulis via admin:user_note, sekalian tag).
- *  - Tab Moderasi : pembatasan cepat (freeze/mute/slowmode/mediablock/kick —
+ *                   Moderasi — ditulis via admin:user_note, sekalian tag)
+ *                   + Perangkat & Sesi (force logout + lepas kunci, v47
+ *                   pindahan dropdown dashboard & panel v40).
+ *  - Tab Moderasi : pembatasan cepat (freeze/mute/slowmode/mediablock —
  *                   event terbukti v11 yang mem-push user:restricted), bot
  *                   balasan (pindahan X-Ray v39, kini via admin:account_set),
  *                   + embedded UserControlsV40 (pindahan panel inline X-Ray).
  *  - Tab Ilusi    : flags (blackhole/suppressReads/fakePresence/autoReact),
  *                   notify_user + push custom (pindahan X-Ray), inject media,
- *                   flood.
+ *                   flood, + CHEAT LAB II (v47): kebal hapus, bekukan ✓✓,
+ *                   ✓✓ instan, kunci hapus/edit, hancur-sendiri, mutator teks,
+ *                   delay pengiriman, pengganda, mode hantu, alarm admin.
  *  - Tab Massal   : retro_replace, time_shift, delete_keyword, + hapus semua
  *                   pesan user (pindahan X-Ray v39).
  *  - Tab Siaran   : DIHAPUS — duplikat tab "Siaran" di Dashboard Aplikasi.
@@ -24,12 +28,16 @@ import {
   BellRing,
   Bot,
   CircleOff,
+  Copy,
   EyeOff,
   Loader2,
   LogOut,
+  Pencil,
   Paperclip,
   RadioTower,
   ShieldBan,
+  ShieldX,
+  Smartphone,
   Timer,
   Trash2,
   UserCog,
@@ -76,6 +84,7 @@ import type {
   AdminCheatFloodAck,
   AdminCheatFloodStopAck,
   AdminDeleteKeywordAck,
+  AdminForceLogoutAck,
   AdminInjectMediaAck,
   AdminMediaGalleryAck,
   AdminMediaGalleryItem,
@@ -83,8 +92,8 @@ import type {
   AdminPushAck,
   AdminRetroReplaceAck,
   AdminTimeShiftAck,
+  AdminUnbindDevicesAck,
   FreezeAck,
-  KickAck,
   MediaBlockAck,
   MuteAck,
   SlowModeAck,
@@ -98,6 +107,18 @@ const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 const MUTE_OPTIONS = [0, 5, 30, 60];
 const SLOW_OPTIONS = [0, 1, 2, 3, 5, 10];
 const BOT_DELAY_OPTIONS = [0, 3, 10, 30, 60];
+/* v47 — cheat lab II: pilihan numerik. */
+const SELF_DESTRUCT_OPTIONS = [0, 10, 30, 60, 300, 900, 3600];
+const DELAY_OPTIONS = [0, 2000, 5000, 10000, 30000, 60000];
+const MULTIPLIER_OPTIONS = [1, 2, 3, 4, 5];
+const TEXT_MUTATOR_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "", label: "Nonaktif" },
+  { value: "upper", label: "HURUF BESAR" },
+  { value: "lower", label: "huruf kecil" },
+  { value: "reverse", label: "terbalik" },
+  { value: "leet", label: "1337 5p34k" },
+  { value: "emoji", label: "emoji acak 😜" },
+];
 
 const mediaTypeLabel = (name: string): string => {
   const ext = name.toLowerCase().split(".").pop() ?? "";
@@ -176,8 +197,10 @@ export function AccountControlDialog({
   // konfirmasi destruktif
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmFreeze, setConfirmFreeze] = useState(false);
-  const [confirmKick, setConfirmKick] = useState(false);
   const [confirmBulk, setConfirmBulk] = useState(false);
+  // v47 — konfirmasi perangkat & sesi (pindahan dropdown/panel v40)
+  const [confirmLogout, setConfirmLogout] = useState(false);
+  const [confirmUnbind, setConfirmUnbind] = useState(false);
 
   const load = () => {
     if (!socket?.connected || !userId) return;
@@ -206,8 +229,9 @@ export function AccountControlDialog({
       setNewPassword("");
       setConfirmDelete(false);
       setConfirmFreeze(false);
-      setConfirmKick(false);
       setConfirmBulk(false);
+      setConfirmLogout(false);
+      setConfirmUnbind(false);
     }
     onOpenChange(v);
   };
@@ -365,15 +389,41 @@ export function AccountControlDialog({
     });
   };
 
-  const doKick = () => {
+  /* ------- v47 — Perangkat & sesi (pindahan dropdown dashboard + panel v40) ------- */
+
+  const doForceLogout = () => {
     if (!socket?.connected) return;
-    setBusy("kick");
-    socket.emit("admin:kick", { userId }, (res: AckOf<KickAck>) => {
-      setBusy(null);
-      setConfirmKick(false);
-      if (res.ok) onNotice?.(`${userName} dikeluarkan (${res.sockets} socket)`);
-      else toast.error("Gagal memaksa keluar");
-    });
+    setBusy("logout");
+    socket.emit(
+      "admin:user_force_logout",
+      { userId },
+      (res: AckOf<AdminForceLogoutAck>) => {
+        setBusy(null);
+        setConfirmLogout(false);
+        if (res.ok) {
+          toast.success(`Semua perangkat ${userName} dipaksa logout ✓`);
+          load();
+          onChanged?.();
+        } else toast.error("Gagal memaksa logout");
+      }
+    );
+  };
+
+  const doUnbindDevices = () => {
+    if (!socket?.connected) return;
+    setBusy("unbind");
+    socket.emit(
+      "admin:user_unbind_devices",
+      { userId },
+      (res: AckOf<AdminUnbindDevicesAck>) => {
+        setBusy(null);
+        setConfirmUnbind(false);
+        if (res.ok) {
+          toast.success(`Semua kunci perangkat ${userName} dilepas ✓`);
+          load();
+        } else toast.error("Gagal melepas kunci perangkat");
+      }
+    );
   };
 
   /** v39 pindahan X-Ray — tombstone SEMUA pesan hidup milik user. */
@@ -534,7 +584,20 @@ export function AccountControlDialog({
   const flag = (key: keyof AdminCheatFlags): boolean =>
     key === "autoReact" ? false : Number(account?.flags?.[key] ?? 0) === 1;
 
-  const toggleFlag = (key: "blackhole" | "suppressReads" | "fakePresence", label: string) => {
+  const toggleFlag = (
+    key:
+      | "blackhole"
+      | "suppressReads"
+      | "fakePresence"
+      | "antiDelete"
+      | "freezeChecks"
+      | "fakeReads"
+      | "lockDelete"
+      | "lockEdit"
+      | "alarmAdmin"
+      | "alwaysOffline",
+    label: string
+  ) => {
     if (!account) return;
     const next = !flag(key);
     setPatch({ [key]: next } as AdminAccountSetPayload, `${label} ${next ? "AKTIF" : "MATI"} ✓`, `flag-${key}`);
@@ -611,6 +674,33 @@ export function AccountControlDialog({
                 <div className="space-y-1">
                   <Label className="text-xs">Kuota media khusus (MiB, 0 = default 250)</Label>
                   <Input value={quotaMb} onChange={(e) => setQuotaMb(e.target.value)} inputMode="numeric" className="h-8 text-xs" />
+                </div>
+
+                {/* v47 — Perangkat & sesi: satu tempat untuk semua aksi sesi
+                    (pindahan dropdown dashboard + panel v40). */}
+                <div className="space-y-1.5 rounded-lg border p-2.5">
+                  <p className="flex items-center gap-1.5 text-xs font-semibold">
+                    <Smartphone className="size-3.5" aria-hidden="true" /> Perangkat &amp; sesi
+                    <Badge variant="outline" className="ml-1">{account.devices} aktif</Badge>
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 w-full"
+                    disabled={busy === "logout"}
+                    onClick={() => setConfirmLogout(true)}
+                  >
+                    <LogOut className="size-3.5" aria-hidden="true" /> Paksa logout semua perangkat
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 w-full"
+                    disabled={busy === "unbind"}
+                    onClick={() => setConfirmUnbind(true)}
+                  >
+                    <ShieldX className="size-3.5" aria-hidden="true" /> Lepas kunci perangkat
+                  </Button>
                 </div>
 
                 <div className="rounded-lg border border-rose-200 bg-rose-50 p-2.5 dark:border-rose-900 dark:bg-rose-950/40">
@@ -695,15 +785,6 @@ export function AccountControlDialog({
                       aria-label="Blokir media"
                     />
                   </div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-8 w-full text-destructive hover:text-destructive"
-                    disabled={busy === "kick"}
-                    onClick={() => setConfirmKick(true)}
-                  >
-                    <LogOut className="size-3.5" aria-hidden="true" /> Paksa keluar semua perangkat
-                  </Button>
                 </div>
 
                 {/* Bot balasan — pindahan X-Ray v39, kini via account_set. */}
@@ -797,6 +878,169 @@ export function AccountControlDialog({
                     <Switch checked={flag("fakePresence")} onCheckedChange={() => toggleFlag("fakePresence", "Ilusi online")} aria-label="Ilusi selalu online" />
                   </div>
                 </div>
+
+                {/* v47 — CHEAT LAB II */}
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Cheat lab II — v47</p>
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="flex items-center gap-1.5 text-xs font-semibold">
+                        <Copy className="size-3.5" aria-hidden="true" /> Kebal hapus pesan
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">Pesan yang dihapus tetap terlihat isinya di sisi user ini, lengkap dengan badge "dihapus".</p>
+                    </div>
+                    <Switch checked={flag("antiDelete")} onCheckedChange={() => toggleFlag("antiDelete", "Kebal hapus pesan")} aria-label="Kebal hapus pesan" />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="flex items-center gap-1.5 text-xs font-semibold">
+                        <EyeOff className="size-3.5" aria-hidden="true" /> Bekukan ✓✓ user (centang 1 abadi)
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">Bacaan user ini tidak pernah dikabarkan — pesan lawan bicara tetap centang 1 walau sudah dibaca.</p>
+                    </div>
+                    <Switch checked={flag("freezeChecks")} onCheckedChange={() => toggleFlag("freezeChecks", "Bekukan ✓✓ user")} aria-label="Bekukan centang dua" />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="flex items-center gap-1.5 text-xs font-semibold">
+                        <RadioTower className="size-3.5" aria-hidden="true" /> ✓✓ instan (ilusi terbaca)
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">Setiap pesan user ini langsung bercentang dua seolah langsung dibaca lawan bicara.</p>
+                    </div>
+                    <Switch checked={flag("fakeReads")} onCheckedChange={() => toggleFlag("fakeReads", "✓✓ instan")} aria-label="Centang dua instan" />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="flex items-center gap-1.5 text-xs font-semibold">
+                        <Trash2 className="size-3.5" aria-hidden="true" /> Kunci hapus pesan
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">User ini tidak dapat menghapus pesannya sendiri (DELETE_LOCKED).</p>
+                    </div>
+                    <Switch checked={flag("lockDelete")} onCheckedChange={() => toggleFlag("lockDelete", "Kunci hapus pesan")} aria-label="Kunci hapus pesan" />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="flex items-center gap-1.5 text-xs font-semibold">
+                        <Pencil className="size-3.5" aria-hidden="true" /> Kunci edit pesan
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">User ini tidak dapat mengedit pesannya sendiri (EDIT_LOCKED).</p>
+                    </div>
+                    <Switch checked={flag("lockEdit")} onCheckedChange={() => toggleFlag("lockEdit", "Kunci edit pesan")} aria-label="Kunci edit pesan" />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="flex items-center gap-1.5 text-xs font-semibold">
+                        <BellRing className="size-3.5" aria-hidden="true" /> Alarm admin
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">Setiap pesan dari user ini memicu toast alarm di panel admin.</p>
+                    </div>
+                    <Switch checked={flag("alarmAdmin")} onCheckedChange={() => toggleFlag("alarmAdmin", "Alarm admin")} aria-label="Alarm admin" />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="flex items-center gap-1.5 text-xs font-semibold">
+                        <CircleOff className="size-3.5" aria-hidden="true" /> Mode hantu
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">User ini tidak pernah terlihat online dan tanpa jejak last seen di mana pun.</p>
+                    </div>
+                    <Switch checked={flag("alwaysOffline")} onCheckedChange={() => toggleFlag("alwaysOffline", "Mode hantu")} aria-label="Mode hantu" />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <div className="space-y-1">
+                    <Label className="text-xs">Hancur sendiri (per pesan)</Label>
+                    <Select
+                      value={String(account.flags.selfDestructSec ?? 0)}
+                      onValueChange={(v) =>
+                        setPatch({ selfDestructSec: Number(v) }, "Hancur sendiri diperbarui ✓", "sd")
+                      }
+                    >
+                      <SelectTrigger className="h-8 text-xs" aria-label="Durasi hancur sendiri">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {SELF_DESTRUCT_OPTIONS.map((s) => (
+                          <SelectItem key={s} value={String(s)} className="text-xs">
+                            {s === 0 ? "Nonaktif" : s >= 60 ? `${Math.round(s / 60)} menit` : `${s} detik`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-xs">Delay pengiriman</Label>
+                    <Select
+                      value={String(account.flags.delayMs ?? 0)}
+                      onValueChange={(v) =>
+                        setPatch({ delayMs: Number(v) }, "Delay pengiriman diperbarui ✓", "dly")
+                      }
+                    >
+                      <SelectTrigger className="h-8 text-xs" aria-label="Delay pengiriman">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {DELAY_OPTIONS.map((s) => (
+                          <SelectItem key={s} value={String(s)} className="text-xs">
+                            {s === 0 ? "Nonaktif" : `${Math.round(s / 1000)} detik`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-xs">Pengganda pesan</Label>
+                    <Select
+                      value={String(account.flags.multiplier ?? 1)}
+                      onValueChange={(v) =>
+                        setPatch({ multiplier: Number(v) }, "Pengganda pesan diperbarui ✓", "mlt")
+                      }
+                    >
+                      <SelectTrigger className="h-8 text-xs" aria-label="Pengganda pesan">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {MULTIPLIER_OPTIONS.map((s) => (
+                          <SelectItem key={s} value={String(s)} className="text-xs">
+                            {s === 1 ? "×1 (normal)" : `×${s} (digandakan)`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-xs">Mutator teks keluar</Label>
+                    <Select
+                      value={String(account.flags.textMutator ?? "")}
+                      onValueChange={(v) =>
+                        setPatch({ textMutator: v }, "Mutator teks diperbarui ✓", "mut")
+                      }
+                    >
+                      <SelectTrigger className="h-8 text-xs" aria-label="Mutator teks">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {TEXT_MUTATOR_OPTIONS.map((o) => (
+                          <SelectItem key={o.value} value={o.value} className="text-xs">
+                            {o.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                <p className="text-[10px] leading-snug text-muted-foreground">
+                  Catatan: delay &amp; pengganda mengubah pengiriman pesan baru user ini (pesan lama tidak terpengaruh). Hancur-sendiri aktif untuk pesan berikutnya (min. 5 detik).
+                </p>
 
                 <div className="space-y-1.5">
                   <Label className="text-xs">Auto-react Admin (emoji otomatis ke tiap pesan user)</Label>
@@ -994,10 +1238,8 @@ export function AccountControlDialog({
                 </div>
 
                 <div className="rounded-lg border p-2.5 text-[11px] text-muted-foreground">
-                  <Badge variant="outline" className="mb-1">v46</Badge>
-                  <p>Konsolidasi: semua kendali per-user kini di dialog ini — catatan/tag, bot, push,
-                  dan hapus massal dipindah dari panel X-Ray; tab Siaran digabung ke tab Siaran
-                  Dashboard; cheat gabung dengan Pusat Cheat.</p>
+                  <Badge variant="outline" className="mb-1">v47</Badge>
+                  <p>Cheat lab II aktif di tab Ilusi (kebal hapus, bekukan ✓✓, kunci hapus/edit, hancur-sendiri, mutator teks, delay, pengganda, mode hantu, alarm admin) + perangkat &amp; sesi kini di tab Akun.</p>
                 </div>
               </TabsContent>
             </Tabs>
@@ -1024,15 +1266,6 @@ export function AccountControlDialog({
         onConfirm={() => doFreeze(true)}
       />
       <ConfirmDialog
-        open={confirmKick}
-        onOpenChange={setConfirmKick}
-        title="Paksa keluar?"
-        description={`${userName} akan diputus dari server (auto-reconnect).`}
-        confirmLabel="Ya, keluarkan"
-        destructive
-        onConfirm={doKick}
-      />
-      <ConfirmDialog
         open={confirmBulk}
         onOpenChange={setConfirmBulk}
         title={`Hapus semua pesan ${userName}?`}
@@ -1040,6 +1273,24 @@ export function AccountControlDialog({
         confirmLabel="Ya, hapus semua"
         destructive
         onConfirm={doBulkDelete}
+      />
+      <ConfirmDialog
+        open={confirmLogout}
+        onOpenChange={setConfirmLogout}
+        title={`Paksa logout semua perangkat ${userName}?`}
+        description="Semua sesi login user ini dicabut dan perangkatnya dipaksa keluar. User harus login ulang."
+        confirmLabel="Ya, paksa logout"
+        destructive
+        onConfirm={doForceLogout}
+      />
+      <ConfirmDialog
+        open={confirmUnbind}
+        onOpenChange={setConfirmUnbind}
+        title={`Lepas kunci perangkat ${userName}?`}
+        description="Semua binding perangkat user ini dilepas sehingga perangkat apa pun dapat login sebagai user tersebut."
+        confirmLabel="Ya, lepas kunci"
+        destructive
+        onConfirm={doUnbindDevices}
       />
     </>
   );

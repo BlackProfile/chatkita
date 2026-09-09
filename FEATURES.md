@@ -238,6 +238,26 @@
 - **Server**: event `admin:user_rename`, `admin:user_quota`, `admin:broadcast_announce` DIHAPUS (fungsinya 100% tercakup `admin:account_set` / `admin:broadcast`). Tipe ack lama di chat-types dibiarkan sebagai dokumentasi.
 - Verifikasi: verify-integrity seksi "v46" (16 cek). Lint 0/0. E2E: tab Cheat + dialog 🎭 (CheatBody sama), Account 360 4 tab (Moderasi memuat panel v40), X-Ray ringkas, console 0 error.
 
+### v47 — Cheat Lab II + Ganti Nama + Badge Ikon (Task 63)
+- **Permintaan**: "gabungkan yang lainnya juga. tambahkan juga fitur cheat lainnya seperti kebal dari pesan dihapus, centang 1 padahal udah dibaca, dll buat yang banyak. buat juga admin bisa ganti nama. tambahkan juga notif di icon aplikasi".
+- **Cheat Lab II — 11 cheat baru per-user** (flags `users.cheat_json`, via `admin:account_set`, semua ter-audit):
+  1. **Kebal hapus pesan** (`antiDelete`): pesan yang dihapus tetap terlihat isinya di sisi user — live via event baru `message:ghost` (dipancarkan `tombstoneMessage`) + riwayat (`getMessagesPage` menampilkan `deleted_content`, bertanda `ghosted`); bubble diberi badge "Dihapus pengirim — terlihat khusus".
+  2. **Bekukan ✓✓ user / centang-1 abadi** (`freezeChecks`): bacaan user ini tidak pernah dikabarkan (`broadcastRead` berhenti) — pesan lawan bicara tetap ✓1 walau sudah dibaca. Kebalikan `suppressReads` v45.
+  3. **✓✓ instan** (`fakeReads`): tiap pesan user langsung dianggap terbaca lawan (`markRead` + `read:update` palsu).
+  4. **Kunci hapus pesan** (`lockDelete`): `messages:delete` → `DELETE_LOCKED` (toast user).
+  5. **Kunci edit pesan** (`lockEdit`): `message:edit` → `EDIT_LOCKED`.
+  6. **Hancur sendiri** (`selfDestructSec` 5–3600 dtk): pesan baru user otomatis di-tombstone setelah N detik (timer per pesan, cek bendera masih aktif).
+  7. **Mutator teks keluar** (`textMutator`: upper/lower/reverse/leet/emoji) — diterapkan setelah filter kata.
+  8. **Delay pengiriman** (`delayMs` 1000–300000): pesan baru muncul di sisi penerima (bukan pengirim) setelah N ms — fan-out `insertAndFanOut` kini per-penerima (`later()`).
+  9. **Pengganda pesan** (`multiplier` ×1–5): tiap pesan user dikirim berulang.
+  10. **Mode hantu** (`alwaysOffline`): tak pernah tampak online — `isOnline`, broadcast connect/disconnect, dan list percakapan (last seen disembunyikan) semuanya menghormati bendera.
+  11. **Alarm admin** (`alarmAdmin`): tiap pesan user memicu `user:toast` ke room `admins` → AdminPanel menampilkan pill 🔔.
+- **Ganti nama**: aksi cepat "Ganti nama" di dropdown per-user dashboard (dialog kecil → `admin:account_set {name}` — berlaku untuk akun APA PUN termasuk Admin sendiri); rename kini menyiarkan `users:changed` agar daftar menyegarkan sendiri.
+- **Konsolidasi lanjutan**: "Lepas kunci perangkat" (dropdown dashboard) + "Paksa logout semua perangkat" (panel v40) + tombol kick duplikat pindah/gabung ke **tab Akun Account 360 § Perangkat & sesi** (`admin:user_force_logout` + `admin:user_unbind_devices`); tombol & dialog lama DIHAPUS.
+- **Badge ikon aplikasi**: `src/lib/app-badge.ts` BARU — favicon digambar ulang via canvas dengan lingkaran merah berhitung (maks 99+) + Web App Badging API (`navigator.setAppBadge`); dipasang di Messenger (unread tab hidden) dan AdminPanel (unread lintas percakapan). Judul tab "(n) ChatKita" tetap.
+- **Perbaikan tipe**: `ChatMessageApi` (typo tak-terdefinisi warisan v45) → `ChatMessage` di `AdminInjectMediaAck` & `AdminQuickSendAck`; `ChatMessage.ghosted` + `GhostMessagePayload` ditambahkan.
+- Verifikasi: verify-integrity seksi "v47" (31 cek). Lint 0/0. E2E: toggles Ilusi tersimpan, ghost live+riwayat, freezeChecks/fakeReads, lockDelete, delay, multiplier, mutator, alarm pill, ganti nama, badge favicon, dua viewport, console 0 error.
+
 ### Sebelum v11 (fondasi)
 - Chat real-time socket.io (typing, read receipt 3 titik, reaksi, edit/publish pesan, balasan/reply, voice note, link preview, galeri media per kontak, pencarian, dark mode, push notifikasi, PDF viewer, unduh media, format pesan Markdown, PIN opsional).
 

@@ -133,6 +133,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { createChatSocket } from "@/lib/chat-socket";
 import { playBlip, setTitleUnread } from "@/lib/chat-notify";
+import { applyAppBadge } from "@/lib/app-badge";
 import { subscribeToPush } from "@/lib/chat-push";
 import {
   ADMIN_ID,
@@ -172,6 +173,7 @@ import {
   type QuickRepliesAck,
   type ResetConversationAck,
   type TranslateAck,
+  type UserToastPayload,
   type VacuumAck,
 } from "@/lib/chat-types";
 import {
@@ -805,6 +807,11 @@ export function AdminPanel() {
         `⚠️ Kuota media ${p.userName}: ${p.pct}% terpakai (${formatFileSize(p.usedBytes)}/${formatFileSize(p.quotaBytes)})`
       );
     });
+    // v47 — alarm admin (cheat alarmAdmin): tiap pesan target memicu pill ini.
+    socket.on("user:toast", (p: UserToastPayload) => {
+      if (!p || typeof p.title !== "string") return;
+      showMenuNotice(`🔔 ${p.title}${p.body ? ` — ${p.body.slice(0, 60)}` : ""}`);
+    });
     socket.on("conversation:archive:update", (p: ArchiveUpdatePayload) => {
       setConversations((prev) =>
         prev.map((c) => (c.id === p.conversationId ? { ...c, archived: p.archived } : c))
@@ -997,6 +1004,8 @@ export function AdminPanel() {
   useEffect(() => {
     document.title =
       unreadCount > 0 ? `(${unreadCount}) ChatKita Admin` : "ChatKita — Chat Sederhana";
+    // v47 — badge notifikasi di ikon aplikasi (favicon + App Badging API).
+    applyAppBadge(unreadCount);
   }, [unreadCount]);
 
   /* Jump to latest when switching conversation. */

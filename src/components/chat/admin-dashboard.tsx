@@ -38,7 +38,6 @@ import {
   Send,
   Settings2,
   ShieldCheck,
-  Smartphone,
   Smile,
   Ticket,
   Timer,
@@ -83,13 +82,13 @@ import {
 } from "@/lib/chat-utils";
 import type {
   AckOf,
+  AdminAccountSetAck,
   AdminAuditClearAck,
   AdminInviteCreateAck,
   AdminInviteListAck,
   AdminInvitesClearAck,
   AdminPasswordChangeAck,
   AdminSettingsResetAck,
-  AdminUnbindDevicesAck,
   AdminUserCreateAck,
   AppSettings,
   AppSettingsAck,
@@ -407,8 +406,11 @@ export function AdminDashboard({
   const [acctTarget, setAcctTarget] = useState<DashboardUserRow | null>(null);
   /* v37 — target dialog "Insight pengguna". */
   const [insightTarget, setInsightTarget] = useState<DashboardUserRow | null>(null);
-  const [unbindTarget, setUnbindTarget] = useState<DashboardUserRow | null>(null);
-  const [unbindBusy, setUnbindBusy] = useState(false);
+  /* v47 — ganti nama cepat (menggantikan dialog lepas kunci perangkat yang
+      pindah ke Account 360 tab Akun). */
+  const [renameTarget, setRenameTarget] = useState<DashboardUserRow | null>(null);
+  const [renameName, setRenameName] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
   const [invites, setInvites] = useState<InviteCodeInfo[] | null>(null);
   const [inviteCount, setInviteCount] = useState(5);
   const [inviteLabel, setInviteLabel] = useState("");
@@ -527,21 +529,30 @@ export function AdminDashboard({
     );
   };
 
-  /** Lepas semua kunci perangkat user (1 perangkat 1 akun). */
-  const submitUnbindDevices = () => {
-    if (!socket || !unbindTarget || unbindBusy) return;
-    setUnbindBusy(true);
+  /** v47 — ganti nama tampilan/login user (akun apa pun, termasuk Admin sendiri). */
+  const submitRename = () => {
+    if (!socket || !renameTarget || renameBusy) return;
+    const name = renameName.trim();
+    if (name.length < 1 || name.length > 40) {
+      toast.error("Nama harus 1–40 karakter.");
+      return;
+    }
+    setRenameBusy(true);
     socket.emit(
-      "admin:user_unbind_devices",
-      { userId: unbindTarget.id },
-      (res: AckOf<AdminUnbindDevicesAck>) => {
-        setUnbindBusy(false);
+      "admin:account_set",
+      { userId: renameTarget.id, patch: { name } },
+      (res: AckOf<AdminAccountSetAck>) => {
+        setRenameBusy(false);
         if (res.ok) {
-          toast.success(`${res.removed} perangkat dilepas dari "${unbindTarget.name}"`);
-          setUnbindTarget(null);
+          toast.success(`Nama "${renameTarget.name}" diubah menjadi "${name}" ✓`);
+          setRenameTarget(null);
           fetchStats();
+        } else if (res.error === "NAME_TAKEN") {
+          toast.error("Nama sudah dipakai user lain.");
+        } else if (res.error === "NAME_RESERVED") {
+          toast.error("Nama itu dipakai Admin.");
         } else {
-          toast.error("Gagal melepas perangkat.");
+          toast.error("Gagal mengganti nama.");
         }
       }
     );
@@ -802,7 +813,7 @@ export function AdminDashboard({
           {u.mediaCount ? ` · ${u.mediaCount} media` : ""}
         </p>
       </div>
-      {/* v27 — aksi per akun: reset password / lepas kunci perangkat. */}
+      {/* v27 — aksi per akun: ganti nama / insight / Account 360. */}
       {!rank ? (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -816,6 +827,16 @@ export function AdminDashboard({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">
+            {/* v47 — ganti nama cepat (juga untuk akun Admin sendiri). */}
+            <DropdownMenuItem
+              onSelect={() => {
+                setRenameTarget(u);
+                setRenameName(u.name);
+              }}
+            >
+              <PencilLine className="size-4" aria-hidden="true" />
+              Ganti nama
+            </DropdownMenuItem>
             {/* v37 — insight per-pengguna (statistik + ide otomatis). */}
             <DropdownMenuItem onSelect={() => setInsightTarget(u)}>
               <Lightbulb className="size-4" aria-hidden="true" />
@@ -826,10 +847,6 @@ export function AdminDashboard({
             <DropdownMenuItem onSelect={() => setAcctTarget(u)}>
               <UserCog className="size-4" aria-hidden="true" />
               Kendali akun penuh
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setUnbindTarget(u)}>
-              <Smartphone className="size-4" aria-hidden="true" />
-              Lepas kunci perangkat
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -2110,39 +2127,47 @@ export function AdminDashboard({
           onChanged={fetchStats}
         />
 
-        {/* v27 — konfirmasi lepas kunci perangkat. */}
+        {/* v47 — dialog ganti nama cepat (akun apa pun, termasuk Admin). */}
         <Dialog
-          open={!!unbindTarget}
+          open={!!renameTarget}
           onOpenChange={(o) => {
-            if (!o) setUnbindTarget(null);
+            if (!o) setRenameTarget(null);
           }}
         >
           <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
-                <Smartphone className="size-5 text-emerald-600" aria-hidden="true" />
-                Lepas kunci perangkat
+                <PencilLine className="size-5 text-emerald-600" aria-hidden="true" />
+                Ganti nama
               </DialogTitle>
               <DialogDescription>
-                Semua perangkat yang terikat ke akun{" "}
-                <span className="font-semibold">{unbindTarget?.name}</span> akan
-                dilepas — perangkat itu bisa dipakai mendaftarkan akun lain.
-                Cocok saat pemakai berganti HP. Lanjutkan?
+                Ubah nama tampilan sekaligus nama login akun{" "}
+                <span className="font-semibold">{renameTarget?.name}</span>.
               </DialogDescription>
             </DialogHeader>
+            <Input
+              value={renameName}
+              onChange={(e) => setRenameName(e.target.value)}
+              maxLength={40}
+              placeholder="Nama baru"
+              aria-label="Nama baru"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitRename();
+              }}
+            />
             <div className="flex gap-2">
-              <Button variant="outline" className="h-10 flex-1" onClick={() => setUnbindTarget(null)}>
+              <Button variant="outline" className="h-10 flex-1" onClick={() => setRenameTarget(null)}>
                 Batal
               </Button>
               <Button
                 className="h-10 flex-1 bg-emerald-600 text-white hover:bg-emerald-600/90"
-                disabled={unbindBusy}
-                onClick={submitUnbindDevices}
+                disabled={renameBusy || !renameName.trim()}
+                onClick={submitRename}
               >
-                {unbindBusy ? (
+                {renameBusy ? (
                   <Loader2 className="size-4 animate-spin" aria-hidden="true" />
                 ) : (
-                  "Lepas perangkat"
+                  "Simpan"
                 )}
               </Button>
             </div>

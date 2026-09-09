@@ -14,6 +14,7 @@ import {
   Info,
   Languages,
   Music,
+  EyeOff,
   Pause,
   Pencil,
   Pin,
@@ -68,7 +69,10 @@ interface ChatBubbleProps {
   replyAuthor?: string;
   durationMs?: number;
   transcript?: string;
+  /** Soft delete marker (content is redacted server-side). */
   deleted?: boolean;
+  /** v47 — isi asli ditampilkan walau dihapus (cheat antiDelete). */
+  ghosted?: boolean;
   /** v5 — message id (jump-to-message anchor + aria). */
   messageId?: number;
   /** v5 — grouped emoji reactions. */
@@ -137,7 +141,8 @@ export function ChatBubble({
   replyAuthor,
   durationMs,
   transcript,
-  deleted = false,
+  deleted: deletedRaw = false,
+  ghosted = false,
   messageId,
   fileName,
   fileSize,
@@ -171,6 +176,9 @@ export function ChatBubble({
   onToggleStar,
   onCancelScheduled,
 }: ChatBubbleProps) {
+  // v47 — pesan hantu (kebal hapus) dirender seperti pesan hidup + badge;
+  // hanya tombstone sungguhan yang mematikan aksi/media.
+  const deleted = deletedRaw && !ghosted;
   const [actionsOpen, setActionsOpen] = useState(false);
   const [reactOpen, setReactOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -291,6 +299,14 @@ export function ChatBubble({
             >
               <Reply className="size-3 -scale-x-100" aria-hidden="true" />
               Diteruskan dari {forwardedFrom}
+            </p>
+          ) : null}
+
+          {/* v47 — badge pesan hantu (cheat antiDelete) */}
+          {ghosted ? (
+            <p className="flex items-center gap-1.5 py-0.5 text-[11px] italic opacity-80">
+              <EyeOff className="size-3" aria-hidden="true" />
+              Dihapus pengirim — terlihat khusus
             </p>
           ) : null}
 

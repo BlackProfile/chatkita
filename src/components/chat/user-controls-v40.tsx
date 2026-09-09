@@ -8,7 +8,7 @@
  *  - Filter kata (blok/sensor)    → admin:word_filter
  *  - Mode persetujuan pra-kirim   → admin:approval_mode
  *  - Blokir media per jenis       → admin:media_types
- *  - Paksa logout semua perangkat → admin:user_force_logout
+ *  (v47 — Paksa logout pindah ke Account 360 tab Akun)
  *  - Kunci PIN percakapan         → admin:user_pinlock
  *  - Balasan cepat per-user       → admin:quick_reply_list/set + quick_send
  *  - Pesan terjadwal              → admin:schedule_message/list/cancel
@@ -21,10 +21,9 @@
  */
 
 import { useEffect, useState } from "react";
-import { CalendarClock, KeyRound, ListChecks, Loader2, LogOut, Package, StickyNote, Timer, Trash2, Waves, Zap } from "lucide-react";
+import { CalendarClock, KeyRound, ListChecks, Loader2, Package, StickyNote, Timer, Trash2, Waves, Zap } from "lucide-react";
 import type { Socket } from "socket.io-client";
 
-import { ConfirmDialog } from "@/components/chat/admin-tools";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,7 +40,6 @@ import { Textarea } from "@/components/ui/textarea";
 import type {
   AckOf,
   AdminAutocleanAck,
-  AdminForceLogoutAck,
   AdminLoginsAck,
   AdminLoginEvent,
   AdminMediaTypesAck,
@@ -132,7 +130,6 @@ export function UserControlsV40({
   const [autoDays, setAutoDays] = useState(String(profile.autoCleanDays ?? 0));
   /* Umum */
   const [busy, setBusy] = useState<string | null>(null);
-  const [confirmLogout, setConfirmLogout] = useState(false);
   const [logins, setLogins] = useState<AdminLoginEvent[] | null>(null);
   const [showLogins, setShowLogins] = useState(false);
 
@@ -196,16 +193,6 @@ export function UserControlsV40({
     socket?.emit("admin:media_types", { userId: guard, blocked: next }, (res: AckOf<AdminMediaTypesAck>) => {
       if (res.ok) onNotice?.(res.blocked.length ? `Diblokir: ${res.blocked.join(", ")}` : "Semua jenis media bebas");
       else onNotice?.("Gagal mengubah blokir jenis media");
-    });
-  };
-
-  const doForceLogout = () => {
-    if (!socket) return;
-    setConfirmLogout(false);
-    socket.emit("admin:user_force_logout", { userId: guard }, (res: AckOf<AdminForceLogoutAck>) => {
-      if (res.ok) {
-        onNotice?.(`Sesi diakhiri: ${res.devices} perangkat dilepas, ${res.sockets} socket diputus ✓`);
-      } else onNotice?.("Gagal memaksa logout");
     });
   };
 
@@ -652,17 +639,8 @@ export function UserControlsV40({
         </Button>
       </div>
 
-      {/* Paksa logout + riwayat login */}
+      {/* Riwayat login (v47 — paksa logout pindah ke Account 360 tab Akun) */}
       <div className="space-y-1.5">
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-8 w-full border-destructive/40 text-destructive hover:text-destructive"
-          onClick={() => setConfirmLogout(true)}
-        >
-          <LogOut className="size-3.5" aria-hidden="true" />
-          Paksa logout semua perangkat
-        </Button>
         <button
           type="button"
           className="text-[11px] text-muted-foreground underline-offset-2 hover:underline"
@@ -688,16 +666,6 @@ export function UserControlsV40({
           </ul>
         ) : null}
       </div>
-
-      <ConfirmDialog
-        open={confirmLogout}
-        onOpenChange={(v) => !v && setConfirmLogout(false)}
-        title="Paksa logout semua perangkat?"
-        description={`Semua perangkat ${profile.name} akan dilepas dan semua sesinya diputus — dia harus login ulang.`}
-        confirmLabel="Ya, akhiri sesi"
-        destructive
-        onConfirm={doForceLogout}
-      />
     </div>
   );
 }
