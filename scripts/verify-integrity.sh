@@ -256,8 +256,8 @@ chk_grep "Tombol hapus semua pesan user (v46: di 360)" "src/components/chat/acco
 chk_grep "Konfirmasi hapus massal (v46: di 360)"       "src/components/chat/account-control-dialog.tsx" "confirmBulk"
 
 echo "[v40 — Pusat kendali per-user: moderasi/insight/otomasi/aman (Task 59)]"
-chk_grep "Versi service v40+"                "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v4"
-chk_grep "Rescue tag v40+"                   "src/instrumentation.ts" "rescue-v4"
+chk_grep "Versi service terdaftar"             "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v"
+chk_grep "Rescue tag terdaftar"                "src/instrumentation.ts" "rescue-v"
 chk_grep "Migrasi kolom filter kata"          "mini-services/chat-service/index.ts" "addColumn('users', 'word_filter'"
 chk_grep "Migrasi kolom persetujuan"          "mini-services/chat-service/index.ts" "addColumn('users', 'approval_mode'"
 chk_grep "Migrasi kolom tag & catatan"        "mini-services/chat-service/index.ts" "addColumn('users', 'admin_note'"
@@ -336,8 +336,8 @@ chk_grep "Dashboard pakai Account 360"       "src/components/chat/admin-dashboar
 chk_grep "Pill sinyal palsu dihapus"         "src/components/chat/AdminPanel.tsx" "pill \"⌨ Typing palsu\" & \"✓✓ Palsu\" dihapus"
 
 echo "[v47 — Cheat Lab II + ganti nama + badge ikon (Task 63)]"
-chk_grep "Versi service v49"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v49'"
-chk_grep "Rescue tag v49"                     "src/instrumentation.ts" "rescue-v49"
+chk_grep "Versi service v50"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v50'"
+chk_grep "Rescue tag v50"                     "src/instrumentation.ts" "rescue-v50"
 chk_grep "Cheat kebal hapus (antiDelete)"     "mini-services/chat-service/index.ts" "antiDelete === 1"
 chk_grep "Ghost event di tombstone"           "mini-services/chat-service/index.ts" "message:ghost"
 chk_grep "Riwayat ghost (antiDelete)"         "mini-services/chat-service/index.ts" "ghostView"
@@ -374,6 +374,14 @@ chk_grep "Scroll dalam popup (dialog base)"   "src/components/ui/dialog.tsx" "ov
 chk_grep "Tinggi popup tetap (alert base)"    "src/components/ui/alert-dialog.tsx" "h-\[min(85dvh,640px)\]"
 chk_grep "Lebar popup tetap (alert base)"     "src/components/ui/alert-dialog.tsx" "sm:w-\[640px\]"
 chk_file  "Skrip sweep popup v49"             ".zscripts/t65-sweep-popup.ts"
+
+# ── v50 (Task 66) — ganti nama tampilan Admin ──
+chk_grep "Nama Admin dinamis (helper)"        "mini-services/chat-service/index.ts" "function adminName"
+chk_grep "Broadcast admin:renamed"            "mini-services/chat-service/index.ts" "io.emit('admin:renamed'"
+chk_grep "account_set boleh target diri"      "mini-services/chat-service/index.ts" "const isSelf = data?.userId === ADMIN_ID"
+chk_grep "Listener admin:renamed (user)"      "src/components/chat/Messenger.tsx" "admin:renamed"
+chk_grep "Kartu profil admin bisa diklik"     "src/components/chat/AdminPanel.tsx" "Ganti nama Admin"
+chk_grep "Menu ganti nama saya"               "src/components/chat/AdminPanel.tsx" "Ganti nama saya"
 
 echo ""
 echo "== Versi server terdaftar =="

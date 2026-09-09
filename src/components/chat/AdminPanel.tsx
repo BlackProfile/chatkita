@@ -33,6 +33,7 @@ import {
   Moon,
   Music,
   Paperclip,
+  PencilLine,
   Pin,
   Plus,
   QrCode,
@@ -142,6 +143,7 @@ import {
   MAX_MESSAGE_LENGTH,
   draftKey,
   type AckOf,
+  type AdminAccountSetAck,
   type AdminAuthAck,
   type AdminFlaggedPayload,
   type AdminModerateAck,
@@ -283,6 +285,11 @@ export function AdminPanel() {
   const [messagesMap, setMessagesMap] = useState<Record<string, ChatMessage[]>>({});
   const [typingMap, setTypingMap] = useState<Record<string, boolean>>({});
   const [connected, setConnected] = useState(false);
+  // v50 — nama tampilan akun Admin sendiri (kartu profil sidebar) + dialog ganti nama.
+  const [myName, setMyName] = useState<string>(ADMIN_NAME);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   // v24 — autologin: password benar (via admin:peek) → titik input jadi hijau
@@ -418,6 +425,36 @@ export function AdminPanel() {
 
   const socketRef = useRef<Socket | null>(null);
   const passwordRef = useRef<string | null>(null);
+
+  /** v50 — ganti nama tampilan akun Admin sendiri (live ke semua klien). */
+  const submitMyRename = () => {
+    const socket = socketRef.current;
+    if (!socket || renameBusy) return;
+    const name = renameValue.trim();
+    if (name.length < 1 || name.length > 40) {
+      toast.error("Nama harus 1–40 karakter.");
+      return;
+    }
+    setRenameBusy(true);
+    socket.emit(
+      "admin:account_set",
+      { userId: ADMIN_ID, patch: { name } },
+      (res: AckOf<AdminAccountSetAck>) => {
+        setRenameBusy(false);
+        if (res.ok) {
+          setMyName(name);
+          setRenameOpen(false);
+          toast.success(`Nama Admin diganti menjadi "${name}" ✓`);
+        } else if (res.error === "NAME_TAKEN") {
+          toast.error("Nama sudah dipakai pengguna lain.");
+        } else if (res.error === "INVALID_NAME") {
+          toast.error("Nama harus 1–40 karakter.");
+        } else {
+          toast.error("Gagal mengganti nama.");
+        }
+      }
+    );
+  };
   // v24 — timer autologin (debounce peek + jeda sinkronisasi) & handleLogin terkini.
   const peekTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loginTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -718,6 +755,11 @@ export function AdminPanel() {
           }
         }
       );
+    });
+
+    // v50 — nama Admin diganti (dari panel ini atau sesi admin lain) → live.
+    socket.on("admin:renamed", (p: { name: string }) => {
+      setMyName(p.name);
     });
 
     socket.on("disconnect", () => {
@@ -2015,26 +2057,43 @@ export function AdminPanel() {
           {/* ------------------------- Sidebar ------------------------- */}
           {showSidebar ? (
             <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden md:border-r">
-              {/* Profile */}
+              {/* Profile — v50: kartu bisa diklik untuk ganti nama tampilan Admin. */}
               <div className="z-10 flex items-center gap-3 border-b bg-card/85 p-3 backdrop-blur-md">
-                <Avatar className="size-10">
-                  <AvatarFallback className="bg-gradient-to-br from-emerald-500 to-teal-600 text-sm font-semibold text-white">
-                    {initials(ADMIN_NAME)}
-                  </AvatarFallback>
-                </Avatar>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate font-semibold leading-tight">{ADMIN_NAME}</p>
-                  <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <span
-                      aria-hidden="true"
-                      className={cn(
-                        "inline-block size-1.5 shrink-0 rounded-full",
-                        connected ? "bg-emerald-500" : "bg-muted-foreground/40"
-                      )}
-                    />
-                    Panel Admin · {connected ? "Online" : "Menghubungkan…"}
-                  </p>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRenameValue(myName);
+                    setRenameOpen(true);
+                  }}
+                  className="flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left transition-opacity hover:opacity-80"
+                  aria-label="Ganti nama Admin"
+                  title="Ketuk untuk ganti nama"
+                >
+                  <Avatar className="size-10">
+                    <AvatarFallback className="bg-gradient-to-br from-emerald-500 to-teal-600 text-sm font-semibold text-white">
+                      {initials(myName)}
+                    </AvatarFallback>
+                  </Avatar>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-semibold leading-tight">
+                      {myName}
+                      <PencilLine
+                        className="ml-1 inline size-3 text-muted-foreground"
+                        aria-hidden="true"
+                      />
+                    </p>
+                    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          "inline-block size-1.5 shrink-0 rounded-full",
+                          connected ? "bg-emerald-500" : "bg-muted-foreground/40"
+                        )}
+                      />
+                      Panel Admin · {connected ? "Online" : "Menghubungkan…"}
+                    </p>
+                  </div>
+                </button>
                 <div className="flex shrink-0 items-center gap-0.5">
                   {/* v10 — menu aplikasi (⋮ emerald): dashboard + pengelolaan */}
                   <DropdownMenu>
@@ -2059,6 +2118,15 @@ export function AdminPanel() {
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="w-64">
                       <DropdownMenuLabel>Panel aplikasi</DropdownMenuLabel>
+                      <DropdownMenuItem
+                        onClick={() => {
+                          setRenameValue(myName);
+                          setRenameOpen(true);
+                        }}
+                      >
+                        <PencilLine className="mr-2 size-4" aria-hidden="true" />
+                        Ganti nama saya
+                      </DropdownMenuItem>
                       <DropdownMenuItem onClick={() => openDashboard("ringkasan")}>
                         <GaugeCircle className="mr-2 size-4" aria-hidden="true" />
                         Dashboard aplikasi
@@ -3618,6 +3686,47 @@ export function AdminPanel() {
           </DialogContent>
         </Dialog>
       ) : null}
+
+      {/* v50 — ganti nama tampilan akun Admin */}
+      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+        <DialogContent className="rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <PencilLine className="size-5 text-emerald-600" aria-hidden="true" />
+              Ganti nama saya
+            </DialogTitle>
+            <DialogDescription>
+              Nama ini tampil pada semua pengguna — header obrolan, nama pengirim,
+              dan daftar chat. Berlaku live di semua perangkat.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            className="space-y-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              submitMyRename();
+            }}
+          >
+            <Input
+              autoFocus
+              value={renameValue}
+              maxLength={40}
+              aria-label="Nama baru Admin"
+              placeholder="mis. Customer Care Toko"
+              onChange={(e) => setRenameValue(e.target.value)}
+            />
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <Button type="button" variant="outline" onClick={() => setRenameOpen(false)}>
+                Batal
+              </Button>
+              <Button type="submit" disabled={renameBusy || !renameValue.trim()}>
+                {renameBusy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
+                Simpan
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       {/* v22 — konfirmasi batalkan pesan terjadwal */}
       <AlertDialog

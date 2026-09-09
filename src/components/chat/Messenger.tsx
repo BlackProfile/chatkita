@@ -818,6 +818,18 @@ export function Messenger() {
       }
     });
 
+    // v50 — nama Admin diganti dari panel admin → perbarui header obrolan live.
+    socket.on("admin:renamed", (p: { name: string }) => {
+      setPartner((prev) => (prev && prev.id === ADMIN_ID ? { ...prev, name: p.name } : prev));
+      setConvList((prev) =>
+        prev.map((c) =>
+          c.partner && c.partner.id === ADMIN_ID
+            ? { ...c, partner: { ...c.partner, name: p.name } }
+            : c
+        )
+      );
+    });
+
     // v5 — pinned-message banner updates (admin pins/unpins).
     socket.on("conversation:update", (p: PinUpdatePayload) => {
       if (p.conversationId !== conversationIdRef.current) return;

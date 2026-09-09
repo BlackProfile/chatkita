@@ -218,7 +218,7 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        mengirim, reuse user:toast). Ganti nama: admin:account_set {name}
  *        kini ikut menyiarkan users:changed. KLIEN — badge favicon +
  *        App Badging API (lib/app-badge). */
-const SERVICE_VERSION = 'v49'
+const SERVICE_VERSION = 'v50'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -1503,6 +1503,26 @@ const findUserByRoleAndName = (name: string, role: string): UserRow | null =>
   (db
     .query('SELECT * FROM users WHERE lower(name) = lower(?) AND role = ? LIMIT 1')
     .get(name, role) as UserRow | null) ?? null
+
+/** v50 — nama tampilan Admin dinamis dari DB (bisa diganti admin dari panel),
+ * dengan cache in-memory; fallback ke konstanta bawaan 'Admin'. */
+let adminNameCache: string | null = null
+const invalidateAdminName = () => {
+  adminNameCache = null
+}
+function adminName(): string {
+  if (adminNameCache) return adminNameCache
+  try {
+    const row = db
+      .query('SELECT name FROM users WHERE id = ?')
+      .get(ADMIN_ID) as { name?: string } | undefined
+    const nm = row?.name?.trim()
+    adminNameCache = nm ? nm : ADMIN_NAME
+  } catch {
+    adminNameCache = ADMIN_NAME
+  }
+  return adminNameCache
+}
 
 const getConversation = (conversationId: string): ConversationRow | null =>
   (db
@@ -4196,7 +4216,7 @@ io.on('connection', (socket) => {
         conversationId: conversation.id,
         partner: admin
           ? toPartnerInfo(admin, user.id)
-          : { id: ADMIN_ID, name: ADMIN_NAME, online: false, lastSeenAt: null },
+          : { id: ADMIN_ID, name: adminName(), online: false, lastSeenAt: null },
         messages: page.messages,
         // v8 — older pages load on demand via `messages:older`.
         hasMore: page.hasMore,
@@ -5219,7 +5239,7 @@ io.on('connection', (socket) => {
         return
       }
       const originName =
-        src.sender_id === ADMIN_ID ? ADMIN_NAME : (findUserById(src.sender_id)?.name ?? 'Pengguna')
+        src.sender_id === ADMIN_ID ? adminName() : (findUserById(src.sender_id)?.name ?? 'Pengguna')
       const message = insertAndFanOut(target, me, src.content, targetType, {
         durationMs: src.duration_ms ?? undefined,
         fileName: src.file_name ?? undefined,
@@ -6396,7 +6416,7 @@ io.on('connection', (socket) => {
         mimeType: row.mime_type ?? null,
         fileSize: row.file_size ?? null,
         senderId: row.sender_id,
-        senderName: row.sender_name ?? (row.sender_id === ADMIN_ID ? ADMIN_NAME : null),
+        senderName: row.sender_name ?? (row.sender_id === ADMIN_ID ? adminName() : null),
         conversationId: row.conversation_id,
         createdAt: new Date(row.created_at).toISOString(),
         deleted: !!row.deleted_at,
@@ -7264,9 +7284,21 @@ io.on('connection', (socket) => {
   // SETTING PENUH akun: satu event untuk SEMUA kolom kendali + bendera cheat.
   socket.on('admin:account_set', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
-    const target = restrictionTarget(data, ack)
-    if (!target) return
+    /* v50 — admin boleh jadi target DIRINYA SENDIRI asalkan patch-nya hanya
+     * 'name' (ganti nama tampilan Admin); patch lain tetap FORBIDDEN. */
     const patch = data?.patch && typeof data.patch === 'object' ? data.patch : {}
+    const isSelf = data?.userId === ADMIN_ID
+    let target: UserRow | null = null
+    if (isSelf) {
+      if (Object.keys(patch).some((k) => k !== 'name')) {
+        ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      target = findUserById(ADMIN_ID)
+    } else {
+      target = restrictionTarget(data, ack)
+    }
+    if (!target) return
     const touched: string[] = []
 
     if (typeof patch.name === 'string') {
@@ -7275,7 +7307,7 @@ io.on('connection', (socket) => {
         ack({ ok: false, error: 'INVALID_NAME' })
         return
       }
-      if (name.toLowerCase() === ADMIN_NAME.toLowerCase()) {
+      if (!isSelf && name.toLowerCase() === ADMIN_NAME.toLowerCase()) {
         ack({ ok: false, error: 'NAME_RESERVED' })
         return
       }
@@ -7286,8 +7318,10 @@ io.on('connection', (socket) => {
       }
       db.run('UPDATE users SET name = ? WHERE id = ?', [name, target.id])
       touched.push('name')
-      // v47 — ganti nama kini ikut menyegarkan daftar pengguna di dashboard.
+      // v50 — segarkan cache nama Admin + siarkan ke SEMUA klien (live).
+      invalidateAdminName()
       io.to('admins').emit('users:changed', { userId: target.id, renamed: true })
+      io.emit('admin:renamed', { name })
     }
     if (typeof patch.frozen === 'boolean') {
       db.run('UPDATE users SET frozen = ? WHERE id = ?', [patch.frozen ? 1 : 0, target.id])

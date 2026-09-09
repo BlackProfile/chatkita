@@ -1340,3 +1340,21 @@ Stage Summary:
 - SEMUA popup (Dialog + AlertDialog) kini satu ukuran normal seragam: desktop 640×640 px, mobile lebar layar−32 px, tinggi tetap; isi sedikit tidak menyusut, isi banyak di-scroll di dalam popup.
 - Keputusan: ukuran dikendalikan komponen dasar (satu pintu), bukan per-pemakaian; menu menempel (popover/picker/dropdown) & layar kunci admin (overlay penuh) sengaja tidak diubah.
 - Artefak: .zscripts/t65-sweep-popup.ts, .zscripts/t65-user.ts, segmen v49 di FEATURES.md/verify-integrity.sh (301 cek).
+
+---
+Task ID: 66
+Agent: Z.ai Code (main)
+Task: v50 — ganti nama tampilan "Admin" yang dilihat user (permintaan: "maksudnya nama ini yang pada user")
+
+Work Log:
+- Diagnosa: nama "Admin" = konstanta hardcoded `ADMIN_NAME='Admin'` (index.ts:224); daftar user dashboard menyaring role='user' → akun Admin tak muncul → TIDAK ada jalur UI untuk menggantinya; `restrictionTarget` juga melarang target admin (FORBIDDEN).
+- Server: helper `adminName()` (DB users + cache in-memory + `invalidateAdminName()`); 3 payload konstanta → dinamis (fallback partner user:auth, originName forward, senderName daftar file); `admin:account_set` boleh target DIRI SENDIRI jika patch hanya {name}; NAME_RESERVED hanya untuk user biasa (admin boleh kembali ke "Admin"); broadcast baru `admin:renamed {name}` ke semua klien + users:changed ke admins.
+- Klien AdminPanel: kartu profil sidebar jadi tombol (aria "Ganti nama Admin", ikon pensil) → dialog "Ganti nama saya" (ukuran popup seragam v49); item "Ganti nama saya" di menu ⋮ Panel aplikasi; state myName + listener admin:renamed; toast sukses/gagal (NAME_TAKEN/INVALID_NAME).
+- Klien Messenger (user): listener admin:renamed → update header partner + daftar percakapan (convList) live.
+- Versi v50: SERVICE_VERSION, rescue-v50 (instrumentation), FEATURES.md segmen v50, verify-integrity +6 cek v50 & cek versi generik dibuat future-proof ("SERVICE_VERSION = 'v" / "rescue-v") — 307/307, 0 gagal; chmod 644.
+- Lint 0/0. chat-service v50 listening :3003 (:3000 & :81 = 200).
+- E2E gateway :81 (t66a admin desktop 1440×900, t66u user UjiV49 mobile 390×844): kartu profil diklik → dialog terisi "Admin" → simpan "Admin Toko Berkah" → toast ✓, kartu "AT Admin Toko Berkah ✏️"; user TANPA refresh header berubah live "AT Admin Toko Berkah"; kembalikan "Admin" → kedua sisi kembali; DB users.name='admin' terkonfirmasi; konsol 0 error dua sesi; browser ditutup. Screenshot /tmp/t66-admin-rename.png, /tmp/t66-user-live.png.
+
+Stage Summary:
+- Nama tampilan Admin kini BISA diganti dari panel: klik kartu profil (kiri atas) atau menu ⋮ → "Ganti nama saya"; berlaku live di semua perangkat; nama lama pada bubble pesan ikut berganti (JOIN live, bukan snapshot).
+- Keamanan terjaga: nama "Admin" tetap tak bisa dipakai user biasa; patch lain (freeze/kuota/dll) tetap ditolak untuk akun admin.
