@@ -97,7 +97,7 @@ export interface ChatUser {
   hasPin?: boolean;
 }
 
-export type MessageContentType = "text" | "image" | "voice" | "file" | "system";
+export type MessageContentType = "text" | "image" | "voice" | "file" | "system" | "sticker";
 
 /** Grouped emoji reactions on one message. */
 export interface MessageReaction {
@@ -177,6 +177,13 @@ export interface ChatMessage {
   pending?: boolean;
   /** v47 — isi asli pesan yang telah dihapus (cheat antiDelete). */
   ghosted?: boolean;
+  /* v48 — media sensitif (blur sampai dibuka), album, burn-on-view. */
+  sensitive?: boolean;
+  album?: string;
+  burn?: boolean;
+  /* v48 — jebakan tautan (cheat admin): href diganti + counter klik. */
+  trapUrl?: string;
+  trapClicks?: number;
 }
 
 /** v47 — isi asli pesan yang dihapus, dikirim ke penonton "kebal hapus". */
@@ -410,6 +417,12 @@ export interface MessageUpdatePayload {
   createdAt?: string;
   /** v40 — moderasi: false saat pesan pending disetujui admin. */
   pending?: boolean;
+  /* v48 — media: kedaluwarsa (burn), blur sensitif, jebakan tautan. */
+  mediaExpiredAt?: string;
+  sensitive?: boolean;
+  burn?: boolean;
+  trapUrl?: string;
+  trapClicks?: number;
 }
 
 /** Generic error ack: `{ ok: false, error: ErrorCode }` */
@@ -661,6 +674,13 @@ export interface AppSettings {
   allowReactions?: boolean;
   readReceipts?: boolean;
   slowmodeSeconds?: number;
+  /* v48 — media/file/tautan. */
+  extBlocklist?: string;
+  linkBlacklist?: string;
+  linkWhitelist?: string;
+  retImageDays?: number;
+  retVideoDays?: number;
+  retFileDays?: number;
 }
 
 /** `public:settings` now also carries the public app settings (v10). */

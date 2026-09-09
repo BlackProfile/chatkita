@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Pause, Play } from "lucide-react";
 import {
   Download,
   File,
@@ -171,22 +171,36 @@ function downloadHref(media: ViewerMedia, displayName: string): string {
 export function MediaViewer({
   state,
   onClose,
+  react,
 }: {
   state: ViewerState | null;
   onClose: () => void;
+  /** v48 — bar reaksi cepat + daftar pereaksi (opsional). */
+  react?: ViewerReact;
 }) {
   // Tanpa hooks di sini: null-check sebelum merender komponen ber-hook,
   // dan key=seq memastikan posisi/zoom di-reset tiap kali dibuka.
   if (!state) return null;
-  return <ViewerDialog key={state.seq} state={state} onClose={onClose} />;
+  return <ViewerDialog key={state.seq} state={state} onClose={onClose} react={react} />;
+}
+
+/** v48 — palet reaksi cepat viewer (cermin server). */
+const REACT_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"] as const;
+
+/** v48 — kontrak reaksi cepat viewer (dipasok Messenger/AdminPanel). */
+export interface ViewerReact {
+  onReact: (emoji: string) => void;
+  getReactors: () => Promise<{ emoji: string; names: string[] }[]>;
 }
 
 function ViewerDialog({
   state,
   onClose,
+  react,
 }: {
   state: ViewerState;
   onClose: () => void;
+  react?: ViewerReact;
 }) {
   const gallery = state.gallery;
   const total = gallery.length;
@@ -196,6 +210,9 @@ function ViewerDialog({
     Math.min(Math.max(state.index, 0), Math.max(total - 1, 0))
   );
   const [zoomed, setZoomed] = useState(false);
+  /* v48 — slideshow otomatis + reaksi cepat. */
+  const [playing, setPlaying] = useState(false);
+  const [reactors, setReactors] = useState<{ emoji: string; names: string[] }[] | null>(null);
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const lastTapRef = useRef(0);
 
@@ -223,6 +240,28 @@ function ViewerDialog({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [canNavigate, go]);
+
+  /* v48 — slideshow: maju otomatis tiap 3 detik saat mode play aktif. */
+  useEffect(() => {
+    if (!playing || !canNavigate) return;
+    const t = setInterval(() => go(1), 3000);
+    return () => clearInterval(t);
+  }, [playing, canNavigate, go]);
+
+  /* v48 — muat daftar pereaksi saat viewer dibuka. */
+  useEffect(() => {
+    if (!react) return;
+    let alive = true;
+    void react
+      .getReactors()
+      .then((r) => {
+        if (alive) setReactors(r);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const current = gallery[pos] ?? state.media;
 
@@ -311,6 +350,22 @@ function ViewerDialog({
           <div className="pointer-events-none absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded-full border border-white/15 bg-black/60 px-3 py-1 text-xs font-medium tabular-nums text-white">
             {pos + 1} / {total}
           </div>
+        ) : null}
+
+        {/* v48 — tombol slideshow play/pause (maju otomatis 3 detik/media). */}
+        {canNavigate ? (
+          <button
+            type="button"
+            aria-label={playing ? "Hentikan slideshow" : "Putar slideshow"}
+            onClick={() => setPlaying((v) => !v)}
+            className="absolute right-3 top-3 z-10 flex size-9 items-center justify-center rounded-full border border-white/15 bg-black/60 text-white transition hover:bg-black/80"
+          >
+            {playing ? (
+              <Pause className="size-4" aria-hidden="true" />
+            ) : (
+              <Play className="size-4" aria-hidden="true" />
+            )}
+          </button>
         ) : null}
 
         {/* Isi pratinjau per jenis. v20 — panggung TETAP tinggi (72vh):
@@ -417,7 +472,8 @@ function ViewerDialog({
           </>
         ) : null}
 
-        {/* Footer selalu tampil: nama + ukuran + Unduh (semua jenis file) */}
+        {/* Footer selalu tampil: nama + ukuran + Unduh (semua jenis file) +
+            v48 — bar reaksi cepat + daftar pereaksi. */}
         <div className="flex shrink-0 items-center gap-2 rounded-xl bg-white/5 px-3 py-2">
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium">{displayName}</p>
@@ -427,6 +483,30 @@ function ViewerDialog({
                 : mime || "Lampiran"}
             </p>
           </div>
+          {react ? (
+            <div
+              className="flex shrink-0 items-center gap-0.5"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {REACT_EMOJIS.map((emoji) => (
+                <button
+                  key={emoji}
+                  type="button"
+                  aria-label={`Reaksi ${emoji}`}
+                  className="flex size-9 items-center justify-center rounded-full text-lg transition hover:bg-white/15"
+                  onClick={() => {
+                    react.onReact(emoji);
+                    void react
+                      .getReactors()
+                      .then((r) => setReactors(r))
+                      .catch(() => {});
+                  }}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <a
             href={href}
             download={displayName}
@@ -439,6 +519,22 @@ function ViewerDialog({
             Unduh
           </a>
         </div>
+
+        {/* v48 — siapa saja yang bereaksi pada media ini. */}
+        {react && reactors && reactors.length > 0 ? (
+          <div
+            className="shrink-0 px-1 text-xs text-white/70"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {reactors.map((r) => (
+              <p key={r.emoji} className="truncate">
+                <span aria-hidden="true">{r.emoji}</span>{" "}
+                {r.names.slice(0, 6).join(", ")}
+                {r.names.length > 6 ? ` +${r.names.length - 6}` : ""}
+              </p>
+            ))}
+          </div>
+        ) : null}
       </DialogContent>
     </Dialog>
   );

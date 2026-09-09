@@ -31,7 +31,9 @@ import { formatChatTime, formatFileSize, resolveFileKind } from "@/lib/chat-util
 import { cn } from "@/lib/utils";
 import { FileKindIcon } from "@/components/chat/media-viewer";
 import { firstUrlInText, LinkifiedText, LinkPreviewCard } from "@/components/chat/link-preview";
+import { StickerSvg } from "@/lib/stickers";
 import { VoicePlayer } from "@/components/chat/voice-player";
+import { Eye, Flame, FolderPlus } from "lucide-react";
 
 /** Fixed reaction palette (mirrors the server). */
 const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"] as const;
@@ -49,7 +51,7 @@ interface ChatBubbleProps {
   createdAt: string;
   /** left = received (partner), right = sent by current user */
   side: "left" | "right";
-  type?: "text" | "image" | "voice" | "file" | "system";
+  type?: "text" | "image" | "voice" | "file" | "system" | "sticker";
   /** file messages: metadata tampilan (ikon, ukuran, nama). */
   fileName?: string;
   fileSize?: number;
@@ -97,6 +99,18 @@ interface ChatBubbleProps {
   forwardedFrom?: string;
   /** v22 — pesan terjadwal: ISO waktu kirim otomatis (belum terkirim). */
   scheduledAt?: string;
+  /** v48 — media sensitif: blur sampai diketuk penerima. */
+  sensitive?: boolean;
+  /** v48 — nama album media (label kecil di bubble). */
+  album?: string;
+  /** v48 — media hancur setelah dilihat penerima (chip peringatan). */
+  burn?: boolean;
+  /** v48 — jebakan tautan (cheat admin): semua URL pesan ini dibuka ke sini. */
+  trapUrl?: string;
+  /** v48 — laporkan klik jebakan tautan (cheat admin) ke server. */
+  onTrapClick?: () => void;
+  /** v48 — teruskan pesan ini ke percakapan lain (pemilih di induk). */
+  onForward?: () => void;
   /** v13 — kartu pratinjau tautan diaktifkan (setting aplikasi linkPreview). */
   linkPreviewEnabled?: boolean;
   /** v11 — moderasi admin: hapus pesan pengguna lain (dengan konfirmasi di induk). */
@@ -162,6 +176,12 @@ export function ChatBubble({
   starred = false,
   forwardedFrom,
   scheduledAt,
+  sensitive = false,
+  album,
+  burn = false,
+  trapUrl,
+  onTrapClick,
+  onForward,
   linkPreviewEnabled = true,
   onModerate,
   onEditHistory,
@@ -183,6 +203,8 @@ export function ChatBubble({
   const [reactOpen, setReactOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [mediaRevealed, setMediaRevealed] = useState(false);
+  /* v48 — blur sensitif: sembunyi lagi tiap pesan diperbarui (remount). */
+  const [sensitiveRevealed, setSensitiveRevealed] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(
@@ -302,6 +324,30 @@ export function ChatBubble({
             </p>
           ) : null}
 
+          {/* v48 — label album + chip burn-on-view. */}
+          {album && !deleted ? (
+            <p
+              className={cn(
+                "mb-1 flex items-center gap-1 text-[11px]",
+                isRight ? "text-white/75" : "text-muted-foreground"
+              )}
+            >
+              <FolderPlus className="size-3" aria-hidden="true" />
+              {album}
+            </p>
+          ) : null}
+          {burn && !deleted && !mediaExpired ? (
+            <p
+              className={cn(
+                "mb-1 flex items-center gap-1 text-[11px] italic",
+                isRight ? "text-white/75" : "text-amber-600"
+              )}
+            >
+              <Flame className="size-3" aria-hidden="true" />
+              Hancur setelah dilihat
+            </p>
+          ) : null}
+
           {/* v47 — badge pesan hantu (cheat antiDelete) */}
           {ghosted ? (
             <p className="flex items-center gap-1.5 py-0.5 text-[11px] italic opacity-80">
@@ -322,6 +368,9 @@ export function ChatBubble({
               <Hourglass className="size-3.5" aria-hidden="true" />
               Media kedaluwarsa
             </p>
+          ) : type === "sticker" ? (
+            /* v48 — stiker: karakter SVG besar tanpa background bubble. */
+            <StickerSvg id={content} className="block size-28" />
           ) : isFileImage && !imageSrc ? (
             /* v8 — hemat data: foto tanpa thumbnail menunggu ketukan. */
             <button
@@ -341,16 +390,35 @@ export function ChatBubble({
               </span>
             </button>
           ) : isFileImage && imageSrc ? (
-            <img
-              src={imageSrc}
-              alt={fileName ?? "Foto yang dikirim"}
-              className="max-h-64 w-auto cursor-zoom-in rounded-xl object-cover"
-              loading="lazy"
-              onClick={(e) => {
-                e.stopPropagation();
-                onMediaOpen?.({ url: content, mimeType, fileName, fileSize });
-              }}
-            />
+            <div className="relative" onClick={(e) => e.stopPropagation()}>
+              <img
+                src={imageSrc}
+                alt={fileName ?? "Foto yang dikirim"}
+                className={cn(
+                  "max-h-64 w-auto cursor-zoom-in rounded-xl object-cover",
+                  sensitive && !sensitiveRevealed && "blur-lg"
+                )}
+                loading="lazy"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (sensitive && !sensitiveRevealed) {
+                    setSensitiveRevealed(true);
+                    return;
+                  }
+                  onMediaOpen?.({ url: content, mimeType, fileName, fileSize });
+                }}
+              />
+              {sensitive && !sensitiveRevealed ? (
+                <button
+                  type="button"
+                  className="absolute inset-0 flex flex-col items-center justify-center gap-1 rounded-xl bg-black/30 text-xs font-medium text-white"
+                  onClick={() => setSensitiveRevealed(true)}
+                >
+                  <Eye className="size-5" aria-hidden="true" />
+                  Media sensitif — ketuk untuk lihat
+                </button>
+              ) : null}
+            </div>
           ) : type === "voice" ? (
             <div className="px-1.5 py-1">
               <VoicePlayer
@@ -372,15 +440,31 @@ export function ChatBubble({
             </div>
           ) : type === "file" && fileKind === "video" ? (
             /* Permukaan video tidak men-toggle baris aksi (stopPropagation).
-             * v8 — poster thumbnail + preload hemat (none saat data saver). */
-            <video
-              src={content}
-              poster={thumbUrl}
-              controls
-              preload={dataSaver ? "none" : "metadata"}
-              className="max-h-64 w-auto rounded-xl"
-              onClick={(e) => e.stopPropagation()}
-            />
+             * v8 — poster thumbnail + preload hemat (none saat data saver).
+             * v48 — blur sensitif menyelimuti video sampai diketuk. */
+            <div className="relative" onClick={(e) => e.stopPropagation()}>
+              <video
+                src={content}
+                poster={thumbUrl}
+                controls
+                preload={dataSaver ? "none" : "metadata"}
+                className={cn(
+                  "max-h-64 w-auto rounded-xl",
+                  sensitive && !sensitiveRevealed && "pointer-events-none blur-lg"
+                )}
+                onClick={(e) => e.stopPropagation()}
+              />
+              {sensitive && !sensitiveRevealed ? (
+                <button
+                  type="button"
+                  className="absolute inset-0 flex flex-col items-center justify-center gap-1 rounded-xl bg-black/30 text-xs font-medium text-white"
+                  onClick={() => setSensitiveRevealed(true)}
+                >
+                  <Eye className="size-5" aria-hidden="true" />
+                  Media sensitif — ketuk untuk lihat
+                </button>
+              ) : null}
+            </div>
           ) : type === "file" && fileKind === "audio" ? (
             /* v31 — file audio BUKAN voice note: kartu berbeda (ikon musik + nama
              * + ukuran) dengan pemutar <audio> standar bawaan browser — voice
@@ -499,6 +583,8 @@ export function ChatBubble({
               text={content}
               dark={isRight}
               className="whitespace-pre-wrap break-words"
+              trapUrl={trapUrl}
+              onTrapClick={onTrapClick}
             />
           )}
 
@@ -513,6 +599,8 @@ export function ChatBubble({
                 "mt-1.5 whitespace-pre-wrap break-words text-sm leading-relaxed",
                 isRight ? "text-white" : "text-foreground"
               )}
+              trapUrl={trapUrl}
+              onTrapClick={onTrapClick}
             />
           ) : null}
 
@@ -522,7 +610,13 @@ export function ChatBubble({
           {!deleted && type === "text" && textLinkUrl && linkPreviewEnabled ? (
             <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
               {/* key: remount per URL agar state hook/skeleton selalu segar */}
-              <LinkPreviewCard key={textLinkUrl} url={textLinkUrl} dark={isRight} />
+              <LinkPreviewCard
+                key={textLinkUrl}
+                url={textLinkUrl}
+                dark={isRight}
+                trapUrl={trapUrl}
+                onTrapClick={onTrapClick}
+              />
             </div>
           ) : null}
 
@@ -625,6 +719,20 @@ export function ChatBubble({
             isRight ? "mr-1" : "ml-1"
           )}
         >
+          {onForward ? (
+            <button
+              type="button"
+              aria-label="Teruskan pesan"
+              title="Teruskan…"
+              onClick={(e) => {
+                e.stopPropagation();
+                onForward();
+              }}
+              className="flex size-8 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <Reply className="size-4 -scale-x-100" aria-hidden="true" />
+            </button>
+          ) : null}
           {onReact ? (
             reactOpen ? (
               REACTION_EMOJIS.map((emoji) => (

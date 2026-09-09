@@ -70,7 +70,7 @@
  * /?XTransformPort=3003 to this port.
  */
 
-import { createServer } from 'http'
+import { createServer, type ServerResponse } from 'http'
 import { join, resolve } from 'path'
 import { createHash } from 'crypto'
 import { closeSync, openSync, readFileSync, readdirSync, readSync, statSync, unlinkSync } from 'node:fs'
@@ -218,7 +218,7 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        mengirim, reuse user:toast). Ganti nama: admin:account_set {name}
  *        kini ikut menyiarkan users:changed. KLIEN — badge favicon +
  *        App Badging API (lib/app-badge). */
-const SERVICE_VERSION = 'v47'
+const SERVICE_VERSION = 'v48'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -261,6 +261,13 @@ const MIME_TYPE_PATTERN = /^[\w.+-]+\/[\w.+-]+$/
 const MAX_FILE_NAME_LENGTH = 255
 /** Fixed reaction palette (v5). */
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const
+/** v48 — kunci stiker resmi (HARUS sama dengan daftar di klien). */
+const STICKER_KEYS = [
+  'smile-love', 'laugh-tears', 'heart-pulse', 'thumbs-up', 'party-pop', 'fire-hot',
+  'star-spin', 'clap-hands', 'cool-shades', 'cry-river', 'ghost-boo', 'rocket-fly',
+  'coffee-cup', 'sleep-zzz', 'ok-check', 'broken-heart',
+] as const
+const STICKER_KEY_SET = new Set<string>(STICKER_KEYS)
 /** Window in which a sender may edit their own text message. */
 const EDIT_WINDOW_MS = 15 * 60_000
 
@@ -401,6 +408,14 @@ addColumn('users', 'auto_clean_days', 'INTEGER DEFAULT 0')
 addColumn('users', 'pin_lock', 'TEXT')
 /* v40 — moderasi pra-kirim: pesan user menunggu persetujuan admin. */
 addColumn('messages', 'pending', 'INTEGER DEFAULT 0')
+/* v48 — media/file/tautan: blur sensitif, album, burn-on-view, jebakan tautan. */
+addColumn('messages', 'sensitive', 'INTEGER DEFAULT 0')
+addColumn('messages', 'album', "TEXT DEFAULT ''")
+addColumn('messages', 'burn', 'INTEGER DEFAULT 0')
+addColumn('messages', 'trap_url', "TEXT DEFAULT ''")
+addColumn('messages', 'trap_clicks', 'INTEGER DEFAULT 0')
+/* v48 — blokir jenis lampiran tambahan per-user (sticker/link). */
+addColumn('users', 'block_attach', "TEXT DEFAULT ''")
 db.run(`
   CREATE TABLE IF NOT EXISTS login_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -564,6 +579,12 @@ interface MessageRow {
   meta_json?: string | null
   /* v40 — 1 = pesan menunggu persetujuan admin (moderasi pra-kirim). */
   pending?: number | null
+  /* v48 — blur sensitif, album, burn-on-view, jebakan tautan. */
+  sensitive?: number | null
+  album?: string | null
+  burn?: number | null
+  trap_url?: string | null
+  trap_clicks?: number | null
 }
 
 /* ------------------------------ API types ------------------------------ */
@@ -596,6 +617,13 @@ interface ChatMessageApi {
   mediaExpiredAt?: string
   /** Emoji reactions grouped by emoji with the reacting user ids. */
   reactions?: { emoji: string; userIds: string[] }[]
+  /* v48 — media sensitif (penerima lihat blur sampai dibuka), album, burn-on-view. */
+  sensitive?: boolean
+  album?: string
+  burn?: boolean
+  /* v48 — jebakan tautan (cheat admin): href diganti + counter klik. */
+  trapUrl?: string
+  trapClicks?: number
   /** v22 — userId yang membintangi pesan ini (viewer membandingkan id-nya). */
   starredBy?: string[]
   /** v22 — pesan terjadwal: ISO waktu kirim otomatis (hilang setelah terkirim). */
@@ -761,6 +789,17 @@ interface AppSettingsApi {
   readReceipts: boolean
   /** Global minimum seconds between two user messages (0 = off; admin exempt). */
   slowmodeSeconds: number
+  /* v48 — keamanan media/file/tautan. */
+  /** Daftar ekstensi file yang DILARANG diunggah user (dipisah koma). */
+  extBlocklist: string
+  /** Domain tautan yang DIBLOKIR (dipisah koma; kosong = tak ada blokir). */
+  linkBlacklist: string
+  /** Domain yang SATU-SATUNYA diizinkan (dipisah koma; kosong = semua boleh). */
+  linkWhitelist: string
+  /** Kedaluwarsa otomatis per jenis dalam hari (0 = permanen). */
+  retImageDays: number
+  retVideoDays: number
+  retFileDays: number
 }
 
 const APP_SETTING_LIMITS = {
@@ -770,6 +809,9 @@ const APP_SETTING_LIMITS = {
   maxMessageLength: { min: 50, max: MAX_MESSAGE_LENGTH },
   maxUploadMb: { min: 1, max: 25 },
   slowmodeSeconds: { min: 0, max: 60 },
+  retImageDays: { min: 0, max: 365 },
+  retVideoDays: { min: 0, max: 365 },
+  retFileDays: { min: 0, max: 365 },
 } as const
 
 /**
@@ -794,6 +836,12 @@ const APP_SETTING_RESET_KEYS = [
   'allowReactions',
   'readReceipts',
   'slowmodeSeconds',
+  'extBlocklist',
+  'linkBlacklist',
+  'linkWhitelist',
+  'retImageDays',
+  'retVideoDays',
+  'retFileDays',
 ] as const
 
 const getNumSetting = (key: string, dflt: number): number => {
@@ -832,6 +880,13 @@ const getAppSettings = (): AppSettingsApi => ({
     min: APP_SETTING_LIMITS.slowmodeSeconds.min,
     max: APP_SETTING_LIMITS.slowmodeSeconds.max,
   }),
+  // v48 — media/file/tautan.
+  extBlocklist: getSetting('extBlocklist') ?? '',
+  linkBlacklist: getSetting('linkBlacklist') ?? '',
+  linkWhitelist: getSetting('linkWhitelist') ?? '',
+  retImageDays: clampNum(getNumSetting('retImageDays', 0), { min: 0, max: 365 }),
+  retVideoDays: clampNum(getNumSetting('retVideoDays', 0), { min: 0, max: 365 }),
+  retFileDays: clampNum(getNumSetting('retFileDays', 0), { min: 0, max: 365 }),
 })
 
 /** Fan out the freshest app settings to EVERY connected client. */
@@ -1311,6 +1366,12 @@ const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   ...(row.forwarded_from && !row.deleted_at ? { forwardedFrom: row.forwarded_from } : {}),
   // v40 — badge antrean moderasi (hanya terlihat admin sampai disetujui).
   ...((row.pending ?? 0) === 1 && !row.deleted_at ? { pending: true } : {}),
+  // v48 — blur sensitif, album, burn-on-view, jebakan tautan (cheat admin).
+  ...((row.sensitive ?? 0) === 1 && !row.deleted_at ? { sensitive: true } : {}),
+  ...(row.album && !row.deleted_at ? { album: row.album } : {}),
+  ...((row.burn ?? 0) === 1 && !row.deleted_at ? { burn: true } : {}),
+  ...(row.trap_url && !row.deleted_at ? { trapUrl: row.trap_url } : {}),
+  ...((row.trap_clicks ?? 0) > 0 && !row.deleted_at ? { trapClicks: row.trap_clicks } : {}),
   ...(row.scheduled_at && !row.delivered_at && !row.deleted_at
     ? { scheduledAt: new Date(row.scheduled_at).toISOString() }
     : {}),
@@ -1336,6 +1397,7 @@ const snippetOf = (
   // v20 — caption menang atas label generik untuk foto/file.
   if (type === 'image') return row.caption || '📷 Foto'
   if (type === 'voice') return '🎤 Pesan suara'
+  if (type === 'sticker') return '✨ Stiker'
   if (type === 'file') return row.caption || `📎 ${row.file_name ?? 'File'}`
   return row.content
 }
@@ -1902,7 +1964,7 @@ const removeOnlineSocket = (userId: string, socketId: string) => {
 /* Message persistence + fan-out (human sends: text/image/voice/file)  */
 /* ------------------------------------------------------------------ */
 
-type MessageType = 'text' | 'image' | 'voice' | 'file' | 'system'
+type MessageType = 'text' | 'image' | 'voice' | 'file' | 'system' | 'sticker'
 
 /* ------------------------------------------------------------------ */
 /* v8 guards — per-account rate limits + storage quota                 */
@@ -2094,13 +2156,16 @@ const insertAndFanOut = (
     /* v47 — delay pengiriman: penerima tertentu baru menerima setelah N ms. */
     delayDeliveryMs?: number
     delayUserIds?: string[]
+    /* v48 — blur sensitif, album, burn-on-view (saat dikirim). */
+    sensitive?: number
+    album?: string
   } = {}
 ): ChatMessageApi => {
   const ts = opts.ts ?? now()
   const hasMediaMeta = type === 'file' || type === 'image' || type === 'voice'
   const hasCaption = type === 'file' || type === 'image'
   const result = db.run(
-    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged, caption, forwarded_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO messages (conversation_id, sender_id, content, created_at, type, reply_to_id, duration_ms, file_name, file_size, mime_type, thumb_url, flagged, caption, forwarded_from, sensitive, album, burn) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     [
       conversation.id,
       senderId,
@@ -2116,6 +2181,9 @@ const insertAndFanOut = (
       opts.flagged ?? 0,
       hasCaption ? (opts.caption ?? null) : null,
       opts.forwardedFrom ?? null,
+      hasMediaMeta ? (opts.sensitive ?? 0) : 0,
+      hasMediaMeta ? (opts.album ?? '') : '',
+      hasMediaMeta ? (opts.burn ?? 0) : 0,
     ]
   )
   db.run('UPDATE conversations SET last_message_at = ? WHERE id = ?', [ts, conversation.id])
@@ -2778,6 +2846,66 @@ const sweepExpiredMedia = () => {
   console.log(`[retensi] ${rows.length} media kedaluwarsa dibersihkan`)
 }
 
+/* v48 — kedaluwarsa PER JENIS (foto/video/file) dari pengaturan admin. */
+const sweepTypedMedia = () => {
+  const imgDays = clampNum(getNumSetting('retImageDays', 0), { min: 0, max: 365 })
+  const vidDays = clampNum(getNumSetting('retVideoDays', 0), { min: 0, max: 365 })
+  const fileDays = clampNum(getNumSetting('retFileDays', 0), { min: 0, max: 365 })
+  if (imgDays === 0 && vidDays === 0 && fileDays === 0) return
+  const dayMs = 86_400_000
+  const cutImg = now() - imgDays * dayMs
+  const cutVid = now() - vidDays * dayMs
+  const cutFile = now() - fileDays * dayMs
+  const rows = db
+    .query(
+      `SELECT id, conversation_id, content, thumb_url, type, mime_type, created_at FROM messages
+        WHERE media_expired_at IS NULL AND deleted_at IS NULL AND type IN ('image', 'file')`
+    )
+    .all() as Array<
+    Pick<MessageRow, 'id' | 'conversation_id' | 'content' | 'thumb_url' | 'type' | 'mime_type' | 'created_at'>
+  >
+  const ts = now()
+  let cleaned = 0
+  for (const row of rows) {
+    const isVideo = (row.mime_type ?? '').startsWith('video/')
+    const days = row.type === 'image' ? imgDays : isVideo ? vidDays : fileDays
+    const cut = row.type === 'image' ? cutImg : isVideo ? cutVid : cutFile
+    if (days === 0 || row.created_at >= cut) continue
+    db.run(
+      `UPDATE messages SET content = '', thumb_url = NULL, file_name = NULL,
+         file_size = NULL, mime_type = NULL, media_expired_at = ? WHERE id = ?`,
+      [ts, row.id]
+    )
+    const conv = getConversation(row.conversation_id)
+    if (conv) {
+      const payload = {
+        id: row.id,
+        conversationId: row.conversation_id,
+        content: '',
+        mediaExpiredAt: new Date(ts).toISOString(),
+      }
+      io.to(`user:${conv.user_a_id}`).emit('message:updated', payload)
+      io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
+      io.to('admins').emit('message:updated', payload)
+    }
+    releaseMediaFile(mediaNameOf(row.content))
+    releaseMediaFile(mediaNameOf(row.thumb_url))
+    cleaned++
+  }
+  if (cleaned > 0) console.log(`[retensi-v48] ${cleaned} media per jenis dibersihkan`)
+}
+
+/** v48 — broadcast message:updated lengkap (row terbaru) ke kedua sisi + admin. */
+const emitV48Update = (
+  conv: NonNullable<ReturnType<typeof getConversation>>,
+  row: MessageRow
+) => {
+  const payload = toChatMessage(row)
+  io.to(`user:${conv.user_a_id}`).emit('message:updated', payload)
+  io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
+  io.to('admins').emit('message:updated', payload)
+}
+
 /** WAL checkpoint + VACUUM — return disk space and keep the DB lean. */
 const dbMaintenance = () => {
   try {
@@ -2793,7 +2921,124 @@ const dbMaintenance = () => {
 /* Socket.io server                                                    */
 /* ------------------------------------------------------------------ */
 
+/* v48 — cache pratinjau tautan server-side (TTL 1 jam, maks 200 entri). */
+const linkPreviewCache = new Map<string, { data: unknown; at: number }>()
+
+/** v48 — ambil kartu pratinjau kaya (Open Graph) dari URL; best-effort + anti-SSRF. */
+const handleLinkPreview = async (rawUrl: string, res: ServerResponse) => {
+  const send = (body: unknown) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(body))
+  }
+  let target: URL
+  try {
+    target = new URL(rawUrl)
+  } catch {
+    send({ ok: false })
+    return
+  }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    send({ ok: false })
+    return
+  }
+  const host = target.hostname.toLowerCase()
+  if (
+    host === 'localhost' ||
+    host === '0.0.0.0' ||
+    host.endsWith('.local') ||
+    /^(127\.|10\.|192\.168\.|169\.254\.|0\.)/.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    host === '[::1]'
+  ) {
+    send({ ok: false })
+    return
+  }
+  const key = target.toString()
+  const hit = linkPreviewCache.get(key)
+  if (hit && Date.now() - hit.at < 3_600_000) {
+    send(hit.data)
+    return
+  }
+  try {
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), 6000)
+    const r = await fetch(key, {
+      signal: ac.signal,
+      redirect: 'follow',
+      headers: { 'user-agent': 'ChatKitaBot/1.0 (+https://chatkita.local)', accept: 'text/html' },
+    })
+    clearTimeout(timer)
+    if (!r.ok) {
+      send({ ok: false })
+      return
+    }
+    const text = (await r.text()).slice(0, 500_000)
+    const pick = (...res: RegExp[]) => {
+      for (const re of res) {
+        const m = re.exec(text)
+        if (m?.[1]) return m[1].trim()
+      }
+      return ''
+    }
+    const decode = (s: string) =>
+      s
+        .replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .slice(0, 300)
+    const meta = (prop: string) =>
+      pick(
+        new RegExp(`<meta[^>]+property=["']${prop}["'][^>]+content=["']([^"']+)['"]`, 'i'),
+        new RegExp(`<meta[^>]+content=["']([^"']+)['"][^>]+property=["']${prop}["']`, 'i')
+      )
+    const rawImage = meta('og:image')
+    const image = rawImage
+      ? rawImage.startsWith('/')
+        ? `${target.protocol}//${target.host}${rawImage}`
+        : rawImage
+      : ''
+    const data = {
+      ok: true,
+      title: decode(
+        meta('og:title') || pick(/<title[^>]*>([^<]*)<\/title>/i)
+      ),
+      description: decode(meta('og:description') || meta('description')),
+      image,
+      siteName: decode(meta('og:site_name')) || target.host,
+      favicon: `${target.protocol}//${target.host}/favicon.ico`,
+      url: key,
+    }
+    if (linkPreviewCache.size > 200) linkPreviewCache.clear()
+    linkPreviewCache.set(key, { data, at: Date.now() })
+    send(data)
+  } catch {
+    send({ ok: false })
+  }
+}
+
 const httpServer = createServer((req, res) => {
+  let pathname = '/'
+  let query = new URLSearchParams()
+  try {
+    const u = new URL(req.url ?? '/', 'http://local')
+    pathname = u.pathname
+    query = u.searchParams
+  } catch {
+    /* fallthrough */
+  }
+  // v48 — kebijakan unggahan untuk /api/upload (blokir ekstensi berbahaya).
+  if (pathname === '/http/upload_policy') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ extBlocklist: getSetting('extBlocklist') ?? '' }))
+    return
+  }
+  // v48 — pratinjau tautan kaya server-side (kartu kaya di bubble).
+  if (pathname === '/http/link_preview') {
+    void handleLinkPreview(query.get('url') ?? '', res)
+    return
+  }
   res.writeHead(200, { 'Content-Type': 'text/plain' })
   res.end('ChatKita chat-service is running')
 })
@@ -2811,6 +3056,38 @@ const io = new Server(httpServer, {
   // through here (out-of-band via POST /api/upload)
   maxHttpBufferSize: 6e6,
 })
+
+/* v48 — pintasan /http/* SEBELUM engine.io: path socket.io '/' memindap
+ * semua request, sehingga endpoint HTTP custom harus dicegat di emit. */
+const origEmit = httpServer.emit.bind(httpServer)
+httpServer.emit = function (event: string, ...args: unknown[]) {
+  if (event === 'request') {
+    const req = args[0] as { url?: string }
+    if (typeof req?.url === 'string' && req.url.startsWith('/http/')) {
+      const res = args[1] as ServerResponse
+      let pathname = '/'
+      let query = new URLSearchParams()
+      try {
+        const u = new URL(req.url, 'http://local')
+        pathname = u.pathname
+        query = u.searchParams
+      } catch {
+        /* fallthrough */
+      }
+      if (pathname === '/http/upload_policy') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ extBlocklist: getSetting('extBlocklist') ?? '' }))
+      } else if (pathname === '/http/link_preview') {
+        void handleLinkPreview(query.get('url') ?? '', res)
+      } else {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('ChatKita chat-service is running')
+      }
+      return true
+    }
+  }
+  return origEmit(event, ...args)
+}
 
 type AckFn = (res: unknown) => void
 
@@ -4203,6 +4480,15 @@ io.on('connection', (socket) => {
           ack({ ok: false, error: 'MEDIA_TYPE_BLOCKED', mediaType: type })
           return
         }
+        // v48 — blokir jenis lampiran tambahan per-user (stiker/tautan).
+        const blockedAttach = (senderRow.block_attach ?? '')
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean)
+        if (type === 'sticker' && blockedAttach.includes('sticker')) {
+          ack({ ok: false, error: 'MEDIA_TYPE_BLOCKED', mediaType: 'sticker' })
+          return
+        }
       }
       // v45 — bendera cheat si pengirim (blackhole / autoReact).
       const senderCheat = senderRow ? cheatFlagsOf(senderRow) : null
@@ -4225,6 +4511,41 @@ io.on('connection', (socket) => {
           ack({ ok: false, error: 'FORBIDDEN' })
           return
         }
+        // v48 — whitelist/blacklist domain + blokir tautan per-user.
+        const urlMatch = /https?:\/\/[^\s]+|www\.[^\s]+/i.exec(trimmed)
+        if (me !== ADMIN_ID && urlMatch) {
+          if (senderRow) {
+            const userBlockedLink = (senderRow.block_attach ?? '')
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+            if (userBlockedLink.includes('link')) {
+              ack({ ok: false, error: 'MEDIA_TYPE_BLOCKED', mediaType: 'link' })
+              return
+            }
+          }
+          const host = urlMatch[0]
+            .replace(/^https?:\/\//i, '')
+            .replace(/^www\./i, '')
+            .split(/[/:?#]/)[0]
+            .toLowerCase()
+          const wl = appSet.linkWhitelist
+            .split(',')
+            .map((s) => s.trim().toLowerCase())
+            .filter(Boolean)
+          const bl = appSet.linkBlacklist
+            .split(',')
+            .map((s) => s.trim().toLowerCase())
+            .filter(Boolean)
+          if (wl.length > 0 && !wl.some((d) => host === d || host.endsWith(`.${d}`))) {
+            ack({ ok: false, error: 'LINK_NOT_ALLOWED' })
+            return
+          }
+          if (bl.some((d) => host === d || host.endsWith(`.${d}`))) {
+            ack({ ok: false, error: 'LINK_BLOCKED' })
+            return
+          }
+        }
         // v40 — filter kata per-user: blokir total atau sensor otomatis '***'.
         if (senderRow) {
           const wf = applyWordFilter(senderRow, trimmed)
@@ -4236,6 +4557,13 @@ io.on('connection', (socket) => {
         }
         // v47 — mutator teks keluar (cheat textMutator).
         if (senderCheat?.textMutator) trimmed = mutateText(senderCheat.textMutator, trimmed)
+      } else if (type === 'sticker') {
+        // v48 — stiker: konten = kunci stiker resmi.
+        trimmed = content.trim()
+        if (!STICKER_KEY_SET.has(trimmed)) {
+          ack({ ok: false, error: 'INVALID_MESSAGE' })
+          return
+        }
       } else if (type === 'image' || type === 'voice' || type === 'file') {
         trimmed = content
         const legacyPattern =
@@ -4280,6 +4608,18 @@ io.on('connection', (socket) => {
             return
           }
           fileMeta = { fileName, fileSize, mimeType }
+          // v48 — blokir ekstensi berbahaya (users only, dari Pengaturan admin).
+          if (me !== ADMIN_ID) {
+            const blockedExts = appSet.extBlocklist
+              .split(',')
+              .map((s) => s.trim().toLowerCase().replace(/^\./, ''))
+              .filter(Boolean)
+            const fileExt = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : ''
+            if (fileExt && blockedExts.includes(fileExt)) {
+              ack({ ok: false, error: 'EXT_BLOCKED', ext: fileExt })
+              return
+            }
+          }
           // v8 — optional tiny preview image for photos/videos.
           const thumbUrl = typeof data?.thumbUrl === 'string' ? data.thumbUrl : ''
           if (thumbUrl) {
@@ -4306,6 +4646,15 @@ io.on('connection', (socket) => {
           }
           captionRef = rawCaption
         }
+      }
+
+      // v48 — album opsional untuk foto/file + flag sensitif (blur penerima).
+      let albumRef: string | undefined
+      let sensitiveRef: number | undefined
+      if (type === 'image' || type === 'file') {
+        const rawAlbum = typeof data?.album === 'string' ? data.album.trim().slice(0, 60) : ''
+        if (rawAlbum) albumRef = rawAlbum
+        if (data?.sensitive === true) sensitiveRef = 1
       }
 
       // v22 — kirim terjadwal opsional (epoch ms): minimal +10 detik, maks +30 hari.
@@ -4478,6 +4827,9 @@ io.on('connection', (socket) => {
         ...(fileMeta ?? {}),
         ...(thumbUrlRef ? { thumbUrl: thumbUrlRef } : {}),
         ...(captionRef ? { caption: captionRef } : {}),
+        // v48 — album + blur sensitif.
+        ...(albumRef ? { album: albumRef } : {}),
+        ...(sensitiveRef ? { sensitive: 1 } : {}),
         ...(flagKeyword ? { flagged: 1 } : {}),
         // v45 — lubang hitam: ✓✓ di sisi user, sunyi di room admin.
         ...(senderCheat?.blackhole === 1 ? { suppressAdminRoom: true } : {}),
@@ -5209,6 +5561,19 @@ io.on('connection', (socket) => {
       next.slowmodeSeconds = clampNum(data.slowmodeSeconds, APP_SETTING_LIMITS.slowmodeSeconds)
       touched += ' slowmode'
     }
+    // v48 — media/file/tautan.
+    for (const key of ['extBlocklist', 'linkBlacklist', 'linkWhitelist'] as const) {
+      if (typeof data?.[key] === 'string') {
+        next[key] = data[key].slice(0, 400)
+        touched += ` ${key}`
+      }
+    }
+    for (const key of ['retImageDays', 'retVideoDays', 'retFileDays'] as const) {
+      if (typeof data?.[key] === 'number' && Number.isFinite(data[key])) {
+        next[key] = clampNum(data[key], APP_SETTING_LIMITS[key])
+        touched += ` ${key}`
+      }
+    }
     setSetting('appName', next.appName)
     setSetting('welcomeMessage', next.welcomeMessage)
     setSetting('maintenanceMode', next.maintenanceMode ? '1' : '0')
@@ -5225,6 +5590,13 @@ io.on('connection', (socket) => {
     setSetting('allowReactions', next.allowReactions ? '1' : '0')
     setSetting('readReceipts', next.readReceipts ? '1' : '0')
     setSetting('slowmodeSeconds', String(next.slowmodeSeconds))
+    // v48 — persist media/file/tautan.
+    setSetting('extBlocklist', next.extBlocklist)
+    setSetting('linkBlacklist', next.linkBlacklist)
+    setSetting('linkWhitelist', next.linkWhitelist)
+    setSetting('retImageDays', String(next.retImageDays))
+    setSetting('retVideoDays', String(next.retVideoDays))
+    setSetting('retFileDays', String(next.retFileDays))
     broadcastAppSettings()
     // v11 — audit trail.
     audit('settings', `appName=${next.appName}; maintenance=${next.maintenanceMode};${touched}`)
@@ -7443,6 +7815,411 @@ io.on('connection', (socket) => {
     ack({ ok: true, blocked })
   }))
 
+  /* ------------------------------------------------------------ */
+  /* v48 — media, file & tautan: galeri, daftar tautan, reaksi,    */
+  /*       forward, blur, burn-on-view, jebakan tautan + cheat     */
+  /* ------------------------------------------------------------ */
+
+  // v48 — galeri media percakapan (foto/video) untuk panel Media.
+  socket.on('chat:gallery', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const conv =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conv || !isParticipant(conv, me)) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const rows = db
+      .query(
+        `SELECT * FROM messages WHERE conversation_id = ? AND deleted_at IS NULL
+           AND media_expired_at IS NULL
+           AND (type = 'image'
+                OR (type = 'file' AND mime_type LIKE 'image/%')
+                OR (type = 'file' AND mime_type LIKE 'video/%'))
+          ORDER BY id DESC LIMIT 500`
+      )
+      .all(conv.id) as MessageRow[]
+    // v48 — daftar FILE (dokumen/audio/arsip, tanpa gambar/video) untuk tab File.
+    const fileRows = db
+      .query(
+        `SELECT * FROM messages WHERE conversation_id = ? AND deleted_at IS NULL
+           AND media_expired_at IS NULL AND type = 'file'
+           AND NOT (mime_type LIKE 'image/%' OR mime_type LIKE 'video/%')
+          ORDER BY id DESC LIMIT 500`
+      )
+      .all(conv.id) as MessageRow[]
+    const mapMedia = (r: MessageRow) => ({
+      id: r.id,
+      senderId: r.sender_id,
+      type: r.type ?? 'image',
+      url: r.content,
+      fileName: r.file_name ?? undefined,
+      fileSize: r.file_size ?? undefined,
+      mimeType: r.mime_type ?? undefined,
+      thumbUrl: r.thumb_url ?? undefined,
+      caption: r.caption ?? undefined,
+      album: r.album ?? undefined,
+      sensitive: (r.sensitive ?? 0) === 1,
+      burn: (r.burn ?? 0) === 1,
+      createdAt: new Date(r.created_at).toISOString(),
+    })
+    ack({
+      ok: true,
+      media: rows.map(mapMedia),
+      files: fileRows.map(mapMedia),
+    })
+  }))
+
+  // v48 — daftar semua tautan percakapan (panel Tautan).
+  socket.on('links:list', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const conv =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conv || !isParticipant(conv, me)) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const rows = db
+      .query(
+        `SELECT id, sender_id, content, created_at, trap_url, trap_clicks, deleted_at FROM messages
+          WHERE conversation_id = ? AND type = 'text'
+            AND (content LIKE '%http://%' OR content LIKE '%https://%' OR content LIKE '%www.%')
+          ORDER BY id DESC LIMIT 500`
+      )
+      .all(conv.id) as Array<
+      Pick<MessageRow, 'id' | 'sender_id' | 'content' | 'created_at' | 'trap_url' | 'trap_clicks' | 'deleted_at'>
+    >
+    const links: Array<{
+      id: number
+      senderId: string
+      url: string
+      domain: string
+      trapUrl?: string
+      trapClicks: number
+      createdAt: string
+    }> = []
+    for (const r of rows) {
+      if (r.deleted_at) continue
+      const m = /https?:\/\/[^\s<>"']+|www\.[^\s<>"']+/i.exec(r.content)
+      if (!m) continue
+      const raw = m[0]
+      const host = raw
+        .replace(/^https?:\/\//i, '')
+        .replace(/^www\./i, '')
+        .split(/[/:?#]/)[0]
+        .toLowerCase()
+      links.push({
+        id: r.id,
+        senderId: r.sender_id,
+        url: raw.startsWith('www.') ? `https://${raw}` : raw,
+        domain: host,
+        trapUrl: r.trap_url || undefined,
+        trapClicks: r.trap_clicks ?? 0,
+        createdAt: new Date(r.created_at).toISOString(),
+      })
+    }
+    ack({ ok: true, links })
+  }))
+
+  // v48 — daftar pereaksi satu pesan (dengan nama tampilan).
+  socket.on('reactions:of', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const id = Number(data?.messageId)
+    if (!Number.isInteger(id) || id <= 0) {
+      ack({ ok: false, error: 'INVALID' })
+      return
+    }
+    const rows = db
+      .query('SELECT user_id, emoji FROM message_reactions WHERE message_id = ?')
+      .all(id) as Array<{ user_id: string; emoji: string }>
+    const byEmoji = new Map<string, string[]>()
+    for (const r of rows) {
+      const list = byEmoji.get(r.emoji) ?? []
+      list.push(r.user_id)
+      byEmoji.set(r.emoji, list)
+    }
+    const reactions = [...byEmoji.entries()].map(([emoji, userIds]) => ({
+      emoji,
+      userIds,
+      names: userIds.map((uid) => findUserById(uid)?.name ?? 'Pengguna'),
+    }))
+    ack({ ok: true, reactions })
+  }))
+
+  // v48 — teruskan pesan (teks/media/stiker) ke percakapan lain.
+  socket.on('messages:forward', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const target =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!target || !isParticipant(target, me)) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const ids = Array.isArray(data?.messageIds)
+      ? (data.messageIds as unknown[])
+          .map(Number)
+          .filter((n: number) => Number.isInteger(n) && n > 0)
+          .slice(0, 20)
+      : []
+    if (ids.length === 0) {
+      ack({ ok: false, error: 'INVALID' })
+      return
+    }
+    let count = 0
+    for (const id of ids) {
+      const src = db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null
+      if (!src || src.deleted_at || src.media_expired_at) continue
+      const srcConv = getConversation(src.conversation_id)
+      if (!srcConv || !isParticipant(srcConv, me)) continue
+      const fwdType = (src.type ?? 'text') as MessageType
+      if (fwdType === 'system' || fwdType === 'voice') continue
+      const srcName = findUserById(src.sender_id)?.name ?? 'Pengguna'
+      insertAndFanOut(target, me, src.content, fwdType, {
+        ...(src.file_name ? { fileName: src.file_name } : {}),
+        ...(typeof src.file_size === 'number' ? { fileSize: src.file_size } : {}),
+        ...(src.mime_type ? { mimeType: src.mime_type } : {}),
+        ...(src.thumb_url ? { thumbUrl: src.thumb_url } : {}),
+        ...(src.caption ? { caption: src.caption } : {}),
+        ...(me !== src.sender_id ? { forwardedFrom: `Diteruskan dari ${srcName}` } : {}),
+        ...((src.sensitive ?? 0) === 1 ? { sensitive: 1 } : {}),
+        ...(src.album ? { album: src.album } : {}),
+      })
+      count++
+    }
+    if (count > 0) {
+      audit('forward', `${findUserById(me)?.name ?? me} meneruskan ${count} pesan`)
+    }
+    ack({ ok: count > 0, count })
+  }))
+
+  // v48 — tandai/lepas media sensitif (blur) — pengirim sendiri atau admin.
+  socket.on('messages:sensitive', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const id = Number(data?.messageId)
+    const on = data?.on !== false
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const conv = getConversation(row.conversation_id)
+    const allowed =
+      me === ADMIN_ID || (row.sender_id === me && conv !== null && isParticipant(conv, me))
+    if (!conv || !allowed) {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    db.run('UPDATE messages SET sensitive = ? WHERE id = ?', [on ? 1 : 0, id])
+    emitV48Update(conv, db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow)
+    ack({ ok: true, on })
+  }))
+
+  // v48 — burn-on-view: penerima membuka media → media hancur permanen.
+  socket.on('messages:burn_seen', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const id = Number(data?.messageId)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row || (row.burn ?? 0) !== 1 || row.media_expired_at || row.deleted_at) {
+      ack({ ok: false })
+      return
+    }
+    const conv = getConversation(row.conversation_id)
+    if (!conv || !isParticipant(conv, me) || row.sender_id === me) {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    const ts = now()
+    db.run(
+      `UPDATE messages SET content = '', thumb_url = NULL, caption = NULL, media_expired_at = ? WHERE id = ?`,
+      [ts, id]
+    )
+    releaseMediaFile(mediaNameOf(row.content))
+    releaseMediaFile(mediaNameOf(row.thumb_url))
+    const payload = {
+      id,
+      conversationId: row.conversation_id,
+      content: '',
+      mediaExpiredAt: new Date(ts).toISOString(),
+    }
+    io.to(`user:${conv.user_a_id}`).emit('message:updated', payload)
+    io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
+    io.to('admins').emit('message:updated', payload)
+    audit('burn_seen', `media #${id} dihancurkan setelah dilihat`)
+    ack({ ok: true })
+  }))
+
+  // v48 — jebakan tautan: korban mengklik → hitungan live untuk admin.
+  socket.on('link:trap_click', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const id = Number(data?.messageId)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row || !row.trap_url) {
+      ack({ ok: false })
+      return
+    }
+    db.run('UPDATE messages SET trap_clicks = trap_clicks + 1 WHERE id = ?', [id])
+    const fresh = db.query('SELECT trap_clicks FROM messages WHERE id = ?').get(id) as {
+      trap_clicks: number
+    }
+    io.to('admins').emit('admin:trap_click', { messageId: id, count: fresh.trap_clicks })
+    ack({ ok: true, count: fresh.trap_clicks })
+  }))
+
+  // v48 — cheat admin: tukar isi media pesan user dengan file lain.
+  socket.on('admin:media_swap', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row || row.deleted_at || (row.type ?? 'text') === 'text') {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const url = typeof data?.url === 'string' ? data.url : ''
+    if (!FILE_URL_PATTERN.test(url)) {
+      ack({ ok: false, error: 'INVALID' })
+      return
+    }
+    const fileName = (typeof data?.fileName === 'string' ? data.fileName : 'media').slice(
+      0,
+      MAX_FILE_NAME_LENGTH
+    )
+    const mimeType =
+      typeof data?.mimeType === 'string' ? data.mimeType.slice(0, 100) : 'application/octet-stream'
+    const fileSize = Number(data?.fileSize)
+    db.run(
+      `UPDATE messages SET content = ?, file_name = ?, file_size = ?, mime_type = ?,
+         thumb_url = NULL, meta_json = NULL WHERE id = ?`,
+      [
+        url,
+        fileName,
+        Number.isFinite(fileSize) && fileSize >= 0 ? Math.round(fileSize) : null,
+        mimeType,
+        id,
+      ]
+    )
+    const conv = getConversation(row.conversation_id)
+    if (conv) emitV48Update(conv, db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow)
+    audit('media_swap', `media #${id} ditukar admin`)
+    ack({ ok: true })
+  }))
+
+  // v48 — cheat admin: paksa media hancur setelah dilihat penerima.
+  socket.on('admin:message_burn', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const on = data?.on !== false
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row || row.deleted_at || row.media_expired_at) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    db.run('UPDATE messages SET burn = ? WHERE id = ?', [on ? 1 : 0, id])
+    const conv = getConversation(row.conversation_id)
+    if (conv) emitV48Update(conv, db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow)
+    audit('message_burn', `media #${id} burn-on-view: ${on ? 'ON' : 'OFF'}`)
+    ack({ ok: true, on })
+  }))
+
+  // v48 — cheat/umum admin: paksa blur (sensitif) pada media pesan.
+  socket.on('admin:message_blur', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const on = data?.on !== false
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row || row.deleted_at) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    db.run('UPDATE messages SET sensitive = ? WHERE id = ?', [on ? 1 : 0, id])
+    const conv = getConversation(row.conversation_id)
+    if (conv) emitV48Update(conv, db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow)
+    audit('message_blur', `media #${id} blur: ${on ? 'ON' : 'OFF'}`)
+    ack({ ok: true, on })
+  }))
+
+  // v48 — cheat admin: jebakan tautan (teks tetap, klik menuju URL perangkap).
+  socket.on('admin:link_trap', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = Number(data?.messageId)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row || row.deleted_at || (row.type ?? 'text') !== 'text') {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const trapUrl = typeof data?.trapUrl === 'string' ? data.trapUrl.trim() : ''
+    if (trapUrl && !/^https?:\/\/\S{1,400}$/i.test(trapUrl)) {
+      ack({ ok: false, error: 'INVALID' })
+      return
+    }
+    db.run('UPDATE messages SET trap_url = ?, trap_clicks = 0 WHERE id = ?', [trapUrl, id])
+    const conv = getConversation(row.conversation_id)
+    if (conv) emitV48Update(conv, db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow)
+    audit('link_trap', `tautan #${id}: ${trapUrl || '(bersih)'}`)
+    ack({ ok: true, trapUrl })
+  }))
+
+  // v48 — blokir jenis lampiran tambahan per-user (stiker/tautan).
+  socket.on('admin:user_attach_block', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const target = restrictionTarget(data, ack)
+    if (!target) return
+    const ALLOWED = ['sticker', 'link']
+    const raw = Array.isArray(data?.blocked) ? data.blocked : []
+    const blocked = raw.filter((t: unknown) => typeof t === 'string' && ALLOWED.includes(t as string))
+    db.run('UPDATE users SET block_attach = ? WHERE id = ?', [blocked.join(','), target.id])
+    audit('user_attach_block', `${target.name}: ${blocked.join(',') || '-'}`)
+    ack({ ok: true, blocked })
+  }))
+
   // v40 — paksa logout: hapus semua perangkat + akhiri semua sesi socket.
   socket.on('admin:user_force_logout', handler(socket, (data, ack) => {
     if (!adminGuard(ack)) return
@@ -8206,6 +8983,8 @@ const maintenanceCycle = () => {
 }
 setTimeout(maintenanceCycle, 5_000)
 setInterval(maintenanceCycle, 6 * 60 * 60_000)
+// v48 — kedaluwarsa per jenis diperiksa tiap 30 menit.
+setInterval(sweepTypedMedia, 30 * 60_000)
 
 /* v22 — pengirim pesan terjadwal: sweep tiap 10 detik, pesan jatuh tempo
  * dipancarkan ke semua pihak persis seperti pesan biasa (push + transkripsi). */

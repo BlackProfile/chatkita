@@ -5,10 +5,15 @@ import {
   ArrowDown,
   ArrowLeft,
   ArrowRight,
+  Camera,
   ChevronUp,
   Clock,
+  Eye,
   Film,
+  FolderOpen,
+  FolderPlus,
   Image as ImageIcon,
+  Layers,
   Leaf,
   Loader2,
   LogOut,
@@ -25,6 +30,7 @@ import {
   SendHorizonal,
   ShieldCheck,
   Smile,
+  Sparkles,
   Star,
   Sun,
   Trash2,
@@ -45,6 +51,14 @@ import {
   type ViewerState,
 } from "@/components/chat/media-viewer";
 import { LinkViewerDialog } from "@/components/chat/link-viewer";
+import { UserMediaPanel } from "@/components/chat/user-media-panel";
+import {
+  GIF_PACK,
+  STICKER_KEYS,
+  STICKER_LABELS,
+  StickerSvg,
+  type StickerKey,
+} from "@/lib/stickers";
 import { TypingDots } from "@/components/chat/TypingDots";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
@@ -68,6 +82,7 @@ import {
 } from "@/components/ui/dialog";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -594,6 +609,21 @@ export function Messenger() {
   // Task 19: membawa GALERI media percakapan (foto+video, urutan pesan)
   // + index item yang dibuka → navigasi geser/panah/chevron di viewer.
   const [viewer, setViewer] = useState<ViewerState | null>(null);
+  /* v48 — media/file/tautan: panel, antrian multi-lampiran, stiker/GIF,
+   * kamera, flag sensitif/album, forward. */
+  const [convList, setConvList] = useState<ConversationOverview[]>([]);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [queue, setQueue] = useState<{ file: File; previewUrl?: string }[]>([]);
+  const [queueBusy, setQueueBusy] = useState(false);
+  const [queueProgress, setQueueProgress] = useState<number | null>(null);
+  const [stickerOpen, setStickerOpen] = useState(false);
+  const [stickerTab, setStickerTab] = useState<"stiker" | "gif">("stiker");
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [sensitiveNext, setSensitiveNext] = useState(false);
+  const [albumNext, setAlbumNext] = useState("");
+  const [albumOpen, setAlbumOpen] = useState(false);
+  const [forwardMsg, setForwardMsg] = useState<ChatMessage | null>(null);
+  const multiInputRef = useRef<HTMLInputElement | null>(null);
   const mediaGallery = useMemo(() => buildMediaGallery(messages), [messages]);
   // v29 — jumlah pesan terjadwal milik saya yang belum terkirim (field
   // scheduledAt hanya ada selama belum delivered → cocok utk chip ⏰).
@@ -777,6 +807,8 @@ export function Messenger() {
     // Recovery: if the current conversation disappears server-side
     // (e.g. database reset), hop to the one conversation we do have.
     socket.on("conversations:update", (list: ConversationOverview[]) => {
+      // v48 — simpan daftar untuk dialog Teruskan.
+      setConvList(list);
       const current = conversationIdRef.current;
       if (current && !list.some((c) => c.id === current) && list.length > 0) {
         const next = list[0];
@@ -893,6 +925,12 @@ export function Messenger() {
                 starredBy: u.starredBy ?? m.starredBy,
                 /* v25 — Pusat Cheat: waktu pesan diubah admin. */
                 createdAt: u.createdAt ?? m.createdAt,
+                /* v48 — media: burn kedaluwarsa, blur sensitif, jebakan tautan. */
+                mediaExpiredAt: u.mediaExpiredAt ?? m.mediaExpiredAt,
+                sensitive: u.sensitive ?? m.sensitive,
+                burn: u.burn ?? m.burn,
+                trapUrl: u.trapUrl !== undefined ? u.trapUrl : m.trapUrl,
+                trapClicks: u.trapClicks ?? m.trapClicks,
               }
             : m
         )
@@ -900,6 +938,10 @@ export function Messenger() {
       if (u.translation && u.id === translatingIdRef.current) {
         translatingIdRef.current = null;
         setTranslatingId(null);
+      }
+      // v48 — burn-on-view: tutup viewer bila media yang terbuka habis terbakar.
+      if (u.mediaExpiredAt) {
+        setViewer((prev) => (prev && prev.media.sourceId === u.id ? null : prev));
       }
     });
 
@@ -1218,7 +1260,7 @@ export function Messenger() {
 
   const emitMessage = (
     content: string,
-    type: "text" | "image" | "voice" | "file",
+    type: "text" | "image" | "voice" | "file" | "sticker",
     extra: {
       durationMs?: number;
       fileName?: string;
@@ -1227,6 +1269,9 @@ export function Messenger() {
       thumbUrl?: string;
       /** v20 — caption teks yang ikut media (foto/file). */
       caption?: string;
+      /** v48 — blur sensitif + album. */
+      sensitive?: boolean;
+      album?: string;
     } = {}
   ) => {
     const socket = socketRef.current;
@@ -1583,6 +1628,8 @@ export function Messenger() {
           fileSize: fullMeta.size,
           thumbUrl: thumbMeta.url,
           ...(captionText ? { caption: captionText } : {}),
+          ...(sensitiveNext ? { sensitive: true } : {}),
+          ...(albumNext ? { album: albumNext } : {}),
         })
       ) {
         URL.revokeObjectURL(target.previewUrl);
@@ -1634,6 +1681,127 @@ export function Messenger() {
     });
   };
 
+  /* v48 — multi-lampiran: pilih banyak file / drop / paste → antrian chip. */
+  const handleMultiPick = async (list: FileList | File[] | null | undefined) => {
+    if (!list || list.length === 0) return;
+    setFileError(null);
+    const items: { file: File; previewUrl?: string }[] = [];
+    for (const f of Array.from(list)) {
+      if (f.size > MAX_FILE_SIZE) {
+        setFileError(`${f.name}: terlalu besar (maks 25 MB), dilewati.`);
+        continue;
+      }
+      if (f.type.startsWith("image/")) {
+        try {
+          const blobs = await compressImageToBlobs(f);
+          const stamp = Date.now();
+          items.push({
+            file: new File([blobs.full], `foto-${stamp}-${items.length}.jpg`, {
+              type: "image/jpeg",
+            }),
+            previewUrl: URL.createObjectURL(blobs.thumb),
+          });
+        } catch {
+          items.push({ file: f });
+        }
+      } else {
+        items.push({
+          file: f,
+          ...(f.type.startsWith("video/") ? { previewUrl: URL.createObjectURL(f) } : {}),
+        });
+      }
+    }
+    setQueue((q) => [...q, ...items]);
+  };
+
+  const removeQueueAt = (i: number) => {
+    setQueue((q) => {
+      const copy = [...q];
+      const it = copy.splice(i, 1)[0];
+      if (it?.previewUrl) URL.revokeObjectURL(it.previewUrl);
+      return copy;
+    });
+  };
+
+  const clearQueue = () => {
+    setQueue((q) => {
+      for (const it of q) if (it.previewUrl) URL.revokeObjectURL(it.previewUrl);
+      return [];
+    });
+  };
+
+  const sendQueue = async () => {
+    if (queueBusy || queue.length === 0) return;
+    setQueueBusy(true);
+    setQueueProgress(0);
+    const captionText = input.trim();
+    const items = queue;
+    setQueue([]);
+    try {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const meta = await uploadMedia(item.file, (p) =>
+          setQueueProgress(Math.round(((i + p / 100) / items.length) * 100))
+        );
+        let thumbUrl: string | undefined;
+        if (resolveFileKind(meta.mimeType, meta.fileName) === "video") {
+          try {
+            const poster = await videoPosterBlob(item.file);
+            if (poster) {
+              const posterMeta = await uploadMedia(
+                new File([poster], `${meta.fileName}-thumb.jpg`, { type: "image/jpeg" })
+              );
+              thumbUrl = posterMeta.url;
+            }
+          } catch {
+            /* best-effort */
+          }
+        }
+        const mtype = meta.mimeType.startsWith("image/") ? "image" : "file";
+        emitMessage(meta.url, mtype, {
+          fileName: meta.fileName,
+          mimeType: meta.mimeType,
+          fileSize: meta.size,
+          ...(thumbUrl ? { thumbUrl } : {}),
+          ...(i === 0 && captionText ? { caption: captionText } : {}),
+          ...(sensitiveNext ? { sensitive: true } : {}),
+          ...(albumNext ? { album: albumNext } : {}),
+        });
+      }
+      if (captionText) setInput("");
+    } catch {
+      setFileError("Gagal mengunggah beberapa lampiran.");
+    } finally {
+      for (const it of items) if (it.previewUrl) URL.revokeObjectURL(it.previewUrl);
+      setQueueBusy(false);
+      setQueueProgress(null);
+    }
+  };
+
+  /* v48 — stiker & GIF. */
+  const sendSticker = (key: StickerKey) => {
+    setStickerOpen(false);
+    if (!emitMessage(key, "sticker", {})) setSendError(true);
+  };
+
+  const sendGif = async (gif: { id: string; label: string; src: string }) => {
+    setStickerOpen(false);
+    try {
+      const res = await fetch(gif.src);
+      const blob = await res.blob();
+      const meta = await uploadMedia(
+        new File([blob], `${gif.id}-${Date.now()}.gif`, { type: "image/gif" })
+      );
+      emitMessage(meta.url, "image", {
+        fileName: meta.fileName,
+        mimeType: meta.mimeType,
+        fileSize: meta.size,
+      });
+    } catch {
+      setImageError("Gagal mengirim animasi GIF.");
+    }
+  };
+
   const sendFile = async () => {
     const target = pendingFile;
     if (!target || uploading) return;
@@ -1665,6 +1833,8 @@ export function Messenger() {
         fileSize: meta.size,
         ...(thumbUrl ? { thumbUrl } : {}),
         ...(captionText ? { caption: captionText } : {}),
+        ...(sensitiveNext ? { sensitive: true } : {}),
+        ...(albumNext ? { album: albumNext } : {}),
       });
       if (sent) {
         dismissPendingFile();
@@ -2157,6 +2327,17 @@ export function Messenger() {
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
+            {/* v48 — panel media, file & tautan percakapan ini. */}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-9 text-muted-foreground hover:text-foreground"
+              aria-label="Panel media, file & tautan"
+              title="Media, file & tautan"
+              onClick={() => setPanelOpen(true)}
+            >
+              <FolderOpen className="size-4" aria-hidden="true" />
+            </Button>
             <Button
               variant="ghost"
               size="icon"
@@ -2445,9 +2626,27 @@ export function Messenger() {
                   }
                   canEdit={canEditMessage(m, me.userId)}
                   linkPreviewEnabled={appSettings?.linkPreview !== false}
+                  sensitive={!!m.sensitive}
+                  album={m.album}
+                  burn={!!m.burn}
+                  trapUrl={m.trapUrl}
+                  onTrapClick={() =>
+                    socketRef.current?.emit("link:trap_click", { messageId: m.id })
+                  }
+                  onForward={
+                    !m.deletedAt && m.type !== "system" && m.type !== "voice"
+                      ? () => setForwardMsg(m)
+                      : undefined
+                  }
                   onReply={() => setReplyTo(m)}
                   onDelete={() => handleDelete(m)}
-                  onMediaOpen={() => setViewer(viewerStateForMessage(mediaGallery, m))}
+                  onMediaOpen={() => {
+                    // v48 — burn-on-view: penerima membuka → media hancur.
+                    if (m.burn && m.senderId !== me.userId) {
+                      socketRef.current?.emit("messages:burn_seen", { messageId: m.id });
+                    }
+                    setViewer(viewerStateForMessage(mediaGallery, m));
+                  }}
                   onReact={(emoji) => handleReact(m, emoji)}
                   onEdit={() => handleEditStart(m)}
                   onTranslate={
@@ -2542,6 +2741,94 @@ export function Messenger() {
             >
               <X className="size-4" />
             </button>
+          </div>
+        ) : null}
+
+        {/* v48 — antrian multi-lampiran */}
+        {queue.length > 0 ? (
+          <div className="mx-3 mb-1 rounded-xl border bg-card/90 px-2.5 py-2 shadow-sm backdrop-blur-sm">
+            <div className="mb-1.5 flex items-center gap-2">
+              <p className="flex-1 text-xs font-medium">
+                {queue.length} lampiran dalam antrian
+                {sensitiveNext ? " · sensitif" : ""}
+                {albumNext ? ` · album: ${albumNext}` : ""}
+              </p>
+              <Button
+                size="sm"
+                className="h-7 gap-1 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-600/90"
+                disabled={!connected || queueBusy || sendBlocked}
+                onClick={() => void sendQueue()}
+              >
+                {queueBusy ? (
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                ) : (
+                  <SendHorizonal className="size-3.5" aria-hidden="true" />
+                )}
+                Kirim semua
+              </Button>
+              <button
+                type="button"
+                aria-label="Kosongkan antrian"
+                className="text-muted-foreground hover:text-foreground"
+                disabled={queueBusy}
+                onClick={clearQueue}
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+            {queueProgress != null ? (
+              <div
+                className="mb-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted"
+                role="progressbar"
+                aria-valuenow={queueProgress}
+                aria-valuemin={0}
+                aria-valuemax={100}
+              >
+                <div
+                  className="h-full rounded-full bg-emerald-600 transition-all"
+                  style={{ width: `${queueProgress}%` }}
+                />
+              </div>
+            ) : null}
+            <div className="flex gap-1.5 overflow-x-auto pb-0.5">
+              {queue.map((it, i) => (
+                <div
+                  key={`${i}-${it.file.name}`}
+                  className="relative size-16 shrink-0 overflow-hidden rounded-lg border bg-muted"
+                >
+                  {it.previewUrl ? (
+                    it.file.type.startsWith("video/") ? (
+                      <video
+                        src={it.previewUrl}
+                        muted
+                        playsInline
+                        preload="metadata"
+                        className="size-full object-cover"
+                      />
+                    ) : (
+                      <img src={it.previewUrl} alt={it.file.name} className="size-full object-cover" />
+                    )
+                  ) : (
+                    <span className="flex size-full items-center justify-center text-muted-foreground">
+                      <FileKindIcon
+                        mimeType={it.file.type}
+                        fileName={it.file.name}
+                        className="size-5"
+                      />
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    aria-label={`Hapus ${it.file.name}`}
+                    className="absolute right-0.5 top-0.5 flex size-5 items-center justify-center rounded-full bg-black/60 text-white"
+                    disabled={queueBusy}
+                    onClick={() => removeQueueAt(i)}
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         ) : null}
 
@@ -2654,7 +2941,14 @@ export function Messenger() {
         ) : null}
 
         {/* Input row (or recording bar) */}
-        <div className="relative shrink-0 border-t bg-card/85 px-3 pt-2.5 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md">
+        <div
+          className="relative shrink-0 border-t bg-card/85 px-3 pt-2.5 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md"
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault();
+            if (e.dataTransfer?.files?.length) void handleMultiPick(e.dataTransfer.files);
+          }}
+        >
           {emojiOpen ? (
             <EmojiPicker
               onPick={(emoji) => {
@@ -2664,6 +2958,65 @@ export function Messenger() {
               onClose={() => setEmojiOpen(false)}
               className="left-2"
             />
+          ) : null}
+
+          {/* v48 — picker stiker & GIF (dua tab). */}
+          {stickerOpen ? (
+            <div className="absolute bottom-full left-2 z-20 mb-2 w-[19rem] max-w-[calc(100vw-2rem)] rounded-xl border bg-card p-2 shadow-lg">
+              <div className="mb-2 flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant={stickerTab === "stiker" ? "default" : "outline"}
+                  className="h-7 flex-1 rounded-full text-xs"
+                  onClick={() => setStickerTab("stiker")}
+                >
+                  Stiker
+                </Button>
+                <Button
+                  size="sm"
+                  variant={stickerTab === "gif" ? "default" : "outline"}
+                  className="h-7 flex-1 rounded-full text-xs"
+                  onClick={() => setStickerTab("gif")}
+                >
+                  Animasi (GIF)
+                </Button>
+                <button
+                  type="button"
+                  aria-label="Tutup stiker"
+                  className="ml-1 text-muted-foreground hover:text-foreground"
+                  onClick={() => setStickerOpen(false)}
+                >
+                  <X className="size-4" />
+                </button>
+              </div>
+              <div className="chat-scroll grid max-h-56 grid-cols-4 gap-1.5 overflow-y-auto">
+                {stickerTab === "stiker"
+                  ? STICKER_KEYS.map((k) => (
+                      <button
+                        key={k}
+                        type="button"
+                        title={STICKER_LABELS[k]}
+                        aria-label={`Kirim stiker ${STICKER_LABELS[k]}`}
+                        className="flex items-center justify-center rounded-lg p-1.5 transition hover:bg-accent"
+                        onClick={() => sendSticker(k)}
+                      >
+                        <StickerSvg id={k} className="block size-12" />
+                      </button>
+                    ))
+                  : GIF_PACK.map((g) => (
+                      <button
+                        key={g.id}
+                        type="button"
+                        title={g.label}
+                        aria-label={`Kirim animasi ${g.label}`}
+                        className="overflow-hidden rounded-lg border transition hover:ring-2 hover:ring-emerald-500/60"
+                        onClick={() => void sendGif(g)}
+                      >
+                        <img src={g.src} alt={g.label} className="aspect-square w-full object-cover" />
+                      </button>
+                    ))}
+              </div>
+            </div>
           ) : null}
 
           {recorder.recording ? (
@@ -2706,6 +3059,18 @@ export function Messenger() {
                 aria-label="Pilih foto atau file"
                 onChange={(e) => {
                   handleFilePick(e.target.files?.[0]);
+                  e.target.value = "";
+                }}
+              />
+              {/* v48 — input multi-file untuk antrian lampiran. */}
+              <input
+                ref={multiInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                aria-label="Pilih banyak file"
+                onChange={(e) => {
+                  void handleMultiPick(e.target.files);
                   e.target.value = "";
                 }}
               />
@@ -2763,6 +3128,44 @@ export function Messenger() {
                       <Paperclip className="mr-2 size-4" aria-hidden="true" />
                       File
                     </DropdownMenuItem>
+                    {/* v48 — multi-lampiran, stiker/GIF, kamera, sensitif, album. */}
+                    <DropdownMenuItem
+                      disabled={!connected || mediaBlocked || sendBlocked}
+                      onClick={() => multiInputRef.current?.click()}
+                    >
+                      <Layers className="mr-2 size-4" aria-hidden="true" />
+                      Banyak file (antrian)
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={!connected || sendBlocked}
+                      onClick={() => setStickerOpen((v) => !v)}
+                    >
+                      <Sparkles className="mr-2 size-4" aria-hidden="true" />
+                      Stiker &amp; GIF
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={!connected || mediaBlocked || sendBlocked}
+                      onClick={() => setCameraOpen(true)}
+                    >
+                      <Camera className="mr-2 size-4" aria-hidden="true" />
+                      Kamera
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuCheckboxItem
+                      checked={sensitiveNext}
+                      onCheckedChange={(v) => setSensitiveNext(v === true)}
+                      disabled={!connected || mediaBlocked || sendBlocked}
+                    >
+                      <Eye className="mr-2 size-4" aria-hidden="true" />
+                      Sensitif (blur penerima)
+                    </DropdownMenuCheckboxItem>
+                    <DropdownMenuItem
+                      disabled={!connected || mediaBlocked || sendBlocked}
+                      onClick={() => setAlbumOpen(true)}
+                    >
+                      <FolderPlus className="mr-2 size-4" aria-hidden="true" />
+                      {albumNext ? `Album: ${albumNext}` : "Set album…"}
+                    </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
                       disabled={!connected || sendBlocked || !!editing}
@@ -2785,6 +3188,14 @@ export function Messenger() {
                   disabled={!connected || sendBlocked}
                   className="h-11 min-w-0 flex-1 border-0 bg-transparent px-1 shadow-none focus-visible:ring-0 dark:bg-transparent"
                   onChange={(e) => handleInputChange(e.target.value)}
+                  onPaste={(e) => {
+                    // v48 — tempel screenshot/file dari clipboard → antrian.
+                    const files = e.clipboardData?.files;
+                    if (files && files.length > 0) {
+                      e.preventDefault();
+                      void handleMultiPick(files);
+                    }
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
@@ -3012,11 +3423,227 @@ export function Messenger() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Viewer media full-screen + galeri geser (Task 19) */}
-      <MediaViewer state={viewer} onClose={() => setViewer(null)} />
+      {/* Viewer media full-screen + galeri geser (Task 19) + v48 reaksi cepat */}
+      <MediaViewer
+        state={viewer}
+        onClose={() => setViewer(null)}
+        react={{
+          onReact: (emoji) => {
+            const id = viewer?.media.sourceId;
+            if (id) socketRef.current?.emit("message:react", { messageId: id, emoji });
+          },
+          getReactors: async () => {
+            const id = viewer?.media.sourceId;
+            if (!id || !socketRef.current) return [];
+            return await new Promise<{ emoji: string; names: string[] }[]>((resolve) => {
+              socketRef.current?.emit(
+                "reactions:of",
+                { messageId: id },
+                (res: { ok?: boolean; reactions?: { emoji: string; names: string[] }[] }) =>
+                  resolve(res?.reactions ?? [])
+              );
+            });
+          },
+        }}
+      />
 
       {/* v34 — popup pratinjau/pemutar tautan in-app (YouTube/TikTok embed) */}
       <LinkViewerDialog />
+
+      {/* v48 — panel media, file & tautan (user) */}
+      <UserMediaPanel
+        open={panelOpen}
+        onOpenChange={setPanelOpen}
+        socketRef={socketRef}
+        conversationId={conversationId}
+        partnerName={partner?.name ?? "Admin"}
+        onTrapClick={() => {
+          const id = viewer?.media.sourceId;
+          if (id) socketRef.current?.emit("link:trap_click", { messageId: id });
+        }}
+      />
+
+      {/* v48 — dialog album lampiran */}
+      <Dialog open={albumOpen} onOpenChange={setAlbumOpen}>
+        <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Album lampiran</DialogTitle>
+            <DialogDescription>
+              Lampiran berikutnya diberi label album (mis. “Liburan”). Kosongkan untuk tanpa album.
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            value={albumNext}
+            onChange={(e) => setAlbumNext(e.target.value.slice(0, 60))}
+            placeholder="Nama album…"
+            aria-label="Nama album"
+          />
+          <Button
+            className="h-10 w-full rounded-lg bg-emerald-600 text-sm font-semibold text-white hover:bg-emerald-600/90"
+            onClick={() => setAlbumOpen(false)}
+          >
+            Simpan
+          </Button>
+        </DialogContent>
+      </Dialog>
+
+      {/* v48 — dialog teruskan pesan */}
+      <Dialog
+        open={!!forwardMsg}
+        onOpenChange={(o) => {
+          if (!o) setForwardMsg(null);
+        }}
+      >
+        <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Teruskan pesan</DialogTitle>
+            <DialogDescription>Pilih percakapan tujuan.</DialogDescription>
+          </DialogHeader>
+          <div className="chat-scroll max-h-64 space-y-1 overflow-y-auto">
+            {convList.filter((c) => c.id !== conversationId).length === 0 ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                Belum ada percakapan lain.
+              </p>
+            ) : (
+              convList
+                .filter((c) => c.id !== conversationId)
+                .map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-xl border p-2 text-left transition hover:bg-accent"
+                    onClick={() => {
+                      const msg = forwardMsg;
+                      setForwardMsg(null);
+                      if (!msg) return;
+                      socketRef.current?.emit(
+                        "messages:forward",
+                        { messageIds: [msg.id], conversationId: c.id },
+                        (res: AckOf<{ ok: boolean; count?: number }>) => {
+                          if (res?.ok) toast.success(`Diteruskan ke ${c.partner?.name ?? "percakapan"}`);
+                          else toast.error("Gagal meneruskan pesan.");
+                        }
+                      );
+                    }}
+                  >
+                    <Avatar className="size-8">
+                      <AvatarFallback
+                        className={cn(
+                          "text-xs text-white",
+                          avatarColorClass(c.partner?.name ?? "?")
+                        )}
+                      >
+                        {initials(c.partner?.name ?? "?")}
+                      </AvatarFallback>
+                    </Avatar>
+                    <span className="flex-1 truncate text-sm font-medium">
+                      {c.partner?.name ?? "Percakapan"}
+                    </span>
+                    <SendHorizonal className="size-4 text-muted-foreground" aria-hidden="true" />
+                  </button>
+                ))
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* v48 — kamera langsung */}
+      {cameraOpen ? (
+        <CameraCapture
+          onClose={() => setCameraOpen(false)}
+          onCapture={(file) => {
+            setCameraOpen(false);
+            void handleImagePick(file);
+          }}
+        />
+      ) : null}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* v48 — dialog kamera langsung: foto webcam → pipeline foto normal.   */
+/* ------------------------------------------------------------------ */
+
+function CameraCapture({
+  onClose,
+  onCapture,
+}: {
+  onClose: () => void;
+  onCapture: (file: File) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void navigator.mediaDevices
+      ?.getUserMedia({ video: { facingMode: "user" }, audio: false })
+      .then((stream) => {
+        if (!alive) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        streamRef.current = stream;
+        if (videoRef.current) videoRef.current.srcObject = stream;
+      })
+      .catch(() => setError("Kamera tidak tersedia atau izin ditolak."));
+    return () => {
+      alive = false;
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
+  const shoot = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    canvas.getContext("2d")?.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(
+      (b) => {
+        if (b) onCapture(new File([b], `kamera-${Date.now()}.jpg`, { type: "image/jpeg" }));
+      },
+      "image/jpeg",
+      0.9
+    );
+  };
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(o) => {
+        if (!o) onClose();
+      }}
+    >
+      <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Kamera</DialogTitle>
+          <DialogDescription>Ambil foto lalu kirim seperti foto biasa.</DialogDescription>
+        </DialogHeader>
+        {error ? (
+          <p className="py-6 text-center text-sm text-destructive">{error}</p>
+        ) : (
+          <>
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="max-h-[50vh] w-full rounded-xl bg-black object-contain"
+            />
+            <Button
+              className="h-10 w-full rounded-lg bg-emerald-600 text-sm font-semibold text-white hover:bg-emerald-600/90"
+              onClick={shoot}
+            >
+              <Camera className="mr-1.5 size-4" aria-hidden="true" />
+              Ambil foto
+            </Button>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }

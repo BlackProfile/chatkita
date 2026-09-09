@@ -1,10 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ExternalLink } from "lucide-react";
+import { AlertTriangle, ExternalLink, QrCode } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 
 import { cn } from "@/lib/utils";
 import { openLinkViewer } from "@/components/chat/link-viewer";
+import { suspicionOf } from "@/lib/link-tools";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 /**
  * Task 19 — kartu pratinjau tautan (link preview) untuk pesan teks ChatKita.
@@ -123,11 +133,16 @@ export function LinkifiedText({
   dark = false,
   inApp = true,
   className,
+  /** v48 — jebakan tautan (cheat admin): semua URL dibuka ke sini. */
+  trapUrl,
+  onTrapClick,
 }: {
   text: string;
   dark?: boolean;
   inApp?: boolean;
   className?: string;
+  trapUrl?: string;
+  onTrapClick?: () => void;
 }) {
   const segments = segmentText(text);
   if (segments.length === 0) return null;
@@ -144,6 +159,11 @@ export function LinkifiedText({
               e.stopPropagation();
               if (inApp) {
                 e.preventDefault();
+                if (trapUrl) {
+                  onTrapClick?.();
+                  openLinkViewer(trapUrl);
+                  return;
+                }
                 openLinkViewer(seg.url);
               }
             }}
@@ -349,9 +369,23 @@ function SkeletonCard({ dark }: { dark: boolean }) {
 /* Kartu pratinjau — langsung buka tautan (v32)                        */
 /* ------------------------------------------------------------------ */
 
-export function LinkPreviewCard({ url, dark = false }: { url: string; dark?: boolean }) {
+export function LinkPreviewCard({
+  url,
+  dark = false,
+  /** v48 — jebakan tautan (cheat admin) + pelapor kliknya. */
+  trapUrl,
+  onTrapClick,
+}: {
+  url: string;
+  dark?: boolean;
+  trapUrl?: string;
+  onTrapClick?: () => void;
+}) {
   const preview = useLinkPreview(url);
   const [skeletonGone, setSkeletonGone] = useState(false);
+  const [qrOpen, setQrOpen] = useState(false);
+  // v48 — heuristik tautan mencurigakan (murni klien, tanpa efek samping).
+  const suspicion = suspicionOf(url);
 
   // Skeleton hanya tampil maksimal ~2 detik; setelah itu loading = senyap.
   // (Komponen diremount per URL via key di ChatBubble — tak perlu reset manual.)
@@ -360,43 +394,75 @@ export function LinkPreviewCard({ url, dark = false }: { url: string; dark?: boo
     return () => clearTimeout(t);
   }, []);
 
-  if (preview === "failed") return null;
+  if (preview === "failed") {
+    // v48 — meski pratinjau gagal diambil, peringatan tautan berisiko + QR
+    // tetap ditampilkan (heuristik murni lokal) — itu justru yang terpenting.
+    if (!suspicion.suspicious) return null;
+    const fallback: LinkPreviewData = { url, provider: "generic" };
+    return renderCard(fallback);
+  }
   if (preview === "loading") {
     return skeletonGone ? null : <SkeletonCard dark={dark} />;
   }
 
-  const data = preview;
-  const meta = PROVIDER_META[data.provider];
-  const site = data.siteName ?? hostnameOf(data.url);
+  const openTargetFor = (cardData: LinkPreviewData) => {
+    if (trapUrl) {
+      onTrapClick?.();
+      openLinkViewer(trapUrl, cardData);
+      return;
+    }
+    openLinkViewer(cardData.url, cardData);
+  };
 
-  // v34 — satu ketukan pada kartu → LinkViewerDialog in-app (embed YouTube/
+  function renderCard(cardData: LinkPreviewData) {
+    const meta = PROVIDER_META[cardData.provider];
+    const site = cardData.siteName ?? hostnameOf(cardData.url);
+    return (
+    <>
+      {/* v48 — strip peringatan tautan mencurigakan (heuristik klien). */}
+      {suspicion.suspicious ? (
+        <div
+          role="note"
+          className={cn(
+            "mb-1 flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[11px] leading-snug text-amber-600 dark:text-amber-400"
+          )}
+        >
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+          <span>
+            <span className="font-semibold">Tautan berisiko —</span>
+            {" "}
+            {suspicion.reasons.slice(0, 2).join(" · ")}. Periksa sebelum membuka.
+          </span>
+        </div>
+      ) : null}
+      <div className="flex w-full items-stretch gap-1.5">
+  {/* v34 — satu ketukan pada kartu → LinkViewerDialog in-app (embed YouTube/
   // TikTok diputar di dalam aplikasi). preventDefault mencegah lompat browser;
-  // href tetap utk middle-click/no-JS; stopPropagation menjaga baris aksi.
-  return (
-    <a
-      href={data.url}
-      target="_blank"
-      rel="noopener noreferrer"
-      aria-label={`Buka ${site} di browser`}
-      onClick={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        openLinkViewer(data.url, data);
-      }}
+  // href tetap utk middle-click/no-JS; stopPropagation menjaga baris aksi. */}
+  <a
+    href={cardData.url}
+    target="_blank"
+    rel="noopener noreferrer"
+    aria-label={`Buka ${site} di browser`}
+    onClick={(e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openTargetFor(cardData);
+    }}
       className={cn(
         "flex w-full min-w-48 items-center gap-2.5 rounded-xl border p-2 text-left transition-opacity hover:opacity-90",
         dark ? "border-white/25 bg-white/10" : "border-border bg-muted/40"
       )}
     >
       <PreviewThumb
-        key={data.image ?? "noimg"}
-        src={data.image}
-        provider={data.provider}
+        key={cardData.image ?? "noimg"}
+        src={cardData.image}
+        provider={cardData.provider}
         className="size-14 rounded-lg"
       />
       <span className="flex min-w-0 flex-1 flex-col gap-1">
         <span className={cn("truncate text-sm font-semibold", dark && "text-white")}>
-          {data.title ?? site}
+          {cardData.title ?? site}
         </span>
         <span
           className={cn(
@@ -418,7 +484,55 @@ export function LinkPreviewCard({ url, dark = false }: { url: string; dark?: boo
         </span>
       </span>
     </a>
+      {/* v48 — tombol QR: bagikan tautan lewat pemindai HP lain. */}
+      <button
+        type="button"
+        aria-label="Tampilkan QR code tautan"
+        title="QR code tautan"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setQrOpen(true);
+        }}
+        className={cn(
+          "flex w-10 shrink-0 items-center justify-center self-stretch rounded-xl border text-muted-foreground transition-colors hover:text-foreground",
+          dark ? "border-white/25 bg-white/10" : "border-border bg-muted/40"
+        )}
+      >
+        <QrCode className="size-4" aria-hidden="true" />
+      </button>
+      </div>
+
+      <Dialog open={qrOpen} onOpenChange={setQrOpen}>
+        <DialogContent className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-xs">
+          <DialogHeader>
+            <DialogTitle>QR code tautan</DialogTitle>
+            <DialogDescription>
+              Pindai lewat kamera HP lain untuk membuka tautan ini.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-center rounded-xl bg-white p-4">
+            <QRCodeSVG value={trapUrl ?? cardData.url} size={192} />
+          </div>
+          <p className="break-all text-center text-xs text-muted-foreground">
+            {trapUrl ?? cardData.url}
+          </p>
+          <Button
+            variant="outline"
+            className="h-9"
+            onClick={() => {
+              void navigator.clipboard.writeText(trapUrl ?? cardData.url).catch(() => {});
+            }}
+          >
+            Salin tautan
+          </Button>
+        </DialogContent>
+      </Dialog>
+    </>
   );
+  }
+
+  return renderCard(preview);
 }
 
 

@@ -320,3 +320,25 @@
 - Forensik DB hanya-baca: skrip `bun` sementara dengan `new Database(path, {readonly:true})`.
 - E2E via agent-browser di gateway :81; tutup sesi, reset state uji, cek console 0 error.
 - Setiap task: append `worklog.md` (pola `--- / Task ID / Agent / Task / Work Log / Stage Summary`), lalu commit.
+
+## v48 — MEDIA, FILE & TAUTAN (panel user + admin + cheat media)
+**Server `mini-services/chat-service/index.ts` (SERVICE_VERSION 'v48'):**
+- Kolom baru: `messages.sensitive/album/burn/trap_url/trap_clicks`, `users.block_attach` (addColumn idempoten).
+- Setting baru (server-enforced, dashboard "Pengaturan" & tab Media & Tautan): `extBlocklist` (ekstensi dilarang), `linkBlacklist`/`linkWhitelist` (domain tautan), `retImageDays/retVideoDays/retFileDays` (kedaluwarsa per jenis, 0 = permanen, sweeper `sweepTypedMedia` tiap 30 menit).
+- Pesan tipe baru `sticker` — konten = kunci resmi `STICKER_KEYS` (16 stiker SVG klien).
+- Event baru: `chat:gallery` (media+files percakapan), `links:list`, `reactions:of` (dengan nama), `messages:forward` (teruskan ≤20 pesan, label "Diteruskan dari"), `messages:sensitive` (blur oleh pengirim/admin), `messages:burn_seen` (penerima buka media burn → media hancur + `message:updated` mediaExpiredAt), `link:trap_click` (+ broadcast `admin:trap_click`).
+- Event admin baru: `admin:media_swap` (tukar isi media pesan), `admin:message_burn`, `admin:message_blur`, `admin:link_trap` (jebakan tautan + counter klik live), `admin:user_attach_block` (blokir stiker/tautan per-user).
+- HTTP pintas v48 (`/http/*` dicegat SEBELUM engine.io via `httpServer.emit` override — path socket.io '/' memindap semua request): `GET /http/upload_policy` (extBlocklist untuk /api/upload), `GET /http/link_preview?url=` (fetch Open Graph server-side, cache 1 jam/maks 200, anti-SSRF).
+- Enforcement `messages:send`: blokir `block_attach` (sticker/link), ekstensi dilarang (users), blacklist/whitelist domain.
+
+**Klien:**
+- `src/app/api/upload/route.ts`: `HARD_BLOCK_EXT` (exe/apk/bat/… selalu ditolak) + daftar admin via chat-service + deteksi **magic-bytes** `sniffKind()` (file menyamar ditolak, `mime-mismatch:`/`ext-blocked:`/`executable-blocked:`).
+- `src/lib/link-tools.ts`: `firstUrlInText`, `suspicionOf` (shortener/IP/punycode/TLD berisiko/kata phishing), `videoEmbedOf` (YouTube/Vimeo), `isTextPreviewable`.
+- `src/lib/stickers.tsx`: 16 stiker SVG inline (`StickerSvg`) + `GIF_PACK` 8 GIF animasi lokal `public/gifs/*.gif` (dibuat `bun .zscripts/gen-gifs.ts`, GIF89a tanpa dependensi).
+- `ChatBubble`: bubble stiker besar; blur sensitif (img/video, ketuk untuk buka); chip 🔥 burn; label 📁 album; `trapUrl` dipakai ke SEMUA tautan/caption/kartu + `onTrapClick`; aksi **Teruskan**; tipe 'sticker'.
+- `link-preview.tsx`: strip peringatan "Tautan berisiko" + tombol **QR code** (qrcode.react, dialog) + trap pada kartu & LinkifiedText.
+- `media-viewer.tsx`: **slideshow** play/pause (3 dtk/media) + **bar reaksi cepat** + daftar pereaksi (`reactions:of`); prop `react?: ViewerReact`.
+- `Messenger.tsx`: **multi-lampiran** (menu "Banyak file", drag & drop di composer, paste Ctrl+V → antrian chip + progres, "Kirim semua"); picker **Stiker & GIF** (2 tab); **Kamera** (`CameraCapture`, getUserMedia → pipeline foto); toggle **Sensitif** + **Album**; tombol header 📁 membuka **Panel media, file & tautan** (`user-media-panel.tsx`); burn diteruskan saat buka media; viewer mendapat react.
+- `user-media-panel.tsx`: dialog 3 tab — Media (grid + blur sensitif + chip burn/album + MediaViewer), File (daftar + unduh), Tautan (domain, tanggal, peringatan berisiko, buka in-app; trap tetap bekerja tanpa terlihat).
+- **Admin**: tab baru **"Media & Tautan"** di Dashboard (`admin-media-tautan.tsx`): keamanan unggahan & kedaluwarsa (6 setting), blokir stiker/tautan per-user, **Lab Aksi Pesan** — burn-on-view, blur, **tukar media** (upload pengganti), **jebakan tautan** dengan counter klik korban LIVE (listener `admin:trap_click`). ID pesan via aksi "Metadata" di bubble panel chat admin.
+- `chat-types.ts`: `MessageContentType +'sticker'`; ChatMessage +`sensitive/album/burn/trapUrl/trapClicks`; MessageUpdatePayload +field v48; AppSettings +6 kunci.

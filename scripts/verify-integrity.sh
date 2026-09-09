@@ -336,8 +336,8 @@ chk_grep "Dashboard pakai Account 360"       "src/components/chat/admin-dashboar
 chk_grep "Pill sinyal palsu dihapus"         "src/components/chat/AdminPanel.tsx" "pill \"⌨ Typing palsu\" & \"✓✓ Palsu\" dihapus"
 
 echo "[v47 — Cheat Lab II + ganti nama + badge ikon (Task 63)]"
-chk_grep "Versi service v47"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v47'"
-chk_grep "Rescue tag v47"                     "src/instrumentation.ts" "rescue-v47"
+chk_grep "Versi service v47"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v48'"
+chk_grep "Rescue tag v47"                     "src/instrumentation.ts" "rescue-v48"
 chk_grep "Cheat kebal hapus (antiDelete)"     "mini-services/chat-service/index.ts" "antiDelete === 1"
 chk_grep "Ghost event di tombstone"           "mini-services/chat-service/index.ts" "message:ghost"
 chk_grep "Riwayat ghost (antiDelete)"         "mini-services/chat-service/index.ts" "ghostView"

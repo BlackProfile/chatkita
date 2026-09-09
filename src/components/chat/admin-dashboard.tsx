@@ -20,6 +20,7 @@ import {
   UserCog,
   KeyRound,
   Landmark,
+  Images,
   Link2,
   Loader2,
   MessageSquare,
@@ -50,6 +51,7 @@ import {
 } from "lucide-react";
 
 import { AdminCheat } from "@/components/chat/admin-cheat";
+import { AdminMediaTautan } from "@/components/chat/admin-media-tautan";
 import { AccountControlDialog } from "@/components/chat/account-control-dialog";
 import { AdminPusat } from "@/components/chat/admin-pusat";
 import { AdminStorage } from "@/components/chat/admin-storage";
@@ -122,6 +124,7 @@ export type DashboardTab =
   | "pusat"
   | "cheat"
   | "penyimpanan"
+  | "mediatautan"
   | "ringkasan"
   | "analitik"
   | "pengguna"
@@ -133,6 +136,7 @@ const TABS: { key: DashboardTab; label: string; icon: typeof GaugeCircle }[] = [
   { key: "pusat", label: "Pusat", icon: Landmark },
   { key: "cheat", label: "Cheat", icon: Wand2 },
   { key: "penyimpanan", label: "Penyimpanan", icon: HardDrive },
+  { key: "mediatautan", label: "Media & Tautan", icon: Images },
   { key: "ringkasan", label: "Ringkasan", icon: GaugeCircle },
   { key: "analitik", label: "Analitik", icon: BarChart3 },
   { key: "pengguna", label: "Pengguna", icon: Users },
@@ -1815,6 +1819,9 @@ export function AdminDashboard({
           ) : tab === "penyimpanan" ? (
             /* v26 — Peta Penyimpanan: disk + rincian per jenis/user + metadata media. */
             <AdminStorage socket={socket} />
+          ) : tab === "mediatautan" ? (
+            /* v48 — kendali penuh media/file/tautan + cheat media & tautan. */
+            <AdminMediaTautan socket={socket} users={stats.users} />
           ) : tab === "cheat" ? (
             /* v25 — Pusat Cheat: semua fitur cheat admin dalam satu tempat. */
             <AdminCheat socket={socket} users={stats.users} />
