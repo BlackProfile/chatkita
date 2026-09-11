@@ -592,6 +592,10 @@ export function Messenger() {
   const [contactName, setContactName] = useState("");
   const [contactPhone, setContactPhone] = useState("");
   const [contactNote, setContactNote] = useState("");
+  /* v53 — paritas: user juga bisa membuat polling/kuis. */
+  const [pollOpen, setPollOpen] = useState(false);
+  const [pollQuestion, setPollQuestion] = useState("");
+  const [pollOptions, setPollOptions] = useState<string[]>(["", ""]);
   const [input, setInput] = useState("");
   const [sendError, setSendError] = useState(false);
 
@@ -1440,6 +1444,35 @@ export function Messenger() {
     const socket = socketRef.current;
     if (!socket || !connected || !conversationId) return;
     socket.emit("game:play", { conversationId, game, pick });
+  };
+
+  /* v53 — paritas: user membuat polling/kuis (server membatasi peserta +
+   * cooldown 15 dtk; hasil live tampil di kedua sisi). */
+  const handlePollCreate = () => {
+    const socket = socketRef.current;
+    if (!socket || !connected || !conversationId) return;
+    const question = pollQuestion.trim();
+    const options = pollOptions.map((o) => o.trim()).filter(Boolean);
+    if (!question || options.length < 2) {
+      toast.error("Isi pertanyaan & minimal 2 opsi.");
+      return;
+    }
+    socket.emit(
+      "poll:create",
+      { conversationId, question, options },
+      (res: AckOf<{ ok: true; message: ChatMessage }>) => {
+        if (res.ok) {
+          setPollOpen(false);
+          setPollQuestion("");
+          setPollOptions(["", ""]);
+          toast.success("Polling terkirim 📊");
+        } else if (res.error === "RATE_LIMITED") {
+          toast.error("Tunggu sebentar sebelum membuat polling lagi.");
+        } else {
+          toast.error("Polling gagal dibuat.");
+        }
+      }
+    );
   };
 
   const handleSendLocation = () => {
@@ -3323,6 +3356,14 @@ export function Messenger() {
                       <Camera className="mr-2 size-4" aria-hidden="true" />
                       Kamera
                     </DropdownMenuItem>
+                    {/* v53 — paritas: user pun bisa membuat polling. */}
+                    <DropdownMenuItem
+                      disabled={!connected || sendBlocked}
+                      onClick={() => setPollOpen(true)}
+                    >
+                      <span className="mr-2">📊</span>
+                      Buat polling / kuis
+                    </DropdownMenuItem>
                     {/* v52 — mainan & info: game, lokasi, kontak. */}
                     <DropdownMenuSub>
                       <DropdownMenuSubTrigger disabled={!connected || sendBlocked}>
@@ -3809,6 +3850,80 @@ export function Messenger() {
         </DialogContent>
       </Dialog>
 
+      {/* v53 — dialog buat polling (user) */}
+      <Dialog open={pollOpen} onOpenChange={setPollOpen}>
+        <DialogContent className="rounded-2xl">
+          <DialogHeader>
+            <DialogTitle>📊 Buat polling / kuis</DialogTitle>
+            <DialogDescription>
+              Admin &amp; pengguna lain mengetuk salah satu opsi; hasil (persentase) terlihat live di kedua sisi.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="user-poll-q">Pertanyaan</Label>
+              <Input
+                id="user-poll-q"
+                value={pollQuestion}
+                maxLength={200}
+                placeholder="cth. Jam berapa meeting enak?"
+                onChange={(e) => setPollQuestion(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Opsi (2–6)</Label>
+              {pollOptions.map((opt, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <span className="w-5 text-center text-xs font-semibold text-muted-foreground">
+                    {i + 1}.
+                  </span>
+                  <Input
+                    value={opt}
+                    maxLength={60}
+                    placeholder={`Opsi ${i + 1}`}
+                    aria-label={`Opsi ${i + 1}`}
+                    onChange={(e) =>
+                      setPollOptions((prev) =>
+                        prev.map((v, j) => (j === i ? e.target.value : v))
+                      )
+                    }
+                  />
+                  {pollOptions.length > 2 ? (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-9 shrink-0 text-muted-foreground"
+                      aria-label={`Hapus opsi ${i + 1}`}
+                      onClick={() =>
+                        setPollOptions((prev) => prev.filter((_, j) => j !== i))
+                      }
+                    >
+                      <X className="size-4" aria-hidden="true" />
+                    </Button>
+                  ) : null}
+                </div>
+              ))}
+              {pollOptions.length < 6 ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 rounded-lg text-xs"
+                  onClick={() => setPollOptions((prev) => [...prev, ""])}
+                >
+                  + Tambah opsi
+                </Button>
+              ) : null}
+            </div>
+            <Button
+              className="h-10 w-full rounded-lg bg-emerald-600 text-sm font-semibold text-white hover:bg-emerald-600/90"
+              onClick={handlePollCreate}
+            >
+              Kirim polling
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* v48 — kamera langsung */}
       {cameraOpen ? (
         <CameraCapture
@@ -3825,9 +3940,10 @@ export function Messenger() {
 
 /* ------------------------------------------------------------------ */
 /* v48 — dialog kamera langsung: foto webcam → pipeline foto normal.   */
+/* v53 — diekspor agar AdminPanel punya fitur kamera yang sama.        */
 /* ------------------------------------------------------------------ */
 
-function CameraCapture({
+export function CameraCapture({
   onClose,
   onCapture,
 }: {

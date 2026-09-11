@@ -1395,3 +1395,22 @@ Work Log:
 Stage Summary:
 - v52 = 9 fitur baru + 1 fitur ditemukan sudah ada (ASR): admin kini punya AI ringkasan/draf/suara, polling live, mini-game, kartu lokasi & kontak; panel terlindungi 2FA opsional; ChatKita bisa di-embed ke situs lain lewat satu baris script; DB di-backup otomatis harian (retensi 14).
 - Integritas: verify-integrity 343/343; commit + tag rescue-v52 (anti-rollback).
+---
+Task ID: 69
+Agent: Z.ai Code (main)
+Task: "sinkronkan semua fitur yang ada di chat user, dengan admin" — v53 paritas fitur chat user ↔ admin
+
+Work Log:
+- KONTEKS: v52 (Task 68, commit c5744f0 + rescue-v52) sudah lengkap dari segmen percakapan sebelumnya — 11 fitur (AI ringkas/draf/TTS, polling, game, lokasi/kontak, 2FA TOTP, widget embed, backup harian) terealisasi; ASR transkripsi ternyata sudah ada sejak v7.
+- GAP ANALYSIS paritas (bandingkan menu + komposer): AdminPanel kurang 6 fitur milik Messenger → Stiker & GIF (16 SVG + GIF), Kamera, Sensitif (blur penerima), Set album, Banyak file (antrian), paste/drop file dari clipboard. Sebaliknya user tidak bisa membuat polling (poll:create admin-only). Emoji, reply, edit, voice, game, lokasi, kontak, vote poll, terjadwal sudah setara.
+- Iron rule dipatuhi: pkill bun --hot (proses lama pid 6453 di-kill -9 setelah pkill biasa tak cukup) SEBELUM edit index.ts.
+- SERVER (index.ts): poll:create diubah dari adminGuard → authedUserId + isParticipant (admin & user peserta), sender = pengirim (bubble sisi benar), cooldown Map per-user 15 dtk (RATE_LIMITED), audit mencatat pembuat; SERVICE_VERSION 'v53'.
+- KLIEN USER (Messenger.tsx): state pollOpen/pollQuestion/pollOptions + handlePollCreate (emit poll:create, tangani RATE_LIMITED) + menu "📊 Buat polling / kuis" + dialog 2–6 opsi (pola dialog admin); export function CameraCapture (v48) agar dipakai bersama.
+- KLIEN ADMIN (AdminPanel.tsx): impor Camera/Eye/FolderPlus/Layers + DropdownMenuCheckboxItem + GIF_PACK/STICKER_KEYS/STICKER_LABELS/StickerSvg/StickerKey + CameraCapture; state paritas (stiker/tab/kamera/sensitif/album/queue/busy/progress + multiInputRef); emitMessage +type "sticker" +extra sensitive/album; handler handleMultiPick/removeQueueAt/clearQueue/sendQueue/sendSticker/sendGif; sendImage & sendFile memuat sensitive/album; menu + dapat 6 item baru (Banyak file, Stiker & GIF, Kamera, separator, Sensitif checkbox, Set album…); panel picker stiker & GIF di composer; UI antrian chip + progres + Kirim semua; hidden multi-input; Input onPaste (clipboard → antrian); input-row onDrop (drag file → antrian); dialog album + dialog kamera (CameraCapture).
+- Versi & jaring pengaman: verify-integrity segmen v53 +26 cek (sisip sebelum blok hasil) → 368/368; FEATURES.md segmen "v53 — Paritas Fitur Chat User ↔ Admin"; instrumentation RESCUE_TAG rescue-v53 + penanda void 0 v53.
+- E2E gateway :81 (t69a admin 1440×900 login autologin; t69u user KevinUji51 390×844): menu + admin tampil 6 item baru; kirim stiker "Senyum Cinta" → bubble + preview "Anda: 😍 smile-love" (DB id 316 sender admin); checkbox Sensitif checked=true persist; dialog album isi "Promo Uji 53" → label menu "Album: Promo Uji 53"; dialog Kamera terbuka (headless tanpa webcam — ditangani rapi); paste 2 file via ClipboardEvent → "2 lampiran dalam antrian · sensitif · album: Promo Uji 53" → Kirim semua → DB sensitive=1 album="Promo Uji 53" (id 318,319); user melihat kartu file berlabel album; user buat polling "Mau meeting jam berapa?" (10 pagi / 2 siang) → DB id 317 sender=user (BUKAN admin) → kartu poll tampil di kedua sisi; admin vote "2 siang" → "● 2 siang 100%" live di admin & user tanpa reload. Konsol & page-errors 0 kedua sesi; browser ditutup.
+- lint 0/0; chat-service v53 listening port 3003 (spawn manual nohup — service tidak punya watchdog).
+
+Stage Summary:
+- v53 = chat user dan admin kini SETARA penuh: admin mendapat Stiker & GIF, Kamera, Sensitif, Album, antrian multi-file, paste/drop file; user mendapat Buat polling; AI asisten tetap admin-only (perkakas pemilik).
+- Integritas: verify 368/368, lint 0/0; commit + tag rescue-v53 (anti-rollback).

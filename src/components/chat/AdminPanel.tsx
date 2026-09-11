@@ -9,17 +9,21 @@ import {
   ArrowDown,
   ArrowLeft,
   Bell,
+  Camera,
   ChevronUp,
   Clock,
   DatabaseBackup,
+  Eye,
   EyeOff,
   Film,
   FileJson,
   FileText,
   Flag,
+  FolderPlus,
   Forward,
   Image as ImageIcon,
   GaugeCircle,
+  Layers,
   Leaf,
   Loader2,
   Lock,
@@ -59,6 +63,8 @@ import { toast } from "sonner";
 
 import { ChatBubble } from "@/components/chat/ChatBubble";
 import { AdminDashboard, type DashboardTab } from "@/components/chat/admin-dashboard";
+import { CameraCapture } from "@/components/chat/Messenger";
+import { GIF_PACK, STICKER_KEYS, STICKER_LABELS, StickerSvg, type StickerKey } from "@/lib/stickers";
 import {
   AuditLogDialog,
   ConfirmDialog,
@@ -123,6 +129,7 @@ import {
 } from "@/components/ui/dialog";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -1309,7 +1316,7 @@ export function AdminPanel() {
 
   const emitMessage = (
     content: string,
-    type: "text" | "image" | "voice" | "file",
+    type: "text" | "image" | "voice" | "file" | "sticker",
     extra: {
       durationMs?: number;
       fileName?: string;
@@ -1318,6 +1325,9 @@ export function AdminPanel() {
       thumbUrl?: string;
       /** v20 — caption teks yang ikut media (foto/file). */
       caption?: string;
+      /** v53 — paritas: blur sensitif + label album (media). */
+      sensitive?: boolean;
+      album?: string;
     } = {}
   ) => {
     const socket = socketRef.current;
@@ -1402,6 +1412,18 @@ export function AdminPanel() {
   const [contactPhone, setContactPhone] = useState("");
   const [contactNote, setContactNote] = useState("");
   const [myPollVotes, setMyPollVotes] = useState<Record<number, number>>({});
+  /* v53 — paritas komposer: stiker/GIF, kamera, sensitif/album, antrian
+   * multi-lampiran — sama persis dengan sisi user (Messenger). */
+  const [stickerOpen, setStickerOpen] = useState(false);
+  const [stickerTab, setStickerTab] = useState<"stiker" | "gif">("stiker");
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [sensitiveNext, setSensitiveNext] = useState(false);
+  const [albumNext, setAlbumNext] = useState("");
+  const [albumOpen, setAlbumOpen] = useState(false);
+  const [queue, setQueue] = useState<{ file: File; previewUrl?: string }[]>([]);
+  const [queueBusy, setQueueBusy] = useState(false);
+  const [queueProgress, setQueueProgress] = useState<number | null>(null);
+  const multiInputRef = useRef<HTMLInputElement | null>(null);
   /* 2FA TOTP dialog */
   const [totpOpen, setTotpOpen] = useState(false);
   const [totpSetupSecret, setTotpSetupSecret] = useState("");
@@ -1572,6 +1594,127 @@ export function AdminPanel() {
         toast.success("Kontak terkirim.");
       }
     );
+  };
+
+  /* v53 — antrian multi-lampiran: pilih banyak file / drop / paste → chip. */
+  const handleMultiPick = async (list: FileList | File[] | null | undefined) => {
+    if (!list || list.length === 0) return;
+    setFileError(null);
+    const items: { file: File; previewUrl?: string }[] = [];
+    for (const f of Array.from(list)) {
+      if (f.size > MAX_FILE_SIZE) {
+        setFileError(`${f.name}: terlalu besar (maks 25 MB), dilewati.`);
+        continue;
+      }
+      if (f.type.startsWith("image/")) {
+        try {
+          const blobs = await compressImageToBlobs(f);
+          const stamp = Date.now();
+          items.push({
+            file: new File([blobs.full], `foto-${stamp}-${items.length}.jpg`, {
+              type: "image/jpeg",
+            }),
+            previewUrl: URL.createObjectURL(blobs.thumb),
+          });
+        } catch {
+          items.push({ file: f });
+        }
+      } else {
+        items.push({
+          file: f,
+          ...(f.type.startsWith("video/") ? { previewUrl: URL.createObjectURL(f) } : {}),
+        });
+      }
+    }
+    setQueue((q) => [...q, ...items]);
+  };
+
+  const removeQueueAt = (i: number) => {
+    setQueue((q) => {
+      const copy = [...q];
+      const it = copy.splice(i, 1)[0];
+      if (it?.previewUrl) URL.revokeObjectURL(it.previewUrl);
+      return copy;
+    });
+  };
+
+  const clearQueue = () => {
+    setQueue((q) => {
+      for (const it of q) if (it.previewUrl) URL.revokeObjectURL(it.previewUrl);
+      return [];
+    });
+  };
+
+  const sendQueue = async () => {
+    if (queueBusy || queue.length === 0) return;
+    setQueueBusy(true);
+    setQueueProgress(0);
+    const captionText = input.trim();
+    const items = queue;
+    setQueue([]);
+    try {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const meta = await uploadMedia(item.file, (p) =>
+          setQueueProgress(Math.round(((i + p / 100) / items.length) * 100))
+        );
+        let thumbUrl: string | undefined;
+        if (resolveFileKind(meta.mimeType, meta.fileName) === "video") {
+          try {
+            const poster = await videoPosterBlob(item.file);
+            if (poster) {
+              const posterMeta = await uploadMedia(
+                new File([poster], `${meta.fileName}-thumb.jpg`, { type: "image/jpeg" })
+              );
+              thumbUrl = posterMeta.url;
+            }
+          } catch {
+            /* best-effort */
+          }
+        }
+        const mtype = meta.mimeType.startsWith("image/") ? "image" : "file";
+        emitMessage(meta.url, mtype, {
+          fileName: meta.fileName,
+          mimeType: meta.mimeType,
+          fileSize: meta.size,
+          ...(thumbUrl ? { thumbUrl } : {}),
+          ...(i === 0 && captionText ? { caption: captionText } : {}),
+          ...(sensitiveNext ? { sensitive: true } : {}),
+          ...(albumNext ? { album: albumNext } : {}),
+        });
+      }
+      if (captionText) setInput("");
+    } catch {
+      setFileError("Gagal mengunggah beberapa lampiran.");
+    } finally {
+      for (const it of items) if (it.previewUrl) URL.revokeObjectURL(it.previewUrl);
+      setQueueBusy(false);
+      setQueueProgress(null);
+    }
+  };
+
+  /* v53 — stiker & GIF: kirim langsung tanpa unggah (stiker = SVG id). */
+  const sendSticker = (key: StickerKey) => {
+    setStickerOpen(false);
+    if (!emitMessage(key, "sticker", {})) setSendError(true);
+  };
+
+  const sendGif = async (gif: { id: string; label: string; src: string }) => {
+    setStickerOpen(false);
+    try {
+      const res = await fetch(gif.src);
+      const blob = await res.blob();
+      const meta = await uploadMedia(
+        new File([blob], `${gif.id}-${Date.now()}.gif`, { type: "image/gif" })
+      );
+      emitMessage(meta.url, "image", {
+        fileName: meta.fileName,
+        mimeType: meta.mimeType,
+        fileSize: meta.size,
+      });
+    } catch {
+      setImageError("Gagal mengirim animasi GIF.");
+    }
   };
 
   /* 2FA TOTP: setup (QR) → aktif → nonaktif. */
@@ -1977,6 +2120,9 @@ export function AdminPanel() {
           fileSize: fullMeta.size,
           thumbUrl: thumbMeta.url,
           ...(captionText ? { caption: captionText } : {}),
+          // v53 — paritas: flag sensitif + album seperti sisi user.
+          ...(sensitiveNext ? { sensitive: true } : {}),
+          ...(albumNext ? { album: albumNext } : {}),
         })
       ) {
         URL.revokeObjectURL(target.previewUrl);
@@ -2058,6 +2204,9 @@ export function AdminPanel() {
         fileSize: meta.size,
         ...(thumbUrl ? { thumbUrl } : {}),
         ...(captionText ? { caption: captionText } : {}),
+        // v53 — paritas: flag sensitif + album seperti sisi user.
+        ...(sensitiveNext ? { sensitive: true } : {}),
+        ...(albumNext ? { album: albumNext } : {}),
       });
       if (sent) {
         dismissPendingFile();
@@ -3204,6 +3353,94 @@ export function AdminPanel() {
                   </div>
                 ) : null}
 
+                {/* v53 — antrian multi-lampiran (paritas dengan sisi user). */}
+                {queue.length > 0 ? (
+                  <div className="mx-3 mb-1 rounded-xl border bg-card/90 px-2.5 py-2 shadow-sm backdrop-blur-sm">
+                    <div className="mb-1.5 flex items-center gap-2">
+                      <p className="flex-1 text-xs font-medium">
+                        {queue.length} lampiran dalam antrian
+                        {sensitiveNext ? " · sensitif" : ""}
+                        {albumNext ? ` · album: ${albumNext}` : ""}
+                      </p>
+                      <Button
+                        size="sm"
+                        className="h-7 gap-1 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-600/90"
+                        disabled={!connected || queueBusy}
+                        onClick={() => void sendQueue()}
+                      >
+                        {queueBusy ? (
+                          <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                        ) : (
+                          <SendHorizonal className="size-3.5" aria-hidden="true" />
+                        )}
+                        Kirim semua
+                      </Button>
+                      <button
+                        type="button"
+                        aria-label="Kosongkan antrian"
+                        className="text-muted-foreground hover:text-foreground"
+                        disabled={queueBusy}
+                        onClick={clearQueue}
+                      >
+                        <X className="size-4" />
+                      </button>
+                    </div>
+                    {queueProgress != null ? (
+                      <div
+                        className="mb-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted"
+                        role="progressbar"
+                        aria-valuenow={queueProgress}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                      >
+                        <div
+                          className="h-full rounded-full bg-emerald-600 transition-all"
+                          style={{ width: `${queueProgress}%` }}
+                        />
+                      </div>
+                    ) : null}
+                    <div className="flex gap-1.5 overflow-x-auto pb-0.5">
+                      {queue.map((it, i) => (
+                        <div
+                          key={`${i}-${it.file.name}`}
+                          className="relative size-16 shrink-0 overflow-hidden rounded-lg border bg-muted"
+                        >
+                          {it.previewUrl ? (
+                            it.file.type.startsWith("video/") ? (
+                              <video
+                                src={it.previewUrl}
+                                muted
+                                playsInline
+                                preload="metadata"
+                                className="size-full object-cover"
+                              />
+                            ) : (
+                              <img src={it.previewUrl} alt={it.file.name} className="size-full object-cover" />
+                            )
+                          ) : (
+                            <span className="flex size-full items-center justify-center text-muted-foreground">
+                              <FileKindIcon
+                                mimeType={it.file.type}
+                                fileName={it.file.name}
+                                className="size-5"
+                              />
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            aria-label={`Hapus ${it.file.name}`}
+                            className="absolute right-0.5 top-0.5 flex size-5 items-center justify-center rounded-full bg-black/60 text-white"
+                            disabled={queueBusy}
+                            onClick={() => removeQueueAt(i)}
+                          >
+                            <X className="size-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
                 {/* Pending image chip */}
                 {pendingImage ? (
                   <div className="mx-3 mb-1 flex items-center gap-2 rounded-xl border bg-card/90 px-2 py-1.5 backdrop-blur">
@@ -3335,7 +3572,15 @@ export function AdminPanel() {
                 ) : null}
 
                 {/* Input row (or recording bar) */}
-                <div className="relative shrink-0 border-t bg-card/85 px-3 pt-2.5 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md">
+                <div
+                  className="relative shrink-0 border-t bg-card/85 px-3 pt-2.5 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md"
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    // v53 — paritas: seret file ke area composer → antrian.
+                    e.preventDefault();
+                    if (e.dataTransfer?.files?.length) void handleMultiPick(e.dataTransfer.files);
+                  }}
+                >
                   {emojiOpen ? (
                     <EmojiPicker
                       onPick={(emoji) => {
@@ -3345,6 +3590,65 @@ export function AdminPanel() {
                       onClose={() => setEmojiOpen(false)}
                       className="left-2"
                     />
+                  ) : null}
+
+                  {/* v53 — picker stiker & GIF (paritas dengan sisi user). */}
+                  {stickerOpen ? (
+                    <div className="absolute bottom-full left-2 z-20 mb-2 w-[19rem] max-w-[calc(100vw-2rem)] rounded-xl border bg-card p-2 shadow-lg">
+                      <div className="mb-2 flex items-center gap-1">
+                        <Button
+                          size="sm"
+                          variant={stickerTab === "stiker" ? "default" : "outline"}
+                          className="h-7 flex-1 rounded-full text-xs"
+                          onClick={() => setStickerTab("stiker")}
+                        >
+                          Stiker
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant={stickerTab === "gif" ? "default" : "outline"}
+                          className="h-7 flex-1 rounded-full text-xs"
+                          onClick={() => setStickerTab("gif")}
+                        >
+                          Animasi (GIF)
+                        </Button>
+                        <button
+                          type="button"
+                          aria-label="Tutup stiker"
+                          className="ml-1 text-muted-foreground hover:text-foreground"
+                          onClick={() => setStickerOpen(false)}
+                        >
+                          <X className="size-4" />
+                        </button>
+                      </div>
+                      <div className="chat-scroll grid max-h-56 grid-cols-4 gap-1.5 overflow-y-auto">
+                        {stickerTab === "stiker"
+                          ? STICKER_KEYS.map((k) => (
+                              <button
+                                key={k}
+                                type="button"
+                                title={STICKER_LABELS[k]}
+                                aria-label={`Kirim stiker ${STICKER_LABELS[k]}`}
+                                className="flex items-center justify-center rounded-lg p-1.5 transition hover:bg-accent"
+                                onClick={() => sendSticker(k)}
+                              >
+                                <StickerSvg id={k} className="block size-12" />
+                              </button>
+                            ))
+                          : GIF_PACK.map((g) => (
+                              <button
+                                key={g.id}
+                                type="button"
+                                title={g.label}
+                                aria-label={`Kirim animasi ${g.label}`}
+                                className="overflow-hidden rounded-lg border transition hover:ring-2 hover:ring-emerald-500/60"
+                                onClick={() => void sendGif(g)}
+                              >
+                                <img src={g.src} alt={g.label} className="aspect-square w-full object-cover" />
+                              </button>
+                            ))}
+                      </div>
+                    </div>
                   ) : null}
 
                   {recorder.recording ? (
@@ -3390,6 +3694,18 @@ export function AdminPanel() {
                           e.target.value = "";
                         }}
                       />
+                      {/* v53 — input multi-file untuk antrian lampiran (paritas). */}
+                      <input
+                        ref={multiInputRef}
+                        type="file"
+                        multiple
+                        className="hidden"
+                        aria-label="Pilih banyak file"
+                        onChange={(e) => {
+                          void handleMultiPick(e.target.files);
+                          e.target.value = "";
+                        }}
+                      />
                       <div className="flex min-w-0 flex-1 items-center gap-0.5 rounded-full border bg-card px-1.5 shadow-sm">
                         <Button
                           variant="ghost"
@@ -3432,6 +3748,45 @@ export function AdminPanel() {
                               <Paperclip className="mr-2 size-4" aria-hidden="true" />
                               File
                             </DropdownMenuItem>
+                            {/* v53 — paritas komposer: fitur yang sama dengan sisi user. */}
+                            <DropdownMenuItem
+                              disabled={!connected}
+                              onClick={() => multiInputRef.current?.click()}
+                            >
+                              <Layers className="mr-2 size-4" aria-hidden="true" />
+                              Banyak file (antrian)
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled={!connected}
+                              onClick={() => setStickerOpen((v) => !v)}
+                            >
+                              <Sparkles className="mr-2 size-4" aria-hidden="true" />
+                              Stiker &amp; GIF
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled={!connected}
+                              onClick={() => setCameraOpen(true)}
+                            >
+                              <Camera className="mr-2 size-4" aria-hidden="true" />
+                              Kamera
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuCheckboxItem
+                              checked={sensitiveNext}
+                              onCheckedChange={(v) => setSensitiveNext(v === true)}
+                              disabled={!connected}
+                            >
+                              <Eye className="mr-2 size-4" aria-hidden="true" />
+                              Sensitif (blur penerima)
+                            </DropdownMenuCheckboxItem>
+                            <DropdownMenuItem
+                              disabled={!connected}
+                              onClick={() => setAlbumOpen(true)}
+                            >
+                              <FolderPlus className="mr-2 size-4" aria-hidden="true" />
+                              {albumNext ? `Album: ${albumNext}` : "Set album…"}
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
                             {/* v52 — AI: ringkas/draf/TTS + polling + game + lokasi/kontak. */}
                             <DropdownMenuSub>
                               <DropdownMenuSubTrigger disabled={!connected || aiBusy}>
@@ -3512,6 +3867,14 @@ export function AdminPanel() {
                           disabled={!connected}
                           className="h-11 min-w-0 flex-1 border-0 bg-transparent px-1 shadow-none focus-visible:ring-0 dark:bg-transparent"
                           onChange={(e) => handleInputChange(e.target.value)}
+                          onPaste={(e) => {
+                            // v53 — paritas: tempel screenshot/file dari clipboard → antrian.
+                            const files = e.clipboardData?.files;
+                            if (files && files.length > 0) {
+                              e.preventDefault();
+                              void handleMultiPick(files);
+                            }
+                          }}
                           onKeyDown={(e) => {
                             if (e.key === "Enter" && !e.shiftKey) {
                               e.preventDefault();
@@ -3630,6 +3993,41 @@ export function AdminPanel() {
       ) : null}
 
       {/* Viewer media full-screen (foto/video/audio/PDF/dokumen) */}
+      {/* ── v53 — dialog album lampiran (paritas dengan sisi user) ── */}
+      <Dialog open={albumOpen} onOpenChange={setAlbumOpen}>
+        <DialogContent className="rounded-2xl">
+          <DialogHeader>
+            <DialogTitle>Album lampiran</DialogTitle>
+            <DialogDescription>
+              Lampiran berikutnya diberi label album (mis. “Promo Agustus”). Kosongkan untuk tanpa album.
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            value={albumNext}
+            onChange={(e) => setAlbumNext(e.target.value.slice(0, 60))}
+            placeholder="Nama album…"
+            aria-label="Nama album"
+          />
+          <Button
+            className="h-10 w-full rounded-lg bg-emerald-600 text-sm font-semibold text-white hover:bg-emerald-600/90"
+            onClick={() => setAlbumOpen(false)}
+          >
+            Simpan
+          </Button>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── v53 — kamera langsung (paritas dengan sisi user) ── */}
+      {cameraOpen ? (
+        <CameraCapture
+          onClose={() => setCameraOpen(false)}
+          onCapture={(file) => {
+            setCameraOpen(false);
+            void handleImagePick(file);
+          }}
+        />
+      ) : null}
+
       {/* ── v52 — dialog AI ringkasan ── */}
       <Dialog open={aiSummaryOpen} onOpenChange={setAiSummaryOpen}>
         <DialogContent className="rounded-2xl">

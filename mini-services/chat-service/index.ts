@@ -218,7 +218,7 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        mengirim, reuse user:toast). Ganti nama: admin:account_set {name}
  *        kini ikut menyiarkan users:changed. KLIEN — badge favicon +
  *        App Badging API (lib/app-badge). */
-const SERVICE_VERSION = 'v52'
+const SERVICE_VERSION = 'v53'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -6190,13 +6190,32 @@ io.on('connection', (socket) => {
     })
   }))
 
-  /** v52 — POLL: admin membuat polling/kuis (2–6 opsi). */
+  /** v53 — POLL: buat polling/kuis (2–6 opsi) — admin & user peserta. */
+  /**
+   * v53 — PARITAS: buat polling kini boleh dari admin ATAU user peserta
+   * (sebelumnya admin-only). Pemilik pesan = pengirim, sehingga bubble
+   * tampil di sisi yang benar. Cooldown 15 dtk/pengirim anti-spam.
+   */
+  const pollCreateLastAt = new Map<string, number>()
   socket.on('poll:create', handler(socket, (data, ack) => {
-    if (!adminGuard(ack)) return
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const last = pollCreateLastAt.get(me) ?? 0
+    if (Date.now() - last < 15_000) {
+      ack({ ok: false, error: 'RATE_LIMITED' })
+      return
+    }
     const cid = typeof data?.conversationId === 'string' ? data.conversationId : ''
     const conv = cid ? getConversation(cid) : null
     if (!conv) {
       ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    if (!isParticipant(conv, me)) {
+      ack({ ok: false, error: 'FORBIDDEN' })
       return
     }
     const question = typeof data?.question === 'string' ? data.question.trim().slice(0, 200) : ''
@@ -6211,8 +6230,9 @@ io.on('connection', (socket) => {
       ack({ ok: false, error: 'INVALID_MESSAGE' })
       return
     }
-    const message = insertAndFanOut(conv, ADMIN_ID, JSON.stringify({ question, options }), 'poll')
-    audit('poll_create', `polling "${question.slice(0, 40)}" (${options.length} opsi)`)
+    pollCreateLastAt.set(me, Date.now())
+    const message = insertAndFanOut(conv, me, JSON.stringify({ question, options }), 'poll')
+    audit('poll_create', `${me} membuat polling "${question.slice(0, 40)}" (${options.length} opsi)`)
     ack({ ok: true, message })
   }))
 

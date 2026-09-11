@@ -409,3 +409,19 @@
 - **🪟 Widget embed**: `GET /api/embed.js` → skrip tombol chat melayang untuk website lain (iframe 380×620 → `/?embed=1`); Messenger mode embed menyembunyikan tombol install & footer.
 - **💾 Backup DB harian otomatis**: `VACUUM INTO backups/chatkita-db-YYYY-MM-DD.db` tiap hari (cek tiap 10 menit, persist `last_backup_day`), retensi 14 berkas + audit.
 - **Pengaman**: `messages:send` MENOLAK type poll/game/location/contact dari klien (anti-pemalsuan JSON) — hanya event khusus yang memvalidasi isi; `snippetOf` menampilkan preview rapi (📊/🎮/📍/👤) untuk daftar & push.
+
+## v53 — Paritas Fitur Chat User ↔ Admin (Task 69)
+
+**Permintaan:** "sinkronkan semua fitur yang ada di chat user, dengan admin" — semua fitur komposer sisi user kini juga dimiliki sisi admin (dan sebaliknya), sehingga kedua sisi setara.
+
+**Fitur:**
+- **Server — `poll:create` dibuka untuk user**: sebelumnya admin-only; kini semua **peserta percakapan** (admin atau user) boleh membuat polling; pemilik pesan = pengirim (bubble tampil di sisi yang benar); cooldown 15 dtk/pengirim anti-spam; audit `poll_create` mencatat pembuatnya.
+- **Admin — Stiker & GIF** (16 stiker SVG + GIF lokal, dua tab) — sebelumnya hanya user.
+- **Admin — Kamera langsung** (`CameraCapture` diekspor dari Messenger dan dipakai bersama) — foto webcam → pipeline foto normal.
+- **Admin — Sensitif (blur penerima)** + **Set album…** — checkbox & dialog di menu +; flag dikirim pada foto/file/antrian (`sensitive`, `album`) — server v48 sudah mendukung field ini untuk semua pengirim.
+- **Admin — Banyak file (antrian)** — multi-pilih/drop/paste clipboard → chip antrian + progres + "Kirim semua" (caption teks composer jadi caption item pertama).
+- **Admin — Tempel (paste) file dari clipboard** di input teks → masuk antrian.
+- **User — Buat polling/kuis** 📊 — menu + dialog di sisi user (dulu hanya bisa memilih); hasil tetap live dua arah via `poll:vote`.
+- Tetap admin-only (by design): **AI asisten** (Ringkasan/Draf/TTS), karena merupakan perkakas operasional pemilik.
+
+**File kunci:** `mini-services/chat-service/index.ts` (poll:create), `src/components/chat/AdminPanel.tsx` (6 fitur paritas), `src/components/chat/Messenger.tsx` (poll user + `export function CameraCapture`).
