@@ -218,7 +218,7 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        mengirim, reuse user:toast). Ganti nama: admin:account_set {name}
  *        kini ikut menyiarkan users:changed. KLIEN — badge favicon +
  *        App Badging API (lib/app-badge). */
-const SERVICE_VERSION = 'v50'
+const SERVICE_VERSION = 'v51'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -1503,6 +1503,25 @@ const findUserByRoleAndName = (name: string, role: string): UserRow | null =>
   (db
     .query('SELECT * FROM users WHERE lower(name) = lower(?) AND role = ? LIMIT 1')
     .get(name, role) as UserRow | null) ?? null
+
+/** v51 — anti-dupe nama: cari nama alternatif bekas "kevin (2)", "kevin (3)"
+ * dst. utk ditawarkan ke orang yang mengetik nama milik akun orang lain.
+ * Nama baru dijamin tidak bentrok dgn akun apa pun (case-insensitive) dan
+ * tidak memakai nama reserved Admin. */
+const suggestFreeName = (base: string): string => {
+  const clean = base.trim()
+  for (let i = 2; i <= 99; i++) {
+    const suffix = ` (${i})`
+    const keep = Math.max(1, MAX_NAME_LENGTH - suffix.length)
+    const candidate = `${clean.slice(0, keep)}${suffix}`
+    if (
+      candidate.toLowerCase() !== ADMIN_NAME.toLowerCase() &&
+      !findUserByRoleAndName(candidate, 'user')
+    )
+      return candidate
+  }
+  return `${clean.slice(0, MAX_NAME_LENGTH - 6)}-${now().toString(36).slice(-4)}`
+}
 
 /** v50 — nama tampilan Admin dinamis dari DB (bisa diganti admin dari panel),
  * dengan cache in-memory; fallback ke konstanta bawaan 'Admin'. */
@@ -3962,7 +3981,10 @@ io.on('connection', (socket) => {
       name.length <= MAX_NAME_LENGTH &&
       (name.toLowerCase() === ADMIN_NAME.toLowerCase() ||
         !!findUserByRoleAndName(name, 'user'))
-    ack({ ok: true, exists })
+    /* v51 — saat nama sudah dipakai, sediakan saran nama alternatif bebas
+     * ("kevin (2)") supaya orang baru langsung terarah daftar akun sendiri
+     * dan tidak membuka chat milik pemilik nama pertama. */
+    ack({ ok: true, exists, suggestion: exists ? suggestFreeName(name) : undefined })
   }))
 
   /* ---------------------------- auth ---------------------------- */
@@ -4081,6 +4103,30 @@ io.on('connection', (socket) => {
         }
         console.log(`New user registered: "${name}" (${id}) via kode undangan`)
       } else {
+        /* v51 — ANTI-PEMBAJAKAN NAMA: akun yang belum punya kredensial apa
+         * pun (password & PIN kosong — akun warisan) tidak boleh dimasuki
+         * dari perangkat baru hanya dengan mengetik namanya. Pemilik asli
+         * tetap bisa masuk dari perangkat yang sudah terikat akunnya; orang
+         * lain diarahkan mendaftar dengan nama alternatif (saran ikut
+         * dikirim). Ini menutup kasus "kevin baru membuka chat kevin lama". */
+        if (!sessionRestore && !user.password_hash && !user.pin_hash) {
+          const boundDev = deviceId
+            ? (db
+                .query('SELECT user_id FROM devices WHERE device_id = ?')
+                .get(deviceId) as { user_id: string } | undefined)
+            : undefined
+          if (!boundDev || boundDev.user_id !== user.id) {
+            console.log(
+              `Rejected name-only login "${user.name}" — akun tanpa kredensial, perangkat asing (socket ${socket.id})`
+            )
+            ack({
+              ok: false,
+              error: 'ACCOUNT_UNCLAIMED',
+              suggestion: suggestFreeName(user.name),
+            })
+            return
+          }
+        }
         /* v27 — password gate: akun yang sudah punya password harus
          * membuktikannya saat login baru (sesi tersimpan tetap lolos).
          * Rate limit per-nama mencegah brute-force. */

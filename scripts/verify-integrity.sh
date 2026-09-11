@@ -336,8 +336,8 @@ chk_grep "Dashboard pakai Account 360"       "src/components/chat/admin-dashboar
 chk_grep "Pill sinyal palsu dihapus"         "src/components/chat/AdminPanel.tsx" "pill \"⌨ Typing palsu\" & \"✓✓ Palsu\" dihapus"
 
 echo "[v47 — Cheat Lab II + ganti nama + badge ikon (Task 63)]"
-chk_grep "Versi service v50"                  "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v50'"
-chk_grep "Rescue tag v50"                     "src/instrumentation.ts" "rescue-v50"
+chk_grep "Versi service terdaftar"           "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v"
+chk_grep "Rescue tag terdaftar"              "src/instrumentation.ts" "rescue-v"
 chk_grep "Cheat kebal hapus (antiDelete)"     "mini-services/chat-service/index.ts" "antiDelete === 1"
 chk_grep "Ghost event di tombstone"           "mini-services/chat-service/index.ts" "message:ghost"
 chk_grep "Riwayat ghost (antiDelete)"         "mini-services/chat-service/index.ts" "ghostView"
@@ -366,6 +366,16 @@ chk_grep "Unbind pindah ke 360"               "src/components/chat/account-contr
 chk_grep "Panel v40 tanpa paksa logout"       "src/components/chat/user-controls-v40.tsx" "paksa logout pindah ke Account 360"
 chk_grep "Ganti nama cepat dashboard"         "src/components/chat/admin-dashboard.tsx" "submitRename"
 chk_grep "Alarm admin di AdminPanel"          "src/components/chat/AdminPanel.tsx" "user:toast"
+
+# ── v51 (Task 67) — nama sama tidak bisa membuka chat orang lain ──
+chk_grep "Saran nama bebas (helper)"          "mini-services/chat-service/index.ts" "const suggestFreeName"
+chk_grep "check_name kirim suggestion"        "mini-services/chat-service/index.ts" "suggestion: exists ? suggestFreeName(name)"
+chk_grep "Gate ACCOUNT_UNCLAIMED (server)"    "mini-services/chat-service/index.ts" "error: 'ACCOUNT_UNCLAIMED'"
+chk_grep "Kode error ACCOUNT_UNCLAIMED"       "src/lib/chat-types.ts" "ACCOUNT_UNCLAIMED"
+chk_grep "Handler ACCOUNT_UNCLAIMED (user)"   "src/components/chat/Messenger.tsx" "ACCOUNT_UNCLAIMED"
+chk_grep "State saran nama (user)"            "src/components/chat/Messenger.tsx" "nameSuggestion"
+chk_grep "Tombol daftar nama alternatif"      "src/components/chat/Messenger.tsx" "Daftar sebagai"
+chk_grep "Tipe suggestion pada error ack"     "src/lib/chat-types.ts" "suggestion?: string"
 
 # ── v49 (Task 65) — popup ukuran normal seragam ──
 chk_grep "Tinggi popup tetap (dialog base)"   "src/components/ui/dialog.tsx" "h-\[min(85dvh,640px)\]"

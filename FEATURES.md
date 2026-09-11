@@ -373,3 +373,21 @@
   - `AdminPanel.tsx`: **kartu profil sidebar kini bisa diklik** (avatar + nama + ikon pensil) → dialog "Ganti nama saya"; item baru **"Ganti nama saya"** di menu ⋮ Panel aplikasi; nama di kartu dinamis (state `myName`), inisial avatar ikut berganti; listener `admin:renamed` (sinkron antar sesi admin).
   - `Messenger.tsx` (user): listener `admin:renamed` → perbarui header partner & daftar percakapan live.
 - Verifikasi: verify-integrity segmen v50 (+6 cek; cek versi generik dibuat future-proof `'v`/`rescue-v`).
+
+---
+
+## v51 — Nama Sama Tidak Bisa Membuka Chat Orang Lain (Task 67)
+
+**Masalah:** dua orang bisa bernama sama (mis. dua "kevin"). Sistem mencocokkan login berdasarkan nama — jika "kevin" pertama sudah pernah chat dengan Admin, orang baru yang mengetik "kevin" berpotensi dibawa ke chat milik kevin pertama.
+
+**Solusi (lapisan-lapisan):**
+- **Server** (`index.ts`, SERVICE_VERSION 'v51'):
+  - Keunikan nama sudah dijamin sebelumnya di SEMUA jalur penamaan (daftar mandiri via kode undangan, `admin:user_create`, rename `admin:account_set` — semua case-insensitive, error NAME_TAKEN) → dua akun TIDAK mungkin bernama sama, chat tidak akan pernah tercampur antar akun.
+  - **Anti-pembajakan nama (`ACCOUNT_UNCLAIMED`)**: akun warisan yang belum punya kredensial apa pun (password & PIN kosong) kini TIDAK bisa dimasuki dari perangkat baru hanya dengan mengetik namanya — hanya perangkat yang sudah terikat akun itu (pemilik asli) yang lolos; orang lain ditolak + menerima `suggestion` nama bebas.
+  - Helper `suggestFreeName(base)` — cari nama alternatif bebas "kevin (2)", "kevin (3)" … (case-insensitive, hindari reserved Admin, hormati MAX_NAME_LENGTH).
+  - `public:check_name` kini mengembalikan `suggestion` ketika `exists:true` → UI login bisa menawarkan pendaftaran nama alternatif sejak awal.
+- **Klien** (`chat-types.ts`, `Messenger.tsx`):
+  - Kode error baru `ACCOUNT_UNCLAIMED` + field `suggestion` pada ack error & check-name.
+  - Kartu login: begitu nama terdeteksi milik akun lain, muncul kotak peringatan jelas — "Nama ini sudah dipakai akun lain. Punya akunnya? Masukkan password. Bukan kamu? Chat pemilik akun tidak bisa dibuka orang lain." + tombol **"Daftar sebagai 'kevin (2)'"** (satu klik mengganti nama → kembali mode pendaftaran dengan kode undangan).
+  - Error `ACCOUNT_UNCLAIMED` ditangani dengan pesan pendidikatif + saran; pesan `PASSWORD_REQUIRED` diperjelas ("Bukan akun Anda? Chat pemiliknya tidak bisa dibuka; daftar dengan nama lain.").
+- **Hasil:** orang baru bernama sama TIDAK dapat membuka chat milik pemilik nama pertama — harus memastikan password (akun terlindungi), tidak bisa mewarisi akun tanpa kredensial dari perangkat asing, dan selalu ditawari jalur pendaftaran nama alternatif yang jelas.

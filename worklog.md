@@ -1358,3 +1358,21 @@ Work Log:
 Stage Summary:
 - Nama tampilan Admin kini BISA diganti dari panel: klik kartu profil (kiri atas) atau menu ⋮ → "Ganti nama saya"; berlaku live di semua perangkat; nama lama pada bubble pesan ikut berganti (JOIN live, bukan snapshot).
 - Keamanan terjaga: nama "Admin" tetap tak bisa dipakai user biasa; patch lain (freeze/kuota/dll) tetap ditolak untuk akun admin.
+
+---
+Task ID: 67
+Agent: Z.ai Code (main)
+Task: v51 — anti-dupe nama: orang bernama sama tidak bisa membuka chat milik pemilik nama pertama
+
+Work Log:
+- Diagnosa: semua jalur penamaan SUDAH memaksa nama unik case-insensitive (daftar self, admin:user_create, admin:account_set → NAME_TAKEN; DB aktual 0 duplikat) → dua akun tidak mungkin bernama sama. Celah sebenarnya: orang BARU mengetik nama orang LAMA → findUserByRoleAndName mencocokkan ke akun lama; perlindungan hanya password/PIN, dan akun warisan tanpa kredensial bisa diambil alih dari perangkat asing.
+- Server (index.ts — pkill iron rule dipatuhi, spawn ulang manual nohup): helper suggestFreeName (cari "kevin (2)".."kevin (99)" bebas, hormati MAX_NAME_LENGTH & reserved Admin); public:check_name kini mengembalikan suggestion saat exists; gate baru ACCOUNT_UNCLAIMED di user:auth — login name-only ke akun tanpa password & PIN dari perangkat TIDAK terikat akun tsb ditolak + kirim suggestion (pemilik asli dari perangkat terikat tetap lolos).
+- Klien: chat-types.ts (+ACCOUNT_UNCLAIMED di ChatErrorCode, +suggestion? di ChatErrorAck & PublicCheckNameAck); Messenger.tsx — state nameSuggestion (diisi check_name & error auth), handler ACCOUNT_UNCLAIMED dengan pesan pendidikatif, kotak peringatan amber di kartu login + tombol "Daftar sebagai 'kevin (2)'" (klik → nama berganti → kembali mode pendaftaran), pesan PASSWORD_REQUIRED diperjelas.
+- Bump v51: SERVICE_VERSION 'v51', rescue-v51 + penanda bump instrumentation, segmen v51 FEATURES.md & verify-integrity (+8 cek, chmod 644; cek "Versi service/Rescue tag v50" diganti pola generik) → 315/315, 0 gagal. Lint 0/0.
+- E2E gateway :81 (agent-browser: t67u user mobile 390×844, t67u2 sesi kedua, t67a admin desktop 1440×900): login KevinUji51 (pw kevin51) → masuk, chat berisi pesan rahasia; clear localStorage+reload → ketik "KevinUji51" → label "Nama akun" + tombol "Daftar sebagai 'KevinUji51 (2)'" MUNCUL; password salah → "Nama atau password salah." (pengambilalihan gagal); klik tombol saran → nama auto "KevinUji51 (2)", kolom kode undangan muncul; daftar (kode CK-T67A-6751 + pw baru) → masuk, chat KOSONG, pesan rahasia TIDAK terlihat ("AMAN"), kirim pesan sukses. Sesi kedua: KevinWarisan51 (tanpa kredensial) klik Masuk → ACCOUNT_UNCLAIMED + pesan pendidikatif + saran "KevinWarisan51 (2)". Admin: dua percakapan terpisah "KevinUji51" & "KevinUji51 (2)"; bolak-balik percakapan → pesan rahasia hanya di miliknya (area chat kevin (2): "TERISOLASI BENAR"). Konsol 0 error; screenshot /tmp/t67-warning.png, t67-newchat.png, t67-unclaimed.png, t67-admin-two-kevins.png. Browser ditutup.
+- Insiden: pendaftaran sempat "registration closed" (setting allowRegistration=0 dari sesi lama) → dibuka sementara utk E2E lalu DIKEMBALIKAN ke 0. catatan dev.log "node module in edge runtime" = warning lama non-fatal instrumentation (muncul saat register reload).
+
+Stage Summary:
+- Orang baru yang mengetik nama milik akun lain TIDAK DAPAT membuka chat pemilik nama pertama: akun terlindungi password/PIN menolak tanpa kredensial; akun warisan tanpa kredensial tak bisa diambil alih dari perangkat asing (ACCOUNT_UNCLAIMED); UI selalu menawarkan jalur jelas: masuk dengan password (pemilik) atau daftar sebagai nama alternatif "kevin (2)" (bukan pemilik).
+- Nama tetap dijamin unik di seluruh sistem → chat tidak akan pernah tercampur antar dua akun berbeda.
+- Artefak: .zscripts/t67-user.ts, segmen v51 di FEATURES.md/verify-integrity.sh (315 cek), 4 screenshot E2E.

@@ -301,6 +301,9 @@ export interface PublicCheckNameAck {
   ok: true;
   /** true = nama sudah terdaftar (akun user ada / reserved) → bukan pendaftaran baru. */
   exists: boolean;
+  /** v51 — saat exists: saran nama alternatif bebas ("kevin (2)") untuk
+   * orang yang ternyata bukan pemilik akun dengan nama itu. */
+  suggestion?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -463,6 +466,9 @@ export type ChatErrorCode =
   | "DEVICE_TAKEN"
   | "ALREADY_SET"
   | "NAME_TAKEN"
+  // v51 — anti-pembajakan nama: akun warisan tanpa password/PIN tidak bisa
+  // dimasuki dari perangkat asing hanya dengan mengetik nama.
+  | "ACCOUNT_UNCLAIMED"
   // v13 — pendaftaran ditutup admin (di-kirim server sejak v13, resmi
   // terdaftar di union sekarang):
   | "REGISTRATION_CLOSED";
@@ -473,6 +479,8 @@ export interface ChatErrorAck {
   hasPin?: boolean;
   /** v11 — MUTED / SLOW_MODE: seconds until the restriction expires. */
   remainingSeconds?: number;
+  /** v51 — ACCOUNT_UNCLAIMED: saran nama alternatif bebas ("kevin (2)"). */
+  suggestion?: string;
 }
 
 export type AckOf<T> = T | ChatErrorAck;

@@ -575,6 +575,9 @@ export function Messenger() {
   // v28 — hasil cek nama pre-login: true = akun sudah ada → kolom kode
   // undangan disembunyikan (hanya relevan utk pendaftaran akun baru).
   const [nameExists, setNameExists] = useState<boolean | null>(null);
+  /* v51 — anti-dupe nama: saran nama alternatif bebas dari server (mis.
+   * "kevin (2)") saat nama yang diketik ternyata milik akun orang lain. */
+  const [nameSuggestion, setNameSuggestion] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [sendError, setSendError] = useState(false);
 
@@ -1080,6 +1083,7 @@ export function Messenger() {
     if (!trimmed) {
       nameCheckSeqRef.current += 1;
       setNameExists(null);
+      setNameSuggestion(null);
       return;
     }
     const seq = ++nameCheckSeqRef.current;
@@ -1093,6 +1097,8 @@ export function Messenger() {
           if (seq !== nameCheckSeqRef.current) return; // respons kedaluwarsa
           if (res.ok) {
             setNameExists(res.exists);
+            // v51 — saran "kevin (2)" hanya relevan saat nama sudah dipakai.
+            setNameSuggestion(res.exists ? res.suggestion ?? null : null);
             // Kode yang tersisa tak relevan utk login akun lama.
             if (res.exists) setInviteCode("");
           }
@@ -1189,6 +1195,17 @@ export function Messenger() {
               );
               return;
             }
+            // v51 — anti-pembajakan nama: nama milik akun warisan tanpa
+            // password/PIN, dan perangkat ini bukan perangkat terikatnya →
+            // server menolak + mengirim saran nama alternatif.
+            if (res.error === "ACCOUNT_UNCLAIMED") {
+              setNameExists(true);
+              if (res.suggestion) setNameSuggestion(res.suggestion);
+              setAuthError(
+                `Akun “${trimmed}” belum pernah memasang password — hanya pemiliknya dari perangkat terdaftar yang bisa masuk. Chat pemilik akun tidak bisa dibuka orang lain. Daftar dengan nama lain, mis. “${res.suggestion ?? `${trimmed} (2)`}”.`
+              );
+              return;
+            }
             setAuthError(
               res.error === "INVALID_NAME"
                 ? "Nama tidak valid (1–40 karakter)."
@@ -1197,7 +1214,7 @@ export function Messenger() {
                   : res.error === "REGISTRATION_CLOSED"
                     ? "Pendaftaran sedang ditutup admin — masuk dengan akun yang sudah ada."
                     : res.error === "PASSWORD_REQUIRED"
-                      ? "Akun ini memakai password — masukkan password Anda."
+                      ? "Akun ini memakai password — masukkan password Anda. Bukan akun Anda? Chat pemiliknya tidak bisa dibuka; daftar dengan nama lain."
                       : res.error === "INVALID_PASSWORD"
                         ? "Nama atau password salah."
                         : res.error === "TOO_MANY_ATTEMPTS"
@@ -2139,6 +2156,32 @@ export function Messenger() {
                       <p className="text-xs font-medium text-emerald-700/85 dark:text-emerald-300/60">
                         Akun ditemukan — kode undangan tidak diperlukan untuk masuk.
                       </p>
+                    ) : null}
+                    {/* v51 — anti-dupe nama: nama ini milik akun orang lain.
+                        Peringatkan + tawarkan daftar dengan nama alternatif
+                        supaya chat pemilik nama pertama tidak bisa dibuka. */}
+                    {nameExists === true && nameSuggestion ? (
+                      <div className="space-y-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 dark:border-amber-400/25 dark:bg-amber-400/10">
+                        <p className="text-xs font-medium leading-relaxed text-amber-900 dark:text-amber-200">
+                          Nama ini sudah dipakai akun lain. Punya akunnya?
+                          Masukkan password di atas. Bukan kamu? Chat pemilik
+                          akun tidak bisa dibuka orang lain — daftar sebagai
+                          akun baru dengan nama berbeda.
+                        </p>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-9 rounded-lg border-amber-500/40 bg-white/60 text-xs font-semibold text-amber-900 hover:bg-amber-500/15 dark:border-amber-400/30 dark:bg-transparent dark:text-amber-200 dark:hover:bg-amber-400/10"
+                          onClick={() => {
+                            setName(nameSuggestion);
+                            setPassword("");
+                            setAuthError(null);
+                          }}
+                        >
+                          Daftar sebagai “{nameSuggestion}”
+                        </Button>
+                      </div>
                     ) : null}
                   </div>
                   {/* v28 — kode undangan HANYA untuk pendaftaran akun baru:
