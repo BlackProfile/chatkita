@@ -214,6 +214,29 @@ export function messagePreview(
   if (type === "voice") return "🎤 Pesan suara";
   if (type === "file") return caption || `📎 ${fileName ?? "File"}`;
   if (type === "system") return content;
+  /* v52 — preview rapi utk pesan khusus (jangan bocorkan JSON mentah). */
+  if (type === "poll") {
+    const p = pollDataOf(content);
+    return p ? `📊 ${p.question}` : "📊 Polling";
+  }
+  if (type === "game") {
+    const g = gameDataOf(content);
+    return g
+      ? g.game === "dice"
+        ? "🎲 Lempar dadu"
+        : g.game === "coin"
+          ? "🪙 Lempar koin"
+          : "🎮 Batu-gunting-kertas"
+      : "🎮 Mini-game";
+  }
+  if (type === "location") {
+    const l = locationDataOf(content);
+    return l ? `📍 ${l.label || "Lokasi"}` : "📍 Lokasi";
+  }
+  if (type === "contact") {
+    const c = contactDataOf(content);
+    return c ? `👤 ${c.name}` : "👤 Kontak";
+  }
   return content;
 }
 
@@ -345,5 +368,90 @@ export async function videoPosterBlob(file: File): Promise<Blob | null> {
     return null;
   } finally {
     URL.revokeObjectURL(url);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* v52 — parser konten pesan khusus (poll/game/location/contact).       */
+/* JSON mentah disimpan di messages.content; parser aman-gagal ini      */
+/* dipakai kartu ChatBubble di sisi user maupun admin.                  */
+/* ------------------------------------------------------------------ */
+
+export interface PollContent {
+  question: string;
+  options: string[];
+}
+
+export function pollDataOf(content: string): PollContent | null {
+  try {
+    const d = JSON.parse(content) as { question?: unknown; options?: unknown };
+    if (typeof d.question !== "string" || d.question.length < 1) return null;
+    if (!Array.isArray(d.options)) return null;
+    const options = d.options.filter((o): o is string => typeof o === "string" && o.length > 0);
+    if (options.length < 2) return null;
+    return { question: d.question, options };
+  } catch {
+    return null;
+  }
+}
+
+export interface GameContent {
+  game: "dice" | "coin" | "rps";
+  pick: string | number | null;
+  server: string | number;
+  outcome: "menang" | "kalah" | "seri" | null;
+}
+
+export function gameDataOf(content: string): GameContent | null {
+  try {
+    const d = JSON.parse(content) as Partial<GameContent>;
+    if (d.game !== "dice" && d.game !== "coin" && d.game !== "rps") return null;
+    if (typeof d.server !== "string" && typeof d.server !== "number") return null;
+    return {
+      game: d.game,
+      pick: (d.pick as string | number | null) ?? null,
+      server: d.server,
+      outcome: d.outcome ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export interface LocationContent {
+  lat: number;
+  lng: number;
+  label: string;
+}
+
+export function locationDataOf(content: string): LocationContent | null {
+  try {
+    const d = JSON.parse(content) as { lat?: unknown; lng?: unknown; label?: unknown };
+    const lat = Number(d.lat);
+    const lng = Number(d.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng, label: typeof d.label === "string" ? d.label : "" };
+  } catch {
+    return null;
+  }
+}
+
+export interface ContactContent {
+  name: string;
+  phone: string;
+  note: string;
+}
+
+export function contactDataOf(content: string): ContactContent | null {
+  try {
+    const d = JSON.parse(content) as { name?: unknown; phone?: unknown; note?: unknown };
+    if (typeof d.name !== "string" || typeof d.phone !== "string") return null;
+    return {
+      name: d.name,
+      phone: d.phone,
+      note: typeof d.note === "string" ? d.note : "",
+    };
+  } catch {
+    return null;
   }
 }

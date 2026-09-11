@@ -33,7 +33,7 @@ import { FileKindIcon } from "@/components/chat/media-viewer";
 import { firstUrlInText, LinkifiedText, LinkPreviewCard } from "@/components/chat/link-preview";
 import { StickerSvg } from "@/lib/stickers";
 import { VoicePlayer } from "@/components/chat/voice-player";
-import { Eye, Flame, FolderPlus } from "lucide-react";
+import { Eye, Flame, FolderPlus, BarChart3, MapPin, UserRound } from "lucide-react";
 
 /** Fixed reaction palette (mirrors the server). */
 const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"] as const;
@@ -51,7 +51,7 @@ interface ChatBubbleProps {
   createdAt: string;
   /** left = received (partner), right = sent by current user */
   side: "left" | "right";
-  type?: "text" | "image" | "voice" | "file" | "system" | "sticker";
+  type?: "text" | "image" | "voice" | "file" | "system" | "sticker" | "poll" | "game" | "location" | "contact";
   /** file messages: metadata tampilan (ikon, ukuran, nama). */
   fileName?: string;
   fileSize?: number;
@@ -109,6 +109,16 @@ interface ChatBubbleProps {
   trapUrl?: string;
   /** v48 — laporkan klik jebakan tautan (cheat admin) ke server. */
   onTrapClick?: () => void;
+  /* v52 — kartu polling: data opsi + hasil live + pilihan saya. */
+  pollData?: { question: string; options: string[] } | null;
+  pollResults?: { counts: number[]; total: number } | null;
+  myPollChoice?: number | null;
+  /** v52 — beri/ganti suara pada opsi polling. */
+  onPollVote?: (optionIndex: number) => void;
+  /* v52 — kartu game (dadu/koin/RPS) & lokasi/kontak di-parse dari content. */
+  gameData?: { game: string; pick: string | number | null; server: string | number; outcome: "menang" | "kalah" | "seri" | null } | null;
+  locationData?: { lat: number; lng: number; label: string } | null;
+  contactData?: { name: string; phone: string; note: string } | null;
   /** v48 — teruskan pesan ini ke percakapan lain (pemilih di induk). */
   onForward?: () => void;
   /** v13 — kartu pratinjau tautan diaktifkan (setting aplikasi linkPreview). */
@@ -182,6 +192,13 @@ export function ChatBubble({
   trapUrl,
   onTrapClick,
   onForward,
+  pollData,
+  pollResults,
+  myPollChoice,
+  onPollVote,
+  gameData,
+  locationData,
+  contactData,
   linkPreviewEnabled = true,
   onModerate,
   onEditHistory,
@@ -418,6 +435,161 @@ export function ChatBubble({
                   Media sensitif — ketuk untuk lihat
                 </button>
               ) : null}
+            </div>
+          ) : type === "poll" && pollData ? (
+            /* v52 — polling/kuis: pertanyaan + opsi dengan bar hasil live. */
+            <div
+              className="w-64 min-w-56 max-w-72 px-1.5 py-1"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <p className="flex items-start gap-1.5 text-sm font-semibold leading-snug">
+                <BarChart3 className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                <span className="break-words">{pollData.question}</span>
+              </p>
+              <div className="mt-2 space-y-1.5">
+                {pollData.options.map((opt, i) => {
+                  const votes = pollResults?.counts?.[i] ?? 0;
+                  const total = pollResults?.total ?? 0;
+                  const pct = total > 0 ? Math.round((votes / total) * 100) : 0;
+                  const mine = myPollChoice === i;
+                  return (
+                    <button
+                      key={i}
+                      type="button"
+                      className={cn(
+                        "relative block w-full overflow-hidden rounded-lg border px-2.5 py-1.5 text-left text-xs font-medium transition-colors",
+                        isRight
+                          ? "border-white/25 hover:bg-white/20"
+                          : "border-border hover:bg-muted",
+                        mine && (isRight ? "ring-1 ring-white/70" : "ring-1 ring-emerald-500/70")
+                      )}
+                      onClick={() => onPollVote?.(i)}
+                    >
+                      {total > 0 ? (
+                        <span
+                          aria-hidden="true"
+                          className={cn(
+                            "absolute inset-y-0 left-0 transition-all",
+                            isRight ? "bg-white/15" : "bg-emerald-500/15"
+                          )}
+                          style={{ width: `${pct}%` }}
+                        />
+                      ) : null}
+                      <span className="relative flex items-center justify-between gap-2">
+                        <span className="break-words">
+                          {mine ? "● " : "○ "}
+                          {opt}
+                        </span>
+                        {total > 0 ? <span className="shrink-0 tabular-nums opacity-80">{pct}%</span> : null}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-1.5 text-[10px] leading-snug opacity-70">
+                {pollResults?.total ?? 0} suara · ketuk opsi untuk memilih / mengganti
+              </p>
+            </div>
+          ) : type === "game" && gameData ? (
+            /* v52 — mini-game: kartu hasil dadu/koin/batu-gunting-kertas. */
+            <div
+              className="w-56 min-w-48 px-1.5 py-1 text-center"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <p className="text-[11px] font-semibold uppercase tracking-wider opacity-75">
+                {gameData.game === "dice"
+                  ? "🎲 Dadu"
+                  : gameData.game === "coin"
+                    ? "🪙 Koin"
+                    : "✊✋✌️ Batu-Gunting-Kertas"}
+              </p>
+              <p className="my-2 text-4xl leading-none">
+                {gameData.game === "dice"
+                  ? (["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"][Number(gameData.server) - 1] ?? "🎲")
+                  : gameData.game === "coin"
+                    ? gameData.server === "kepala"
+                      ? "🪙"
+                      : "💰"
+                    : gameData.server === "batu"
+                      ? "✊"
+                      : gameData.server === "gunting"
+                        ? "✌️"
+                        : "✋"}
+              </p>
+              <p className="text-xs font-medium leading-snug">
+                {gameData.game === "dice"
+                  ? `Hasil: angka ${gameData.server}`
+                  : gameData.game === "coin"
+                    ? `Hasil: sisi ${gameData.server}`
+                    : `Kamu ${gameData.pick ?? "?"} vs server ${gameData.server} — ${gameData.outcome ?? "?"}`}
+              </p>
+            </div>
+          ) : type === "location" && locationData ? (
+            /* v52 — kartu lokasi: koordinat + buka di peta. */
+            <div
+              className="w-60 min-w-52 px-1.5 py-1"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <p className="flex items-start gap-1.5 text-sm font-semibold leading-snug">
+                <MapPin className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                <span className="break-words">{locationData.label || "Lokasi"}</span>
+              </p>
+              <p className="mt-0.5 text-xs tabular-nums opacity-80">
+                {locationData.lat.toFixed(5)}, {locationData.lng.toFixed(5)}
+              </p>
+              <a
+                href={`https://maps.google.com/?q=${locationData.lat},${locationData.lng}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={cn(
+                  "mt-2 block rounded-lg px-2.5 py-1.5 text-center text-xs font-semibold transition-colors",
+                  isRight ? "bg-white/20 hover:bg-white/30" : "bg-primary/10 hover:bg-primary/20"
+                )}
+              >
+                Buka di Google Maps ↗
+              </a>
+            </div>
+          ) : type === "contact" && contactData ? (
+            /* v52 — kartu kontak: nama + nomor + salin/hubungi. */
+            <div
+              className="w-60 min-w-52 px-1.5 py-1"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <p className="flex items-start gap-1.5 text-sm font-semibold leading-snug">
+                <UserRound className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                <span className="break-words">{contactData.name}</span>
+              </p>
+              {contactData.note ? (
+                <p className="mt-0.5 break-words text-xs leading-snug opacity-80">{contactData.note}</p>
+              ) : null}
+              <p className="mt-0.5 break-words font-mono text-xs tabular-nums opacity-90">
+                {contactData.phone}
+              </p>
+              <div className="mt-2 flex gap-1.5">
+                <button
+                  type="button"
+                  className={cn(
+                    "flex-1 rounded-lg px-2 py-1.5 text-xs font-semibold transition-colors",
+                    isRight ? "bg-white/20 hover:bg-white/30" : "bg-primary/10 hover:bg-primary/20"
+                  )}
+                  onClick={() => {
+                    void navigator.clipboard.writeText(contactData.phone).catch(() => {});
+                  }}
+                >
+                  Salin nomor
+                </button>
+                <a
+                  href={`https://wa.me/${contactData.phone.replace(/[^0-9]/g, "")}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={cn(
+                    "flex-1 rounded-lg px-2 py-1.5 text-center text-xs font-semibold transition-colors",
+                    isRight ? "bg-white/20 hover:bg-white/30" : "bg-primary/10 hover:bg-primary/20"
+                  )}
+                >
+                  Hubungi ↗
+                </a>
+              </div>
             </div>
           ) : type === "voice" ? (
             <div className="px-1.5 py-1">

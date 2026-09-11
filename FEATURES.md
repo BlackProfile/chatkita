@@ -391,3 +391,21 @@
   - Kartu login: begitu nama terdeteksi milik akun lain, muncul kotak peringatan jelas — "Nama ini sudah dipakai akun lain. Punya akunnya? Masukkan password. Bukan kamu? Chat pemilik akun tidak bisa dibuka orang lain." + tombol **"Daftar sebagai 'kevin (2)'"** (satu klik mengganti nama → kembali mode pendaftaran dengan kode undangan).
   - Error `ACCOUNT_UNCLAIMED` ditangani dengan pesan pendidikatif + saran; pesan `PASSWORD_REQUIRED` diperjelas ("Bukan akun Anda? Chat pemiliknya tidak bisa dibuka; daftar dengan nama lain.").
 - **Hasil:** orang baru bernama sama TIDAK dapat membuka chat milik pemilik nama pertama — harus memastikan password (akun terlindungi), tidak bisa mewarisi akun tanpa kredensial dari perangkat asing, dan selalu ditawari jalur pendaftaran nama alternatif yang jelas.
+
+---
+
+## v52 — Paket 11 Fitur: AI + Interaksi + Infrastruktur (Task 68)
+
+**Permintaan:** tambahkan semua fitur usulan KECUALI kategori operasional/toko — jadi: AI (ringkas, draf, TTS; transkripsi suara ternyata sudah ada sejak v7), interaksi (polling, mini-game, lokasi/kontak), infrastruktur (2FA TOTP, widget embed, backup harian).
+
+**Fitur:**
+- **📝 Ringkasan AI** (`admin:ai_summary`): admin ringkas 120 pesan terakhir via LLM (z-ai SDK, helper `llmComplete` yang sudah ada) — bullet kebutuhan/status/tindak lanjut, tampil di dialog.
+- **✨ Draf balasan AI** (`admin:ai_draft`): 30 pesan terakhir jadi konteks → draf balasan pihak Admin → diisi ke composer untuk disunting & dikirim manual.
+- **🔊 Balasan suara TTS** (`admin:tts_send`): teks composer ≤1000 kar → WAV (voice `tongtong`) → pesan suara (`Balasan suara AI.wav`) dengan transkrip = teks sumber.
+- **📊 Polling/kuis** (`poll:create` admin, `poll:vote` keduanya): tabel `poll_votes` (1 suara/user, bisa diganti), hasil agregat (count/persentase) live via `message:updated` + ikut history (`toChatMessage`), bar hasil di kartu ChatBubble.
+- **🎮 Mini-game** (`game:play`): dadu ⚀–⚅, koin 🪙, batu-gunting-kertas ✊✋✌️ melawan server — hasil acak server, kartu besar di bubble.
+- **📍 Lokasi & 👤 Kontak** (`rich:send`): lokasi dari GPS perangkat (geolocation API) → kartu koordinat + tautan Google Maps; kontak (nama/telepon/catatan) → kartu + salin nomor + tautan wa.me.
+- **🔐 2FA TOTP admin**: RFC 6238 implementasi mandiri (base32 + HMAC-SHA1, toleransi ±30 dtk) — setup QR (`otpauth://`, qrcode.react), aktif/nonaktif wajib kode; `admin:auth` menuntut `totp` saat aktif (TOTP_REQUIRED/INVALID_TOTP), field kode muncul di form login.
+- **🪟 Widget embed**: `GET /api/embed.js` → skrip tombol chat melayang untuk website lain (iframe 380×620 → `/?embed=1`); Messenger mode embed menyembunyikan tombol install & footer.
+- **💾 Backup DB harian otomatis**: `VACUUM INTO backups/chatkita-db-YYYY-MM-DD.db` tiap hari (cek tiap 10 menit, persist `last_backup_day`), retensi 14 berkas + audit.
+- **Pengaman**: `messages:send` MENOLAK type poll/game/location/contact dari klien (anti-pemalsuan JSON) — hanya event khusus yang memvalidasi isi; `snippetOf` menampilkan preview rapi (📊/🎮/📍/👤) untuk daftar & push.

@@ -72,8 +72,8 @@
 
 import { createServer, type ServerResponse } from 'http'
 import { join, resolve } from 'path'
-import { createHash } from 'crypto'
-import { closeSync, openSync, readFileSync, readdirSync, readSync, statSync, unlinkSync } from 'node:fs'
+import { createHash, createHmac } from 'crypto'
+import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { Database } from 'bun:sqlite'
 import { Server, type Socket as IoSocket } from 'socket.io'
 import ZAI from 'z-ai-web-dev-sdk'
@@ -218,7 +218,7 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        mengirim, reuse user:toast). Ganti nama: admin:account_set {name}
  *        kini ikut menyiarkan users:changed. KLIEN — badge favicon +
  *        App Badging API (lib/app-badge). */
-const SERVICE_VERSION = 'v51'
+const SERVICE_VERSION = 'v52'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -467,6 +467,17 @@ db.run(`
   )
 `)
 
+/* v52 — polling/kuis: satu suara per user per poll (bisa diganti). */
+db.run(`
+  CREATE TABLE IF NOT EXISTS poll_votes (
+    message_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    option_index INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (message_id, user_id)
+  )
+`)
+
 db.run(`
   CREATE TABLE IF NOT EXISTS push_subscriptions (
     endpoint TEXT PRIMARY KEY,
@@ -595,7 +606,7 @@ interface ChatMessageApi {
   senderId: string
   content: string
   createdAt: string
-  type: 'text' | 'image' | 'voice' | 'file' | 'system'
+  type: 'text' | 'image' | 'voice' | 'file' | 'system' | 'sticker' | 'poll' | 'game' | 'location' | 'contact'
   replyToId?: number
   replyTo?: { id: number; senderId: string; snippet: string; type: string }
   durationMs?: number
@@ -1372,6 +1383,13 @@ const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   ...((row.burn ?? 0) === 1 && !row.deleted_at ? { burn: true } : {}),
   ...(row.trap_url && !row.deleted_at ? { trapUrl: row.trap_url } : {}),
   ...((row.trap_clicks ?? 0) > 0 && !row.deleted_at ? { trapClicks: row.trap_clicks } : {}),
+  // v52 — hasil polling hidup ikut history & fan-out awal.
+  ...(row.type === 'poll' && !row.deleted_at
+    ? (() => {
+        const p = pollDataOf(row)
+        return p ? { pollResults: pollResultsOf(row.id, p.options.length) } : {}
+      })()
+    : {}),
   ...(row.scheduled_at && !row.delivered_at && !row.deleted_at
     ? { scheduledAt: new Date(row.scheduled_at).toISOString() }
     : {}),
@@ -1399,6 +1417,25 @@ const snippetOf = (
   if (type === 'voice') return '🎤 Pesan suara'
   if (type === 'sticker') return '✨ Stiker'
   if (type === 'file') return row.caption || `📎 ${row.file_name ?? 'File'}`
+  /* v52 — preview rapi untuk pesan khusus (jangan bocorkan JSON mentah). */
+  if (type === 'poll') {
+    try {
+      const p = JSON.parse(row.content) as { question?: unknown }
+      return `📊 ${typeof p.question === 'string' ? p.question : 'Polling'}`
+    } catch {
+      return '📊 Polling'
+    }
+  }
+  if (type === 'game') return '🎮 Mini-game'
+  if (type === 'location') return '📍 Lokasi'
+  if (type === 'contact') {
+    try {
+      const c = JSON.parse(row.content) as { name?: unknown }
+      return `👤 ${typeof c.name === 'string' ? c.name : 'Kontak'}`
+    } catch {
+      return '👤 Kontak'
+    }
+  }
   return row.content
 }
 
@@ -2003,7 +2040,7 @@ const removeOnlineSocket = (userId: string, socketId: string) => {
 /* Message persistence + fan-out (human sends: text/image/voice/file)  */
 /* ------------------------------------------------------------------ */
 
-type MessageType = 'text' | 'image' | 'voice' | 'file' | 'system' | 'sticker'
+type MessageType = 'text' | 'image' | 'voice' | 'file' | 'system' | 'sticker' | 'poll' | 'game' | 'location' | 'contact'
 
 /* ------------------------------------------------------------------ */
 /* v8 guards — per-account rate limits + storage quota                 */
@@ -2517,6 +2554,150 @@ const transcribeVoice = async (messageId: number, conversationId: string, conten
   io.to('admins').emit('message:updated', payload)
   console.log(`Transcribed message ${messageId}: "${text.slice(0, 40)}…"`)
 }
+
+/* ------------------------------------------------------------------ */
+/* v52 — AI TTS, 2FA TOTP, poll helpers, backup DB harian              */
+/* ------------------------------------------------------------------ */
+
+/** v52 — teks → suara (WAV) utk pesan suara buatan AI (admin). */
+const ttsSpeak = async (text: string): Promise<Buffer | null> => {
+  try {
+    const zai = await getZai()
+    const res = await zai.audio.tts.create({
+      input: text.slice(0, 1000),
+      voice: 'tongtong',
+      speed: 1.0,
+      response_format: 'wav',
+      stream: false,
+    })
+    zaiPromise = null
+    const buf = Buffer.from(new Uint8Array(await res.arrayBuffer()))
+    return buf.length > 64 ? buf : null
+  } catch (err) {
+    zaiPromise = null
+    console.error('TTS error:', (err as Error)?.message ?? err)
+    return null
+  }
+}
+
+/* v52 — TOTP (RFC 6238): SHA-1, 6 digit, langkah 30 dtk, toleransi ±1. */
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+const base32Encode = (buf: Buffer): string => {
+  let bits = 0
+  let value = 0
+  let out = ''
+  for (const b of buf) {
+    value = (value << 8) | b
+    bits += 8
+    while (bits >= 5) {
+      out += B32[(value >>> (bits - 5)) & 31]
+      bits -= 5
+    }
+  }
+  if (bits > 0) out += B32[(value << (5 - bits)) & 31]
+  return out
+}
+const base32Decode = (s: string): Buffer => {
+  const clean = s.toUpperCase().replace(/=+$/, '').replace(/\s/g, '')
+  let bits = 0
+  let value = 0
+  const out: number[] = []
+  for (const ch of clean) {
+    const idx = B32.indexOf(ch)
+    if (idx < 0) continue
+    value = (value << 5) | idx
+    bits += 5
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 0xff)
+      bits -= 8
+    }
+  }
+  return Buffer.from(out)
+}
+const totpCodeAt = (secretB32: string, counter: number): string => {
+  const key = base32Decode(secretB32)
+  const buf = Buffer.alloc(8)
+  buf.writeBigUInt64BE(BigInt(counter))
+  const mac = createHmac('sha1', key).update(buf).digest()
+  const off = mac[mac.length - 1] & 0x0f
+  const code =
+    ((mac[off] & 0x7f) << 24) | (mac[off + 1] << 16) | (mac[off + 2] << 8) | mac[off + 3]
+  return String(code % 1_000_000).padStart(6, '0')
+}
+const totpVerify = (secretB32: string, code: string): boolean => {
+  const c = code.replace(/\D/g, '')
+  if (c.length !== 6) return false
+  const step = Math.floor(Date.now() / 30_000)
+  for (let i = -1; i <= 1; i++) {
+    if (totpCodeAt(secretB32, step + i) === c) return true
+  }
+  return false
+}
+
+/* v52 — poll: parse & agregasi suara. */
+interface PollData {
+  question: string
+  options: string[]
+}
+const pollDataOf = (row: MessageRow): PollData | null => {
+  if (row.deleted_at || row.type !== 'poll') return null
+  try {
+    const raw = JSON.parse(row.content) as unknown
+    const q = (raw as PollData)?.question
+    const opts = (raw as PollData)?.options
+    if (typeof q !== 'string' || q.length < 1) return null
+    if (!Array.isArray(opts) || opts.length < 2 || opts.length > 6) return null
+    const options = opts.filter((o): o is string => typeof o === 'string' && o.length > 0)
+    if (options.length < 2) return null
+    return { question: q.slice(0, 200), options: options.map((o) => o.slice(0, 60)) }
+  } catch {
+    return null
+  }
+}
+const pollResultsOf = (messageId: number, optCount: number) => {
+  const rows = db
+    .query('SELECT user_id, option_index FROM poll_votes WHERE message_id = ?')
+    .all(messageId) as Array<{ user_id: string; option_index: number }>
+  const counts = new Array(optCount).fill(0) as number[]
+  for (const r of rows) {
+    if (r.option_index >= 0 && r.option_index < optCount) counts[r.option_index] += 1
+  }
+  return { counts, total: rows.length }
+}
+
+/* v52 — backup DB harian otomatis (VACUUM INTO, retensi 14 berkas). */
+const BACKUP_DIR = resolve(import.meta.dir, '../../backups')
+const BACKUP_KEEP = 14
+const runDailyBackup = () => {
+  const day = new Date().toISOString().slice(0, 10)
+  if (getSetting('last_backup_day') === day) return
+  try {
+    mkdirSync(BACKUP_DIR, { recursive: true })
+    const file = join(BACKUP_DIR, `chatkita-db-${day}.db`)
+    db.run(`VACUUM INTO '${file}'`)
+    const files = readdirSync(BACKUP_DIR)
+      .filter((f) => f.startsWith('chatkita-db-') && f.endsWith('.db'))
+      .sort()
+    while (files.length > BACKUP_KEEP) {
+      const old = files.shift()
+      if (old) {
+        try {
+          unlinkSync(join(BACKUP_DIR, old))
+        } catch {}
+      }
+    }
+    db.run(
+      "INSERT INTO settings (key, value) VALUES ('last_backup_day', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [day]
+    )
+    audit('backup_harian', `cadangan DB → ${file}`)
+    console.log(`[backup] cadangan harian tersimpan: ${file}`)
+  } catch (err) {
+    console.error('[backup] gagal:', (err as Error)?.message ?? err)
+  }
+}
+setInterval(runDailyBackup, 10 * 60_000)
+setTimeout(runDailyBackup, 20_000)
 
 /* ------------------------------------------------------------------ */
 /* v8 — retention sweeper (media aging) + SQLite housekeeping          */
@@ -4318,6 +4499,25 @@ io.on('connection', (socket) => {
         adminAuthFails.count = 0
         adminAuthSocketFails.delete(socket.id)
 
+        /* v52 — 2FA TOTP: bila aktif, password saja tidak cukup — admin wajib
+         * menyerahkan kode 6 digit dari aplikasi authenticator. */
+        const totpEnabled = getSetting('totp_enabled') === '1'
+        const totpSecret = getSetting('totp_secret') ?? ''
+        if (totpEnabled && totpSecret) {
+          const totp = typeof data?.totp === 'string' ? data.totp.trim() : ''
+          if (!totp) {
+            ack({ ok: false, error: 'TOTP_REQUIRED' })
+            return
+          }
+          if (!totpVerify(totpSecret, totp)) {
+            adminAuthFails.count += 1
+            adminAuthSocketFails.set(socket.id, (adminAuthSocketFails.get(socket.id) ?? 0) + 1)
+            console.log(`Rejected admin login (kode TOTP salah, socket ${socket.id})`)
+            ack({ ok: false, error: 'INVALID_TOTP' })
+            return
+          }
+        }
+
         socket.data.userId = ADMIN_ID
         socket.join('admins')
         // v11 — remember connection metadata (ip/user-agent) for admin:xray.
@@ -4498,6 +4698,14 @@ io.on('connection', (socket) => {
 
       const type = (typeof data?.type === 'string' ? data.type : 'text') as MessageType
       const content = typeof data?.content === 'string' ? data.content : ''
+
+      /* v52 — poll/game/location/contact HANYA dibuat lewat event khusus
+       * (poll:create, game:play, rich:send) yang memvalidasi isinya di
+       * server; cegah klien memalsukan JSON lewat messages:send. */
+      if (type === 'poll' || type === 'game' || type === 'location' || type === 'contact') {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
 
       // v13 — app-level feature switches from the dashboard (users only).
       const appSet = getAppSettings()
@@ -5849,6 +6057,351 @@ io.on('connection', (socket) => {
     const res = db.run('DELETE FROM devices WHERE user_id = ?', [target.id])
     audit('user_unbind_devices', `${res.changes} perangkat dilepas dari "${target.name}"`)
     ack({ ok: true, removed: res.changes })
+  }))
+
+  /* ---------------------------------------------------------------- */
+  /* v52 — AI ringkas/draf/suara, POLL, GAME, LOKASI/KONTAK, 2FA TOTP  */
+  /* ---------------------------------------------------------------- */
+
+  /** Baris konteks "Nama: isi" untuk prompt AI (ringkas/draf). */
+  const aiLineOf = (r: MessageRow & { sender_name?: string }): string => {
+    const who = r.sender_id === ADMIN_ID ? 'Admin' : (r.sender_name ?? 'User')
+    let what: string
+    if (r.type === 'text') what = r.content
+    else if (r.type === 'voice') what = r.transcript ? `[suara: ${r.transcript}]` : '[pesan suara]'
+    else if (r.type === 'image') what = r.caption ? `[foto: ${r.caption}]` : '[foto]'
+    else if (r.type === 'file') what = `[berkas: ${r.file_name ?? ''}]`
+    else if (r.type === 'poll') what = '[polling]'
+    else if (r.type === 'game') what = '[mini-game]'
+    else if (r.type === 'location') what = '[lokasi]'
+    else if (r.type === 'contact') what = '[kontak]'
+    else what = `[${r.type}]`
+    return `${who}: ${what}`.slice(0, 400)
+  }
+
+  /** Ambil N pesan hidup terakhir percakapan (terbaru terakhir). */
+  const recentAiLines = (cid: string, limit: number): string[] => {
+    const rows = db
+      .query(
+        'SELECT m.*, u.name AS sender_name FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id = ? AND m.deleted_at IS NULL ORDER BY m.id DESC LIMIT ?'
+      )
+      .all(cid, limit) as Array<MessageRow & { sender_name?: string }>
+    return rows.reverse().map(aiLineOf)
+  }
+
+  /** v52 — AI: ringkas percakapan (admin). */
+  socket.on('admin:ai_summary', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    void (async () => {
+      const cid = typeof data?.conversationId === 'string' ? data.conversationId : ''
+      const conv = cid ? getConversation(cid) : null
+      if (!conv) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const lines = recentAiLines(cid, 120)
+      if (lines.length === 0) {
+        ack({ ok: false, error: 'NO_MESSAGES' })
+        return
+      }
+      const text = await llmComplete(
+        'Kamu asisten ringkasan percakapan ChatKita (chat Admin dengan pelanggan). Ringkas dalam Bahasa Indonesia, format bullet singkat: kebutuhan/keluhan utama pelanggan, info penting dari Admin, status sekarang, tindak lanjut yang disarankan. Maksimal 8 bullet, tanpa pembuka.',
+        `Ringkas percakapan ini:\n\n${lines.join('\n')}`,
+        1500
+      )
+      if (!text) {
+        ack({ ok: false, error: 'AI_FAILED' })
+        return
+      }
+      audit('ai_summary', `ringkasan AI percakapan ${cid.slice(0, 8)} dibuat`)
+      ack({ ok: true, summary: text })
+    })().catch((err) => {
+      console.error('ai_summary error:', (err as Error)?.message ?? err)
+      ack({ ok: false, error: 'SERVER_ERROR' })
+    })
+  }))
+
+  /** v52 — AI: draf balasan admin dari konteks chat (admin review dulu). */
+  socket.on('admin:ai_draft', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    void (async () => {
+      const cid = typeof data?.conversationId === 'string' ? data.conversationId : ''
+      const conv = cid ? getConversation(cid) : null
+      if (!conv) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const lines = recentAiLines(cid, 30)
+      if (lines.length === 0) {
+        ack({ ok: false, error: 'NO_MESSAGES' })
+        return
+      }
+      const text = await llmComplete(
+        'Kamu membantu ADMIN ChatKita menyusun draf balasan untuk pelanggannya. Tulis draf balasan DARI PIHAK ADMIN berdasarkan konteks. Aturan: hanya isi pesannya (tanpa label, tanpa markdown), Bahasa Indonesia ramah dan profesional, 1-4 kalimat.',
+        `Konteks percakapan (pesan terakhir pelanggan yang harus dibalas Admin ada di baris paling bawah):\n\n${lines.join('\n')}`,
+        700
+      )
+      if (!text) {
+        ack({ ok: false, error: 'AI_FAILED' })
+        return
+      }
+      ack({ ok: true, draft: text })
+    })().catch((err) => {
+      console.error('ai_draft error:', (err as Error)?.message ?? err)
+      ack({ ok: false, error: 'SERVER_ERROR' })
+    })
+  }))
+
+  /** v52 — TTS: teks composer admin → pesan suara AI (WAV) di percakapan. */
+  socket.on('admin:tts_send', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    void (async () => {
+      const cid = typeof data?.conversationId === 'string' ? data.conversationId : ''
+      const conv = cid ? getConversation(cid) : null
+      if (!conv) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const text = typeof data?.text === 'string' ? data.text.trim() : ''
+      if (text.length < 1 || text.length > 1000) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const buf = await ttsSpeak(text)
+      if (!buf) {
+        ack({ ok: false, error: 'AI_FAILED' })
+        return
+      }
+      const name = `tts-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.wav`
+      writeFileSync(join(MEDIA_DIR, name), buf)
+      const message = insertAndFanOut(conv, ADMIN_ID, `/api/media/${name}`, 'voice', {
+        fileName: 'Balasan suara AI.wav',
+        fileSize: buf.length,
+        mimeType: 'audio/wav',
+      })
+      // Teks sumber langsung jadi transkrip — pemutar suara menampilkan tulisan.
+      db.run('UPDATE messages SET transcript = ? WHERE id = ?', [text, message.id])
+      message.transcript = text
+      audit('tts_send', `pesan suara AI (${text.length} kar) dikirim ke ${cid.slice(0, 8)}`)
+      ack({ ok: true, message })
+    })().catch((err) => {
+      console.error('tts_send error:', (err as Error)?.message ?? err)
+      ack({ ok: false, error: 'SERVER_ERROR' })
+    })
+  }))
+
+  /** v52 — POLL: admin membuat polling/kuis (2–6 opsi). */
+  socket.on('poll:create', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const cid = typeof data?.conversationId === 'string' ? data.conversationId : ''
+    const conv = cid ? getConversation(cid) : null
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const question = typeof data?.question === 'string' ? data.question.trim().slice(0, 200) : ''
+    const rawOpts = Array.isArray(data?.options) ? data.options : []
+    const options = rawOpts
+      .filter((o): o is string => typeof o === 'string')
+      .map((o) => o.trim())
+      .filter((o) => o.length > 0)
+      .map((o) => o.slice(0, 60))
+      .slice(0, 6)
+    if (question.length < 1 || options.length < 2) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const message = insertAndFanOut(conv, ADMIN_ID, JSON.stringify({ question, options }), 'poll')
+    audit('poll_create', `polling "${question.slice(0, 40)}" (${options.length} opsi)`)
+    ack({ ok: true, message })
+  }))
+
+  /** v52 — POLL: user/admin memberi suara (1 suara, bisa diganti). */
+  socket.on('poll:vote', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const id = Number(data?.messageId)
+    const idx = Number(data?.optionIndex)
+    const row = Number.isInteger(id) && id > 0
+      ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+      : null
+    const poll = row ? pollDataOf(row) : null
+    const conversation = row ? getConversation(row.conversation_id) : null
+    if (!row || !poll || !conversation || !isParticipant(conversation, me)) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    if (!Number.isInteger(idx) || idx < 0 || idx >= poll.options.length) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    db.run(
+      'INSERT INTO poll_votes (message_id, user_id, option_index, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(message_id, user_id) DO UPDATE SET option_index = excluded.option_index, updated_at = excluded.updated_at',
+      [row.id, me, idx, now()]
+    )
+    const results = pollResultsOf(row.id, poll.options.length)
+    const payload = { id: row.id, conversationId: row.conversation_id, pollResults: results }
+    io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+    io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+    io.to('admins').emit('message:updated', payload)
+    ack({ ok: true, pollResults: results })
+  }))
+
+  /** v52 — GAME: dadu / koin / batu-gunting-kertas melawan server. */
+  socket.on('game:play', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const cid = typeof data?.conversationId === 'string' ? data.conversationId : ''
+    const conv = cid ? getConversation(cid) : null
+    if (!conv || !isParticipant(conv, me)) {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    const game = typeof data?.game === 'string' ? data.game : ''
+    let pick: string | number | null = null
+    let server: string | number | null = null
+    let outcome: 'menang' | 'kalah' | 'seri' | null = null
+    if (game === 'dice') {
+      server = 1 + Math.floor(Math.random() * 6)
+    } else if (game === 'coin') {
+      server = Math.random() < 0.5 ? 'kepala' : 'ekor'
+    } else if (game === 'rps') {
+      const hands = ['batu', 'gunting', 'kertas']
+      const p = typeof data?.pick === 'string' ? data.pick : ''
+      if (!hands.includes(p)) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      pick = p
+      server = hands[Math.floor(Math.random() * 3)]
+      if (pick === server) outcome = 'seri'
+      else if (
+        (pick === 'batu' && server === 'gunting') ||
+        (pick === 'gunting' && server === 'kertas') ||
+        (pick === 'kertas' && server === 'batu')
+      )
+        outcome = 'menang'
+      else outcome = 'kalah'
+    } else {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const content = JSON.stringify({ game, pick, server, outcome })
+    const message = insertAndFanOut(conv, me, content, 'game')
+    ack({ ok: true, message })
+  }))
+
+  /** v52 — RICH: kirim lokasi (koordinat) atau kartu kontak. */
+  socket.on('rich:send', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const cid = typeof data?.conversationId === 'string' ? data.conversationId : ''
+    const conv = cid ? getConversation(cid) : null
+    if (!conv || !isParticipant(conv, me)) {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    const kind = typeof data?.kind === 'string' ? data.kind : ''
+    const d = data?.data && typeof data.data === 'object' ? data.data : {}
+    if (kind === 'location') {
+      const lat = Number(d.lat)
+      const lng = Number(d.lng)
+      if (!Number.isFinite(lat) || lat < -90 || lat > 90 || !Number.isFinite(lng) || lng < -180 || lng > 180) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const label = typeof d.label === 'string' ? d.label.trim().slice(0, 80) : ''
+      const message = insertAndFanOut(conv, me, JSON.stringify({ lat, lng, label }), 'location')
+      ack({ ok: true, message })
+      return
+    }
+    if (kind === 'contact') {
+      const name = typeof d.name === 'string' ? d.name.trim().slice(0, 60) : ''
+      const phone = typeof d.phone === 'string' ? d.phone.trim() : ''
+      const note = typeof d.note === 'string' ? d.note.trim().slice(0, 120) : ''
+      if (name.length < 1 || !/^[+0-9][0-9\s()\-]{2,24}$/.test(phone)) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      const message = insertAndFanOut(
+        conv,
+        me,
+        JSON.stringify({ name, phone, note }),
+        'contact'
+      )
+      ack({ ok: true, message })
+      return
+    }
+    ack({ ok: false, error: 'INVALID_MESSAGE' })
+  }))
+
+  /** v52 — 2FA TOTP: mulai pemasangan (hasilkan secret + otpauth URI). */
+  socket.on('admin:totp_setup', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    if (getSetting('totp_enabled') === '1') {
+      ack({ ok: false, error: 'ALREADY_SET' })
+      return
+    }
+    const secret = base32Encode(Buffer.from(crypto.getRandomValues(new Uint8Array(20))))
+    db.run(
+      "INSERT INTO settings (key, value) VALUES ('totp_secret', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [secret]
+    )
+    const uri = `otpauth://totp/ChatKita%20Admin?secret=${secret}&issuer=ChatKita&algorithm=SHA1&digits=6&period=30`
+    audit('totp_setup', 'secret 2FA baru dibuat (belum aktif)')
+    ack({ ok: true, secret, uri })
+  }))
+
+  /** v52 — 2FA TOTP: aktifkan dengan kode dari authenticator. */
+  socket.on('admin:totp_enable', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const secret = getSetting('totp_secret') ?? ''
+    if (!secret) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    if (getSetting('totp_enabled') === '1') {
+      ack({ ok: false, error: 'ALREADY_SET' })
+      return
+    }
+    const code = typeof data?.code === 'string' ? data.code.trim() : ''
+    if (!totpVerify(secret, code)) {
+      ack({ ok: false, error: 'INVALID_TOTP' })
+      return
+    }
+    db.run(
+      "INSERT INTO settings (key, value) VALUES ('totp_enabled', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      []
+    )
+    audit('totp_enable', '2FA TOTP AKTIF untuk panel admin')
+    ack({ ok: true })
+  }))
+
+  /** v52 — 2FA TOTP: nonaktifkan (wajib kode valid sekali lagi). */
+  socket.on('admin:totp_disable', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const secret = getSetting('totp_secret') ?? ''
+    if (getSetting('totp_enabled') !== '1' || !secret) {
+      ack({ ok: false, error: 'NOT_LOCKED' })
+      return
+    }
+    const code = typeof data?.code === 'string' ? data.code.trim() : ''
+    if (!totpVerify(secret, code)) {
+      ack({ ok: false, error: 'INVALID_TOTP' })
+      return
+    }
+    db.run("DELETE FROM settings WHERE key IN ('totp_secret', 'totp_enabled')")
+    audit('totp_disable', '2FA TOTP dinonaktifkan')
+    ack({ ok: true })
   }))
 
   /* ---------------------------------------------------------------- */

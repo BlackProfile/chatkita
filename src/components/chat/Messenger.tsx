@@ -22,6 +22,7 @@ import {
   Moon,
   MoreVertical,
   Music,
+  MapPin,
   Paperclip,
   Pin,
   Plus,
@@ -35,6 +36,7 @@ import {
   Sun,
   Trash2,
   Type,
+  UserRound,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -87,6 +89,9 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -137,6 +142,10 @@ import {
   avatarColorClass,
   canEditMessage,
   compressImageToBlobs,
+  contactDataOf,
+  gameDataOf,
+  locationDataOf,
+  pollDataOf,
   FONT_SCALES,
   formatChatTime,
   formatFileSize,
@@ -578,6 +587,11 @@ export function Messenger() {
   /* v51 — anti-dupe nama: saran nama alternatif bebas dari server (mis.
    * "kevin (2)") saat nama yang diketik ternyata milik akun orang lain. */
   const [nameSuggestion, setNameSuggestion] = useState<string | null>(null);
+  /* v52 — dialog kirim kontak + pilihan polling saya. */
+  const [contactOpen, setContactOpen] = useState(false);
+  const [contactName, setContactName] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
+  const [contactNote, setContactNote] = useState("");
   const [input, setInput] = useState("");
   const [sendError, setSendError] = useState(false);
 
@@ -653,6 +667,13 @@ export function Messenger() {
   const [editing, setEditing] = useState<ChatMessage | null>(null);
   const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
   const [installAvailable, setInstallAvailable] = useState(false);
+  /* v52 — mode widget embed (?embed=1): tampilan ringkas untuk iframe situs
+   * lain — tanpa tombol install & footer branding. */
+  const [isEmbed] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("embed") === "1"
+  );
   const [translatingId, setTranslatingId] = useState<number | null>(null);
   // v22 — unread (pesan masuk saat tab tersembunyi) untuk badge judul tab.
   const [unread, setUnread] = useState(0);
@@ -946,6 +967,8 @@ export function Messenger() {
                 burn: u.burn ?? m.burn,
                 trapUrl: u.trapUrl !== undefined ? u.trapUrl : m.trapUrl,
                 trapClicks: u.trapClicks ?? m.trapClicks,
+                /* v52 — hasil voting polling live. */
+                pollResults: u.pollResults !== undefined ? u.pollResults : m.pollResults,
               }
             : m
         )
@@ -1389,6 +1412,83 @@ export function Messenger() {
   const handleReact = (msg: ChatMessage, emoji: string) => {
     socketRef.current?.emit("message:react", { messageId: msg.id, emoji });
   };
+
+  /* ---------------------------------------------------------------- */
+  /* v52 — polling, mini-game, lokasi & kontak (sisi user)             */
+  /* ---------------------------------------------------------------- */
+
+  /** Pilihan saya per pesan poll (lokal, untuk highlight ●). */
+  const [myPollVotes, setMyPollVotes] = useState<Record<number, number>>({});
+
+  const handlePollVote = (messageId: number, optionIndex: number) => {
+    const socket = socketRef.current;
+    if (!socket || !connected) return;
+    socket.emit(
+      "poll:vote",
+      { messageId, optionIndex },
+      (res: AckOf<{ ok: true; pollResults: { counts: number[]; total: number } }>) => {
+        if (res.ok) {
+          setMyPollVotes((prev) => ({ ...prev, [messageId]: optionIndex }));
+        } else if (res.error === "UNAUTHORIZED" || res.error === "NOT_FOUND") {
+          toast.error("Polling tidak bisa dibuka.");
+        }
+      }
+    );
+  };
+
+  const handlePlayGame = (game: "dice" | "coin" | "rps", pick?: string) => {
+    const socket = socketRef.current;
+    if (!socket || !connected || !conversationId) return;
+    socket.emit("game:play", { conversationId, game, pick });
+  };
+
+  const handleSendLocation = () => {
+    const socket = socketRef.current;
+    if (!socket || !connected || !conversationId) return;
+    if (!("geolocation" in navigator)) {
+      toast.error("Perangkat ini tidak mendukung GPS.");
+      return;
+    }
+    toast.info("Mencari lokasi…");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        socket.emit("rich:send", {
+          conversationId,
+          kind: "location",
+          data: {
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            label: "Lokasi saya",
+          },
+        });
+        toast.success("Lokasi terkirim.");
+      },
+      () => toast.error("Izin lokasi ditolak / tidak tersedia."),
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 60_000 }
+    );
+  };
+
+  const handleSendContact = () => {
+    const socket = socketRef.current;
+    const name = contactName.trim();
+    const phone = contactPhone.trim();
+    if (!socket || !connected || !conversationId) return;
+    if (!name || !/^[+0-9][0-9\s()\-]{2,24}$/.test(phone)) {
+      toast.error("Nama wajib diisi & nomor telepon tidak valid.");
+      return;
+    }
+    socket.emit("rich:send", {
+      conversationId,
+      kind: "contact",
+      data: { name, phone, note: contactNote.trim().slice(0, 120) },
+    });
+    setContactOpen(false);
+    setContactName("");
+    setContactPhone("");
+    setContactNote("");
+    toast.success("Kontak terkirim.");
+  };
+
 
   const handleEditStart = (msg: ChatMessage) => {
     setReplyTo(null);
@@ -2282,7 +2382,7 @@ export function Messenger() {
                   )}
                 </>
               )}
-              {installAvailable ? (
+              {!isEmbed && installAvailable ? (
                 <Button
                   type="button"
                   variant="outline"
@@ -2295,9 +2395,11 @@ export function Messenger() {
             </form>
           </div>
 
-          <p className="mt-5 text-center text-[11px] tracking-wide text-emerald-900/45 dark:text-emerald-100/35">
-            Pesan real-time · Multi-perangkat · Gratis
-          </p>
+          {!isEmbed ? (
+            <p className="mt-5 text-center text-[11px] tracking-wide text-emerald-900/45 dark:text-emerald-100/35">
+              Pesan real-time · Multi-perangkat · Gratis
+            </p>
+          ) : null}
         </div>
       </div>
     );
@@ -2708,6 +2810,22 @@ export function Messenger() {
                     m.senderId !== me.userId && m.type === "text" && !m.deletedAt
                       ? () => handleTranslate(m)
                       : undefined
+                  }
+                  /* v52 — polling, mini-game, lokasi & kontak. */
+                  pollData={m.type === "poll" && !m.deletedAt ? pollDataOf(m.content) : null}
+                  pollResults={m.pollResults ?? null}
+                  myPollChoice={myPollVotes[m.id] ?? null}
+                  onPollVote={
+                    m.type === "poll" && !m.deletedAt
+                      ? (idx) => handlePollVote(m.id, idx)
+                      : undefined
+                  }
+                  gameData={m.type === "game" && !m.deletedAt ? gameDataOf(m.content) : null}
+                  locationData={
+                    m.type === "location" && !m.deletedAt ? locationDataOf(m.content) : null
+                  }
+                  contactData={
+                    m.type === "contact" && !m.deletedAt ? contactDataOf(m.content) : null
                   }
                   />
                 </div>
@@ -3205,6 +3323,44 @@ export function Messenger() {
                       <Camera className="mr-2 size-4" aria-hidden="true" />
                       Kamera
                     </DropdownMenuItem>
+                    {/* v52 — mainan & info: game, lokasi, kontak. */}
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger disabled={!connected || sendBlocked}>
+                        <span className="mr-2">🎮</span>
+                        Main game
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent>
+                        <DropdownMenuItem onClick={() => handlePlayGame("dice")}>
+                          🎲 Lempar dadu
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handlePlayGame("coin")}>
+                          🪙 Lempar koin
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handlePlayGame("rps", "batu")}>
+                          ✊ Batu
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handlePlayGame("rps", "gunting")}>
+                          ✌️ Gunting
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handlePlayGame("rps", "kertas")}>
+                          🖐 Kertas
+                        </DropdownMenuItem>
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                    <DropdownMenuItem
+                      disabled={!connected || sendBlocked}
+                      onClick={handleSendLocation}
+                    >
+                      <MapPin className="mr-2 size-4" aria-hidden="true" />
+                      Kirim lokasi saya
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={!connected || sendBlocked}
+                      onClick={() => setContactOpen(true)}
+                    >
+                      <UserRound className="mr-2 size-4" aria-hidden="true" />
+                      Kirim kontak
+                    </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuCheckboxItem
                       checked={sensitiveNext}
@@ -3539,6 +3695,57 @@ export function Messenger() {
           >
             Simpan
           </Button>
+        </DialogContent>
+      </Dialog>
+
+      {/* v52 — dialog kirim kartu kontak */}
+      <Dialog open={contactOpen} onOpenChange={setContactOpen}>
+        <DialogContent className="rounded-2xl">
+          <DialogHeader>
+            <DialogTitle>Kirim kontak</DialogTitle>
+            <DialogDescription>
+              Nama &amp; nomor akan tampil sebagai kartu kontak di chat.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="contact-name">Nama</Label>
+              <Input
+                id="contact-name"
+                value={contactName}
+                maxLength={60}
+                placeholder="cth. Budi Santoso"
+                onChange={(e) => setContactName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="contact-phone">Nomor telepon</Label>
+              <Input
+                id="contact-phone"
+                value={contactPhone}
+                maxLength={25}
+                inputMode="tel"
+                placeholder="cth. +62 812-3456-7890"
+                onChange={(e) => setContactPhone(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="contact-note">Catatan (opsional)</Label>
+              <Input
+                id="contact-note"
+                value={contactNote}
+                maxLength={120}
+                placeholder="cth. Kontak darurat"
+                onChange={(e) => setContactNote(e.target.value)}
+              />
+            </div>
+            <Button
+              className="h-10 w-full rounded-lg bg-emerald-600 text-sm font-semibold text-white hover:bg-emerald-600/90"
+              onClick={handleSendContact}
+            >
+              Kirim kontak
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
 

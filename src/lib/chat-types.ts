@@ -97,7 +97,7 @@ export interface ChatUser {
   hasPin?: boolean;
 }
 
-export type MessageContentType = "text" | "image" | "voice" | "file" | "system" | "sticker";
+export type MessageContentType = "text" | "image" | "voice" | "file" | "system" | "sticker" | "poll" | "game" | "location" | "contact";
 
 /** Grouped emoji reactions on one message. */
 export interface MessageReaction {
@@ -184,6 +184,8 @@ export interface ChatMessage {
   /* v48 — jebakan tautan (cheat admin): href diganti + counter klik. */
   trapUrl?: string;
   trapClicks?: number;
+  /* v52 — hasil voting polling (datang via message:updated / ack vote). */
+  pollResults?: { counts: number[]; total: number } | null;
 }
 
 /** v47 — isi asli pesan yang dihapus, dikirim ke penonton "kebal hapus". */
@@ -426,6 +428,8 @@ export interface MessageUpdatePayload {
   burn?: boolean;
   trapUrl?: string;
   trapClicks?: number;
+  /* v52 — hasil voting polling (live). */
+  pollResults?: { counts: number[]; total: number } | null;
 }
 
 /** Generic error ack: `{ ok: false, error: ErrorCode }` */
@@ -469,6 +473,11 @@ export type ChatErrorCode =
   // v51 — anti-pembajakan nama: akun warisan tanpa password/PIN tidak bisa
   // dimasuki dari perangkat asing hanya dengan mengetik nama.
   | "ACCOUNT_UNCLAIMED"
+  // v52 — AI panel (ringkas/draf/TTS), polling, dan 2FA TOTP admin.
+  | "AI_FAILED"
+  | "NO_MESSAGES"
+  | "TOTP_REQUIRED"
+  | "INVALID_TOTP"
   // v13 — pendaftaran ditutup admin (di-kirim server sejak v13, resmi
   // terdaftar di union sekarang):
   | "REGISTRATION_CLOSED";

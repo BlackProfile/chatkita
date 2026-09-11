@@ -32,6 +32,7 @@ import {
   MoreVertical,
   Moon,
   Music,
+  MapPin,
   Paperclip,
   PencilLine,
   Pin,
@@ -43,9 +44,11 @@ import {
   ShieldAlert,
   ShieldCheck,
   Smile,
+  Sparkles,
   Star,
   Sun,
   Type,
+  UserRound,
   Users,
   Wrench,
   X,
@@ -124,6 +127,9 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -195,8 +201,13 @@ import {
   saveFontScale,
   uploadMedia,
   videoPosterBlob,
+  contactDataOf,
+  gameDataOf,
+  locationDataOf,
+  pollDataOf,
   type FontScale,
 } from "@/lib/chat-utils";
+import { QRCodeSVG } from "qrcode.react";
 import { cn } from "@/lib/utils";
 
 type FilterTab = "all" | "unread" | "online" | "archive";
@@ -292,6 +303,9 @@ export function AdminPanel() {
   const [renameBusy, setRenameBusy] = useState(false);
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
+  /* v52 — 2FA TOTP: form login minta kode 6 digit saat server menuntut. */
+  const [totpRequired, setTotpRequired] = useState(false);
+  const [totpCode, setTotpCode] = useState("");
   // v24 — autologin: password benar (via admin:peek) → titik input jadi hijau
   // → jeda singkat "menyinkronkan database" → masuk otomatis tanpa tombol.
   const [pwCorrect, setPwCorrect] = useState(false);
@@ -912,6 +926,8 @@ export function AdminPanel() {
                   createdAt: u.createdAt ?? m.createdAt,
                   /* v40 — pesan pending disetujui → hilangkan badge antrean. */
                   pending: u.pending ?? m.pending,
+                  /* v52 — hasil voting polling live. */
+                  pollResults: u.pollResults !== undefined ? u.pollResults : m.pollResults,
                 }
               : m
           ),
@@ -1067,10 +1083,14 @@ export function AdminPanel() {
     const socket = socketRef.current;
     const trimmed = password.trim();
     if (!socket || !connected || !trimmed) return;
+    if (totpRequired && totpCode.trim().length !== 6) {
+      setAuthError("Masukkan kode 6 digit dari aplikasi authenticator.");
+      return;
+    }
     setAuthError(null);
     socket.emit(
       "admin:auth",
-      { password: trimmed },
+      { password: trimmed, totp: totpCode.trim() || undefined },
       (res: AckOf<AdminAuthAck>) => {
         if (res.ok) {
           passwordRef.current = trimmed;
@@ -1082,10 +1102,16 @@ export function AdminPanel() {
           setAuthError(
             res.error === "UNAUTHORIZED"
               ? "Password salah."
-              : res.error === "RATE_LIMITED"
-                ? "Terlalu banyak percobaan — tunggu 1 menit."
-                : "Terjadi kesalahan, coba lagi."
+              : res.error === "TOTP_REQUIRED"
+                ? "2FA aktif — masukkan kode autentikator."
+                : res.error === "INVALID_TOTP"
+                  ? "Kode 2FA salah / kedaluwarsa — coba lagi."
+                  : res.error === "RATE_LIMITED"
+                    ? "Terlalu banyak percobaan — tunggu 1 menit."
+                    : "Terjadi kesalahan, coba lagi."
           );
+          if (res.error === "TOTP_REQUIRED") setTotpRequired(true);
+          if (res.error === "INVALID_TOTP") setTotpCode("");
         }
       }
     );
@@ -1360,6 +1386,252 @@ export function AdminPanel() {
   const handleReact = (msg: ChatMessage, emoji: string) => {
     socketRef.current?.emit("message:react", { messageId: msg.id, emoji });
   };
+
+  /* ---------------------------------------------------------------- */
+  /* v52 — AI (ringkas/draf/suara), POLL, GAME, LOKASI/KONTAK, 2FA     */
+  /* ---------------------------------------------------------------- */
+
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiSummaryOpen, setAiSummaryOpen] = useState(false);
+  const [aiSummaryText, setAiSummaryText] = useState("");
+  const [pollOpen, setPollOpen] = useState(false);
+  const [pollQuestion, setPollQuestion] = useState("");
+  const [pollOptions, setPollOptions] = useState<string[]>(["", ""]);
+  const [contactOpen, setContactOpen] = useState(false);
+  const [contactName, setContactName] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
+  const [contactNote, setContactNote] = useState("");
+  const [myPollVotes, setMyPollVotes] = useState<Record<number, number>>({});
+  /* 2FA TOTP dialog */
+  const [totpOpen, setTotpOpen] = useState(false);
+  const [totpSetupSecret, setTotpSetupSecret] = useState("");
+  const [totpSetupUri, setTotpSetupUri] = useState("");
+  const [totpBusy, setTotpBusy] = useState(false);
+
+  const convIdForAi = () => activeIdRef.current ?? "";
+
+  /** ✨ Ringkas percakapan aktif dengan AI. */
+  const handleAiSummary = () => {
+    const socket = socketRef.current;
+    const cid = convIdForAi();
+    if (!socket || !cid || aiBusy) return;
+    setAiBusy(true);
+    socket.emit(
+      "admin:ai_summary",
+      { conversationId: cid },
+      (res: AckOf<{ ok: true; summary: string }>) => {
+        setAiBusy(false);
+        if (res.ok) {
+          setAiSummaryText(res.summary);
+          setAiSummaryOpen(true);
+        } else if (res.error === "NO_MESSAGES") {
+          toast.error("Belum ada pesan untuk diringkas.");
+        } else {
+          toast.error("AI gagal merangkum — coba lagi.");
+        }
+      }
+    );
+  };
+
+  /** ✨ Susun draf balasan AI → isi composer (admin review & kirim manual). */
+  const handleAiDraft = () => {
+    const socket = socketRef.current;
+    const cid = convIdForAi();
+    if (!socket || !cid || aiBusy) return;
+    setAiBusy(true);
+    socket.emit(
+      "admin:ai_draft",
+      { conversationId: cid },
+      (res: AckOf<{ ok: true; draft: string }>) => {
+        setAiBusy(false);
+        if (res.ok) {
+          setInput(res.draft);
+          toast.success("Draf AI siap — periksa, sunting bila perlu, lalu kirim.");
+        } else if (res.error === "NO_MESSAGES") {
+          toast.error("Belum ada konteks percakapan.");
+        } else {
+          toast.error("AI gagal menyusun draf — coba lagi.");
+        }
+      }
+    );
+  };
+
+  /** 🔊 Ubah teks composer menjadi pesan suara AI (TTS) dan kirim. */
+  const handleTtsSend = () => {
+    const socket = socketRef.current;
+    const cid = convIdForAi();
+    const text = input.trim();
+    if (!socket || !cid || aiBusy || !text) return;
+    if (text.length > 1000) {
+      toast.error("Teks suara maksimal 1000 karakter.");
+      return;
+    }
+    setAiBusy(true);
+    socket.emit(
+      "admin:tts_send",
+      { conversationId: cid, text },
+      (res: AckOf<{ ok: true; message: ChatMessage }>) => {
+        setAiBusy(false);
+        if (res.ok) {
+          setInput("");
+          toast.success("Pesan suara AI terkirim 🔊");
+        } else {
+          toast.error("TTS gagal — coba lagi.");
+        }
+      }
+    );
+  };
+
+  /** 📊 Buat polling/kuis (2–6 opsi). */
+  const handlePollCreate = () => {
+    const socket = socketRef.current;
+    const cid = convIdForAi();
+    if (!socket || !cid) return;
+    const question = pollQuestion.trim();
+    const options = pollOptions.map((o) => o.trim()).filter(Boolean);
+    if (!question || options.length < 2) {
+      toast.error("Isi pertanyaan & minimal 2 opsi.");
+      return;
+    }
+    socket.emit(
+      "poll:create",
+      { conversationId: cid, question, options },
+      (res: AckOf<{ ok: true; message: ChatMessage }>) => {
+        if (res.ok) {
+          setPollOpen(false);
+          setPollQuestion("");
+          setPollOptions(["", ""]);
+          toast.success("Polling terkirim 📊");
+        } else {
+          toast.error("Polling gagal dibuat.");
+        }
+      }
+    );
+  };
+
+  const handlePollVote = (messageId: number, optionIndex: number) => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    socket.emit(
+      "poll:vote",
+      { messageId, optionIndex },
+      (res: AckOf<{ ok: true; pollResults: { counts: number[]; total: number } }>) => {
+        if (res.ok) setMyPollVotes((prev) => ({ ...prev, [messageId]: optionIndex }));
+      }
+    );
+  };
+
+  const handlePlayGame = (game: "dice" | "coin" | "rps", pick?: string) => {
+    const socket = socketRef.current;
+    const cid = convIdForAi();
+    if (!socket || !cid) return;
+    socket.emit("game:play", { conversationId: cid, game, pick });
+  };
+
+  const handleSendLocation = () => {
+    const socket = socketRef.current;
+    const cid = convIdForAi();
+    if (!socket || !cid) return;
+    if (!("geolocation" in navigator)) {
+      toast.error("Perangkat ini tidak mendukung GPS.");
+      return;
+    }
+    toast.info("Mencari lokasi…");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        socket.emit("rich:send", {
+          conversationId: cid,
+          kind: "location",
+          data: { lat: pos.coords.latitude, lng: pos.coords.longitude, label: "Lokasi saya" },
+        });
+        toast.success("Lokasi terkirim.");
+      },
+      () => toast.error("Izin lokasi ditolak / tidak tersedia."),
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 60_000 }
+    );
+  };
+
+  const handleSendContact = () => {
+    const socket = socketRef.current;
+    const cid = convIdForAi();
+    const name = contactName.trim();
+    const phone = contactPhone.trim();
+    if (!socket || !cid) return;
+    if (!name || !/^[+0-9][0-9\s()\-]{2,24}$/.test(phone)) {
+      toast.error("Nama wajib diisi & nomor telepon tidak valid.");
+      return;
+    }
+    socket.emit(
+      "rich:send",
+      { conversationId: cid, kind: "contact", data: { name, phone, note: contactNote.trim().slice(0, 120) } },
+      () => {
+        setContactOpen(false);
+        setContactName("");
+        setContactPhone("");
+        setContactNote("");
+        toast.success("Kontak terkirim.");
+      }
+    );
+  };
+
+  /* 2FA TOTP: setup (QR) → aktif → nonaktif. */
+  const handleTotpSetup = () => {
+    const socket = socketRef.current;
+    if (!socket || totpBusy) return;
+    setTotpBusy(true);
+    socket.emit(
+      "admin:totp_setup",
+      {},
+      (res: AckOf<{ ok: true; secret: string; uri: string }>) => {
+        setTotpBusy(false);
+        if (res.ok) {
+          setTotpSetupSecret(res.secret);
+          setTotpSetupUri(res.uri);
+        } else if (res.error === "ALREADY_SET") {
+          toast.error("2FA sudah aktif — nonaktifkan dulu bila ingin ganti.");
+        } else {
+          toast.error("Gagal menyiapkan 2FA.");
+        }
+      }
+    );
+  };
+
+  const handleTotpEnable = () => {
+    const socket = socketRef.current;
+    if (!socket || totpBusy) return;
+    setTotpBusy(true);
+    socket.emit("admin:totp_enable", { code: totpCode.trim() }, (res: AckOf<{ ok: true }>) => {
+      setTotpBusy(false);
+      if (res.ok) {
+        setTotpSetupSecret("");
+        setTotpSetupUri("");
+        setTotpCode("");
+        toast.success("2FA TOTP AKTIF — login berikutnya minta kode autentikator 🔐");
+      } else if (res.error === "INVALID_TOTP") {
+        toast.error("Kode salah — coba lagi.");
+      } else {
+        toast.error("Gagal mengaktifkan 2FA.");
+      }
+    });
+  };
+
+  const handleTotpDisable = () => {
+    const socket = socketRef.current;
+    if (!socket || totpBusy) return;
+    setTotpBusy(true);
+    socket.emit("admin:totp_disable", { code: totpCode.trim() }, (res: AckOf<{ ok: true }>) => {
+      setTotpBusy(false);
+      if (res.ok) {
+        setTotpCode("");
+        toast.success("2FA TOTP dinonaktifkan.");
+      } else if (res.error === "INVALID_TOTP") {
+        toast.error("Kode salah — coba lagi.");
+      } else {
+        toast.error("2FA memang tidak aktif.");
+      }
+    });
+  };
+
 
   const handleEditStart = (msg: ChatMessage) => {
     setReplyTo(null);
@@ -1940,6 +2212,24 @@ export function AdminPanel() {
                   }}
                 />
               </div>
+              {/* v52 — field kode 2FA muncul hanya saat server menuntutnya. */}
+              {totpRequired ? (
+                <div className="space-y-2">
+                  <Label htmlFor="admin-totp">Kode autentikator (2FA)</Label>
+                  <Input
+                    id="admin-totp"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={totpCode}
+                    placeholder="123456"
+                    className="h-12 rounded-xl tracking-[0.3em] tabular-nums"
+                    onChange={(e) => {
+                      setTotpCode(e.target.value.replace(/\D/g, ""));
+                      setAuthError(null);
+                    }}
+                  />
+                </div>
+              ) : null}
               {authError ? <p className="text-sm text-destructive">{authError}</p> : null}
               {/* v24 — tanpa tombol Masuk: password benar → hijau → jeda
                   sinkronisasi database → autologin. Enter tetap berfungsi. */}
@@ -2149,6 +2439,14 @@ export function AdminPanel() {
                       <DropdownMenuItem onClick={() => openDashboard("sistem")}>
                         <ShieldCheck className="mr-2 size-4" aria-hidden="true" />
                         Info aplikasi
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={() => {
+                          setTotpCode("");
+                          setTotpOpen(true);
+                        }}
+                      >
+                        🔐 Keamanan 2FA (TOTP)
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem onClick={downloadBackup}>
@@ -2777,6 +3075,22 @@ export function AdminPanel() {
                                   })
                               : undefined
                           }
+                          /* v52 — polling, mini-game, lokasi & kontak. */
+                          pollData={m.type === "poll" && !m.deletedAt ? pollDataOf(m.content) : null}
+                          pollResults={m.pollResults ?? null}
+                          myPollChoice={myPollVotes[m.id] ?? null}
+                          onPollVote={
+                            m.type === "poll" && !m.deletedAt
+                              ? (idx) => handlePollVote(m.id, idx)
+                              : undefined
+                          }
+                          gameData={m.type === "game" && !m.deletedAt ? gameDataOf(m.content) : null}
+                          locationData={
+                            m.type === "location" && !m.deletedAt ? locationDataOf(m.content) : null
+                          }
+                          contactData={
+                            m.type === "contact" && !m.deletedAt ? contactDataOf(m.content) : null
+                          }
                           />
                           {/* v40 — strip aksi moderasi utk pesan yang menunggu persetujuan. */}
                           {m.pending && !m.deletedAt ? (
@@ -3118,6 +3432,67 @@ export function AdminPanel() {
                               <Paperclip className="mr-2 size-4" aria-hidden="true" />
                               File
                             </DropdownMenuItem>
+                            {/* v52 — AI: ringkas/draf/TTS + polling + game + lokasi/kontak. */}
+                            <DropdownMenuSub>
+                              <DropdownMenuSubTrigger disabled={!connected || aiBusy}>
+                                <Sparkles className="mr-2 size-4" aria-hidden="true" />
+                                AI asisten
+                              </DropdownMenuSubTrigger>
+                              <DropdownMenuSubContent>
+                                <DropdownMenuItem onClick={handleAiSummary}>
+                                  📝 Ringkas percakapan
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={handleAiDraft}>
+                                  ✨ Draf balasan AI
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onClick={handleTtsSend}
+                                  disabled={!input.trim()}
+                                >
+                                  🔊 Kirim teks sebagai suara
+                                </DropdownMenuItem>
+                              </DropdownMenuSubContent>
+                            </DropdownMenuSub>
+                            <DropdownMenuItem
+                              disabled={!connected}
+                              onClick={() => setPollOpen(true)}
+                            >
+                              📊 Buat polling / kuis
+                            </DropdownMenuItem>
+                            <DropdownMenuSub>
+                              <DropdownMenuSubTrigger disabled={!connected}>
+                                <span className="mr-2">🎮</span>
+                                Main game
+                              </DropdownMenuSubTrigger>
+                              <DropdownMenuSubContent>
+                                <DropdownMenuItem onClick={() => handlePlayGame("dice")}>
+                                  🎲 Lempar dadu
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => handlePlayGame("coin")}>
+                                  🪙 Lempar koin
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => handlePlayGame("rps", "batu")}>
+                                  ✊ Batu
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => handlePlayGame("rps", "gunting")}>
+                                  ✌️ Gunting
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => handlePlayGame("rps", "kertas")}>
+                                  🖐 Kertas
+                                </DropdownMenuItem>
+                              </DropdownMenuSubContent>
+                            </DropdownMenuSub>
+                            <DropdownMenuItem disabled={!connected} onClick={handleSendLocation}>
+                              <MapPin className="mr-2 size-4" aria-hidden="true" />
+                              Kirim lokasi
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled={!connected}
+                              onClick={() => setContactOpen(true)}
+                            >
+                              <UserRound className="mr-2 size-4" aria-hidden="true" />
+                              Kirim kontak
+                            </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               disabled={!connected || !!editing}
@@ -3255,6 +3630,246 @@ export function AdminPanel() {
       ) : null}
 
       {/* Viewer media full-screen (foto/video/audio/PDF/dokumen) */}
+      {/* ── v52 — dialog AI ringkasan ── */}
+      <Dialog open={aiSummaryOpen} onOpenChange={setAiSummaryOpen}>
+        <DialogContent className="rounded-2xl">
+          <DialogHeader>
+            <DialogTitle>📝 Ringkasan percakapan (AI)</DialogTitle>
+            <DialogDescription>
+              Ringkasan otomatis dari pesan terakhir percakapan ini.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="chat-scroll max-h-[50vh] overflow-y-auto">
+            {aiBusy ? (
+              <p className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                AI sedang membaca percakapan…
+              </p>
+            ) : (
+              <p className="whitespace-pre-wrap text-sm leading-relaxed">{aiSummaryText}</p>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── v52 — dialog buat polling ── */}
+      <Dialog open={pollOpen} onOpenChange={setPollOpen}>
+        <DialogContent className="rounded-2xl">
+          <DialogHeader>
+            <DialogTitle>📊 Buat polling / kuis</DialogTitle>
+            <DialogDescription>
+              Pelanggan mengetuk salah satu opsi; hasil (persentase) terlihat live di kedua sisi.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="poll-q">Pertanyaan</Label>
+              <Input
+                id="poll-q"
+                value={pollQuestion}
+                maxLength={200}
+                placeholder="cth. Produk mana yang paling diminati?"
+                onChange={(e) => setPollQuestion(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Opsi (2–6)</Label>
+              {pollOptions.map((opt, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <span className="w-5 text-center text-xs font-semibold text-muted-foreground">
+                    {i + 1}.
+                  </span>
+                  <Input
+                    value={opt}
+                    maxLength={60}
+                    placeholder={`Opsi ${i + 1}`}
+                    aria-label={`Opsi ${i + 1}`}
+                    onChange={(e) =>
+                      setPollOptions((prev) =>
+                        prev.map((v, j) => (j === i ? e.target.value : v))
+                      )
+                    }
+                  />
+                  {pollOptions.length > 2 ? (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-9 shrink-0 text-muted-foreground"
+                      aria-label={`Hapus opsi ${i + 1}`}
+                      onClick={() =>
+                        setPollOptions((prev) => prev.filter((_, j) => j !== i))
+                      }
+                    >
+                      <X className="size-4" aria-hidden="true" />
+                    </Button>
+                  ) : null}
+                </div>
+              ))}
+              {pollOptions.length < 6 ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 rounded-lg text-xs"
+                  onClick={() => setPollOptions((prev) => [...prev, ""])}
+                >
+                  + Tambah opsi
+                </Button>
+              ) : null}
+            </div>
+            <Button
+              className="h-10 w-full rounded-lg bg-emerald-600 text-sm font-semibold text-white hover:bg-emerald-600/90"
+              disabled={aiBusy}
+              onClick={handlePollCreate}
+            >
+              Kirim polling
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── v52 — dialog kirim kontak ── */}
+      <Dialog open={contactOpen} onOpenChange={setContactOpen}>
+        <DialogContent className="rounded-2xl">
+          <DialogHeader>
+            <DialogTitle>Kirim kontak</DialogTitle>
+            <DialogDescription>
+              Nama &amp; nomor akan tampil sebagai kartu kontak di chat.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="admin-contact-name">Nama</Label>
+              <Input
+                id="admin-contact-name"
+                value={contactName}
+                maxLength={60}
+                placeholder="cth. Kurir Gudang"
+                onChange={(e) => setContactName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="admin-contact-phone">Nomor telepon</Label>
+              <Input
+                id="admin-contact-phone"
+                value={contactPhone}
+                maxLength={25}
+                inputMode="tel"
+                placeholder="cth. +62 812-3456-7890"
+                onChange={(e) => setContactPhone(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="admin-contact-note">Catatan (opsional)</Label>
+              <Input
+                id="admin-contact-note"
+                value={contactNote}
+                maxLength={120}
+                placeholder="cth. Hubungi jam kerja"
+                onChange={(e) => setContactNote(e.target.value)}
+              />
+            </div>
+            <Button
+              className="h-10 w-full rounded-lg bg-emerald-600 text-sm font-semibold text-white hover:bg-emerald-600/90"
+              onClick={handleSendContact}
+            >
+              Kirim kontak
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── v52 — dialog Keamanan 2FA (TOTP) ── */}
+      <Dialog open={totpOpen} onOpenChange={setTotpOpen}>
+        <DialogContent className="rounded-2xl">
+          <DialogHeader>
+            <DialogTitle>🔐 Keamanan 2FA (TOTP)</DialogTitle>
+            <DialogDescription>
+              Aktifkan verifikasi dua langkah: selain password, login panel wajib
+              memasukkan kode 6 digit dari aplikasi authenticator (Google
+              Authenticator, Authy, dll).
+            </DialogDescription>
+          </DialogHeader>
+          {totpSetupSecret ? (
+            <div className="space-y-3">
+              <div className="flex flex-col items-center gap-2">
+                <QRCodeSVG value={totpSetupUri} size={160} level="M" />
+                <p className="break-all rounded-lg bg-muted/70 px-2.5 py-1.5 text-center font-mono text-xs">
+                  {totpSetupSecret}
+                </p>
+                <p className="text-center text-xs text-muted-foreground">
+                  Pindai QR (atau salin kode di atas) di aplikasi authenticator,
+                  lalu masukkan kode 6 digit yang muncul.
+                </p>
+              </div>
+              <Input
+                inputMode="numeric"
+                maxLength={6}
+                value={totpCode}
+                placeholder="Kode 6 digit"
+                aria-label="Kode konfirmasi 2FA"
+                className="h-11 rounded-xl text-center tracking-[0.3em] tabular-nums"
+                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ""))}
+              />
+              <Button
+                className="h-10 w-full rounded-lg bg-emerald-600 text-sm font-semibold text-white hover:bg-emerald-600/90"
+                disabled={totpBusy || totpCode.length !== 6}
+                onClick={handleTotpEnable}
+              >
+                {totpBusy ? (
+                  <>
+                    <Loader2 className="mr-1 size-4 animate-spin" aria-hidden="true" />
+                    Memeriksa…
+                  </>
+                ) : (
+                  "Aktifkan 2FA"
+                )}
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground">
+                2FA saat ini: <strong>belum aktif / status tidak diketahui</strong>.
+                Untuk mulai, buat secret baru lalu pindai QR-nya.
+              </p>
+              <Button
+                variant="outline"
+                className="h-10 w-full rounded-lg text-sm font-semibold"
+                disabled={totpBusy}
+                onClick={handleTotpSetup}
+              >
+                <QrCode className="mr-1.5 size-4" aria-hidden="true" />
+                Buat / perbarui secret 2FA
+              </Button>
+              <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3">
+                <p className="text-xs font-medium text-amber-900 dark:text-amber-200">
+                  Sudah aktif dan ingin menonaktifkan? Masukkan kode 6 digit
+                  saat ini di bawah, lalu tekan Nonaktifkan.
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <Input
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={totpCode}
+                    placeholder="123456"
+                    aria-label="Kode nonaktifkan 2FA"
+                    className="h-10 rounded-lg text-center tracking-[0.3em] tabular-nums"
+                    onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ""))}
+                  />
+                  <Button
+                    variant="outline"
+                    className="h-10 shrink-0 rounded-lg text-sm font-semibold"
+                    disabled={totpBusy || totpCode.length !== 6}
+                    onClick={handleTotpDisable}
+                  >
+                    Nonaktifkan
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
       <MediaViewer state={viewer} onClose={() => setViewer(null)} />
 
       {/* v34 — popup pratinjau/pemutar tautan in-app (YouTube/TikTok embed) */}
