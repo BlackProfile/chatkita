@@ -408,11 +408,11 @@ chk_grep "Widget embed route"                 "src/app/api/embed.js/route.ts" "c
 chk_grep "Mode embed Messenger"               "src/components/chat/Messenger.tsx" "isEmbed"
 
 # ── v49 (Task 65) — popup ukuran normal seragam ──
-chk_grep "Tinggi popup tetap (dialog base)"   "src/components/ui/dialog.tsx" "h-\[min(85dvh,640px)\]"
-chk_grep "Lebar popup tetap (dialog base)"    "src/components/ui/dialog.tsx" "sm:w-\[640px\]"
-chk_grep "Scroll dalam popup (dialog base)"   "src/components/ui/dialog.tsx" "overflow-y-auto"
-chk_grep "Tinggi popup tetap (alert base)"    "src/components/ui/alert-dialog.tsx" "h-\[min(85dvh,640px)\]"
-chk_grep "Lebar popup tetap (alert base)"     "src/components/ui/alert-dialog.tsx" "sm:w-\[640px\]"
+chk_grep "Panel kanan desktop (dialog base)" "src/components/ui/dialog.tsx" "inset-y-0 right-0"
+chk_grep "Lebar panel (dialog base)"    "src/components/ui/dialog.tsx" "sm:w-\[640px\]"
+chk_grep "Scroll dalam panel (dialog base)"   "src/components/ui/dialog.tsx" "overflow-y-auto"
+chk_grep "Sheet bawah menempel (alert base)" "src/components/ui/alert-dialog.tsx" "inset-x-0 bottom-0"
+chk_grep "Lebar sheet (alert base)"     "src/components/ui/alert-dialog.tsx" "sm:w-\[640px\]"
 chk_file  "Skrip sweep popup v49"             ".zscripts/t65-sweep-popup.ts"
 
 # ── v50 (Task 66) — ganti nama tampilan Admin ──
@@ -450,6 +450,20 @@ chk_grep "Admin: dialog album"                "src/components/chat/AdminPanel.ts
 chk_grep "Admin: emit type sticker"           "src/components/chat/AdminPanel.tsx" "| \"sticker\""
 chk_grep "CameraCapture diekspor (shared)"    "src/components/chat/Messenger.tsx" "export function CameraCapture"
 
+# ── v54 (Task 70) — popup jadi halaman/panel (tanpa popup melayang) ──
+chk_grep "Overlay transparan (dialog)"        "src/components/ui/dialog.tsx" "bg-transparent"
+chk_grep "Panel kanan (posisi dialog base)"   "src/components/ui/dialog.tsx" "inset-y-0 right-0"
+chk_grep "Slide masuk panel (dialog)"         "src/components/ui/dialog.tsx" "slide-in-from-right"
+chk_grep "Slide keluar panel (dialog)"        "src/components/ui/dialog.tsx" "slide-out-to-right"
+chk_grep "Sudut panel kiri (dialog)"          "src/components/ui/dialog.tsx" "sm:rounded-l-2xl"
+chk_grep "Overlay transparan (alert)"         "src/components/ui/alert-dialog.tsx" "bg-transparent"
+chk_grep "Sheet bawah (posisi alert base)"    "src/components/ui/alert-dialog.tsx" "inset-x-0 bottom-0"
+chk_grep "Slide masuk sheet (alert)"          "src/components/ui/alert-dialog.tsx" "slide-in-from-bottom"
+chk_grep "Slide keluar sheet (alert)"         "src/components/ui/alert-dialog.tsx" "slide-out-to-bottom"
+chk_grep "Safe-area sheet bawah (alert)"      "src/components/ui/alert-dialog.tsx" "safe-area-inset-bottom"
+chk_grep "Penanda panel v54 (dialog)"         "src/components/ui/dialog.tsx" "v54 (Task 70)"
+chk_grep "Penanda panel v54 (alert)"          "src/components/ui/alert-dialog.tsx" "v54 (Task 70)"
+chk_file  "Skrip sweep panel v54"             ".zscripts/t70-sweep-panel.ts"
 echo ""
 echo "== Versi server terdaftar =="
 grep -m1 "SERVICE_VERSION = " mini-services/chat-service/index.ts || echo "  ❌ SERVICE_VERSION tidak ditemukan"

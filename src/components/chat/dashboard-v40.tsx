@@ -117,7 +117,7 @@ function LeaderboardDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="rounded-2xl">
+      <DialogContent className="">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Trophy className="size-4 text-amber-500" aria-hidden="true" />
@@ -220,7 +220,7 @@ function CompareDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="rounded-2xl">
+      <DialogContent className="">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Scale className="size-4 text-violet-600" aria-hidden="true" />

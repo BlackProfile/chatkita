@@ -320,7 +320,7 @@ export function UserInsightDialog({
         if (!o) onClose();
       }}
     >
-      <DialogContent className="rounded-2xl">
+      <DialogContent className="">
         {target ? <InsightBody key={target.id} target={target} socket={socket} /> : null}
       </DialogContent>
     </Dialog>

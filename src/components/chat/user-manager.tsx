@@ -204,7 +204,7 @@ export function UserManager({
       open={open}
       onOpenChange={onOpenChange}
     >
-      <DialogContent className="rounded-2xl">
+      <DialogContent className="">
         {detailId === null ? (
           <>
             <DialogHeader>

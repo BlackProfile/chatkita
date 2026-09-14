@@ -1414,3 +1414,26 @@ Work Log:
 Stage Summary:
 - v53 = chat user dan admin kini SETARA penuh: admin mendapat Stiker & GIF, Kamera, Sensitif, Album, antrian multi-file, paste/drop file; user mendapat Buat polling; AI asisten tetap admin-only (perkakas pemilik).
 - Integritas: verify 368/368, lint 0/0; commit + tag rescue-v53 (anti-rollback).
+
+---
+Task ID: 70
+Agent: Z.ai Code (main)
+Task: v54 — semua popup jadi halaman/panel (tanpa popup melayang) + pemulihan repo ke v53
+
+Work Log:
+- Deteksi anomali: worktree lokal ternyata v50 (commit 628ef32) padahal remote punya rescue-v51/v52/v53 — lingkungan sempat ter-reset; diff lokal-vs-remote v50 hanya chat.db/dev.pid (runtime).
+- Pemulihan: stop chat-service (iron rule) → buang modifikasi runtime → `git reset --hard origin/main` (f18a237, v53) → verify 368/368 → spawn chat-service v53 + restart Next dev (:3000 & :81 = 200). Fitur v51/v52/v53 kembali utuh.
+- Inventaris popup: 36 `<DialogContent>` (15 file chat + command.tsx tak terpakai) + 4 `<AlertDialogContent>`; semua memakai posisi terpusat warisan v49.
+- Satu pintu: `ui/dialog.tsx` — overlay `bg-black/50`→`bg-transparent`; content `top/left-50%+translate+h-min(85dvh,640px)` → `inset-y-0 right-0 w-full sm:w-[640px] border-l shadow-2xl sm:rounded-l-2xl` + animasi slide kanan; `ui/alert-dialog.tsx` — sheet bawah `inset-x-0 bottom-0 max-h-[85dvh] rounded-t-2xl` + safe-area + slide bawah (desktop: tengah 640px, bottom-6, sm:border). Marker komentar "v54 (Task 70)" di kedua file.
+- Sweep `.zscripts/t70-sweep-panel.ts`: hapus `rounded-2xl` dari 36 tag Dialog/AlertDialogContent di 12 file; kasus khusus dialog wajib-password Messenger: lepas `max-w-[calc(100vw-2rem)] sm:max-w-sm` (ikut panel standar).
+- Bump v54: pkill chat-service → SERVICE_VERSION 'v54' → spawn (banner v54 :3003; insiden port dipakai proses --hot lama diselesaikan pkill -9); instrumentation `rescue-v54` + penanda void 0 (Task 70).
+- verify-integrity.sh: 2 cek lama "Tinggi popup tetap" diganti cek panel (inset-y-0 right-0 / inset-x-0 bottom-0), 3 label popup→panel/sheet, segmen v54 +13 cek disisipkan SEBELUM blok hasil; chmod 644. FEATURES.md segmen v54; chmod 644.
+- Lint 0/0. verify **381/381 — 0 gagal**.
+- E2E gateway :81 (agent-browser t70a admin desktop 1440×900 via login password+TOTP dari secret DB; t70u user mobile 390×844 UjiV49/uji49): panel kanan terukur persis (rename Admin, Media, konfirmasi reset: x=800, w=640, h=900; overlay rgba(0,0,0,0)); mobile panel media & link-viewer = halaman penuh (0,0,390,844); AlertDialog "Batalkan pesan terjadwal?" = sheet bawah (mobile w=390 bottomGap=0; desktop x=400 w=640 bottomGap=24, tinggi alami 178–221); alur jadwal→batal→konfirmasi lulus dua arah, pesan uji dibersihkan; konfirmasi reset DIBATALKAN (tidak ada reset); konsol & page errors 0 di dua sesi; 6 screenshot /tmp/t70-*.png.
+- Catatan dev.log: warning ⚠ Edge-Runtime instrumentation.ts = warisan lama (benign, ada sejak v49-v53), bukan error baru.
+
+Stage Summary:
+- SEMUA popup kini panel: desktop = panel kanan setinggi layar (dialog) / panel bawah (konfirmasi); mobile = halaman penuh / sheet bawah; overlay gelap dihapus — layar tidak lagi digelapkan.
+- Satu perubahan komponen dasar mengubah ~40 popup sekaligus; konten & perilaku (klik luar, Escape, X) dipertahankan.
+- Repo dipulihkan ke lini v53 sebelum mengerjakan v54 (v51/v52/v53 kembali lengkap).
+- Artefak: .zscripts/t70-sweep-panel.ts, segmen v54 di FEATURES.md/verify-integrity.sh (381 cek), screenshot /tmp/t70-*.png.

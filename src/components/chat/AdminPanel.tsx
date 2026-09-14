@@ -3955,7 +3955,7 @@ export function AdminPanel() {
       {/* QR / share dialog (v5) */}
       {qrOpen ? (
         <Dialog open onOpenChange={setQrOpen}>
-          <DialogContent className="rounded-2xl">
+          <DialogContent className="">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <QrCode className="size-4 text-emerald-600" aria-hidden="true" />
@@ -3995,7 +3995,7 @@ export function AdminPanel() {
       {/* Viewer media full-screen (foto/video/audio/PDF/dokumen) */}
       {/* ── v53 — dialog album lampiran (paritas dengan sisi user) ── */}
       <Dialog open={albumOpen} onOpenChange={setAlbumOpen}>
-        <DialogContent className="rounded-2xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle>Album lampiran</DialogTitle>
             <DialogDescription>
@@ -4030,7 +4030,7 @@ export function AdminPanel() {
 
       {/* ── v52 — dialog AI ringkasan ── */}
       <Dialog open={aiSummaryOpen} onOpenChange={setAiSummaryOpen}>
-        <DialogContent className="rounded-2xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle>📝 Ringkasan percakapan (AI)</DialogTitle>
             <DialogDescription>
@@ -4052,7 +4052,7 @@ export function AdminPanel() {
 
       {/* ── v52 — dialog buat polling ── */}
       <Dialog open={pollOpen} onOpenChange={setPollOpen}>
-        <DialogContent className="rounded-2xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle>📊 Buat polling / kuis</DialogTitle>
             <DialogDescription>
@@ -4127,7 +4127,7 @@ export function AdminPanel() {
 
       {/* ── v52 — dialog kirim kontak ── */}
       <Dialog open={contactOpen} onOpenChange={setContactOpen}>
-        <DialogContent className="rounded-2xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle>Kirim kontak</DialogTitle>
             <DialogDescription>
@@ -4178,7 +4178,7 @@ export function AdminPanel() {
 
       {/* ── v52 — dialog Keamanan 2FA (TOTP) ── */}
       <Dialog open={totpOpen} onOpenChange={setTotpOpen}>
-        <DialogContent className="rounded-2xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle>🔐 Keamanan 2FA (TOTP)</DialogTitle>
             <DialogDescription>
@@ -4423,7 +4423,7 @@ export function AdminPanel() {
             }
           }}
         >
-          <DialogContent className="rounded-2xl">
+          <DialogContent className="">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <Lock className="size-4" aria-hidden="true" />
@@ -4472,7 +4472,7 @@ export function AdminPanel() {
       {/* v22+ — dialog kirim terjadwal (dibuka dari menu lampiran composer) */}
       {schedOpen ? (
         <Dialog open onOpenChange={handleSchedOpenChange}>
-          <DialogContent className="rounded-2xl">
+          <DialogContent className="">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <Clock className="size-4" aria-hidden="true" />
@@ -4515,7 +4515,7 @@ export function AdminPanel() {
       {/* v22 — dialog pesan berbintang (bintang milik admin di chat aktif) */}
       {starredOpen ? (
         <Dialog open onOpenChange={setStarredOpen}>
-          <DialogContent className="rounded-2xl">
+          <DialogContent className="">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <Star className="size-4 fill-amber-400 text-amber-400" aria-hidden="true" />
@@ -4575,7 +4575,7 @@ export function AdminPanel() {
             if (!open) resetForward();
           }}
         >
-          <DialogContent className="rounded-2xl">
+          <DialogContent className="">
             {forwardStep === "message" ? (
               <>
                 <DialogHeader>
@@ -4702,7 +4702,7 @@ export function AdminPanel() {
 
       {/* v50 — ganti nama tampilan akun Admin */}
       <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
-        <DialogContent className="rounded-2xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <PencilLine className="size-5 text-emerald-600" aria-hidden="true" />
@@ -4748,7 +4748,7 @@ export function AdminPanel() {
           if (!open) setCancelSchedId(null);
         }}
       >
-        <AlertDialogContent className="rounded-2xl">
+        <AlertDialogContent className="">
           <AlertDialogHeader>
             <AlertDialogTitle>Batalkan pesan terjadwal?</AlertDialogTitle>
             <AlertDialogDescription>

@@ -504,7 +504,7 @@ export function LinkPreviewCard({
       </div>
 
       <Dialog open={qrOpen} onOpenChange={setQrOpen}>
-        <DialogContent className="rounded-2xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle>QR code tautan</DialogTitle>
             <DialogDescription>

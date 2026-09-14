@@ -40,7 +40,7 @@ export function UserCheatDialog({
         if (!o) onClose();
       }}
     >
-      <DialogContent className="rounded-2xl">
+      <DialogContent className="">
         {target ? (
           <>
             <DialogHeader>

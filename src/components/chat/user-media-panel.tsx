@@ -156,7 +156,7 @@ export function UserMediaPanel({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex flex-col rounded-2xl">
+      <DialogContent className="flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <FolderOpen className="size-4 text-emerald-600" aria-hidden="true" />

@@ -368,7 +368,7 @@ function PinDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="rounded-2xl">
+      <DialogContent className="">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <ShieldCheck className="size-5 text-emerald-600" aria-hidden="true" />
@@ -487,7 +487,7 @@ function PasswordSetupDialog({
         onEscapeKeyDown={(e) => {
           if (!done) e.preventDefault();
         }}
-        className="max-w-[calc(100vw-2rem)] rounded-2xl sm:max-w-sm [&>button]:hidden"
+        className="[&>button]:hidden"
       >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -3526,7 +3526,7 @@ export function Messenger() {
 
       {/* v22+ — dialog kirim terjadwal (dibuka dari menu lampiran composer) */}
       <Dialog open={schedOpen} onOpenChange={setSchedOpen}>
-        <DialogContent className="rounded-2xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Clock className="size-4" aria-hidden="true" />
@@ -3576,7 +3576,7 @@ export function Messenger() {
           if (o) fetchStarred();
         }}
       >
-        <DialogContent className="rounded-2xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Star className="size-5 fill-amber-400 text-amber-400" aria-hidden="true" />
@@ -3717,7 +3717,7 @@ export function Messenger() {
 
       {/* v48 — dialog album lampiran */}
       <Dialog open={albumOpen} onOpenChange={setAlbumOpen}>
-        <DialogContent className="rounded-2xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle>Album lampiran</DialogTitle>
             <DialogDescription>
@@ -3741,7 +3741,7 @@ export function Messenger() {
 
       {/* v52 — dialog kirim kartu kontak */}
       <Dialog open={contactOpen} onOpenChange={setContactOpen}>
-        <DialogContent className="rounded-2xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle>Kirim kontak</DialogTitle>
             <DialogDescription>
@@ -3797,7 +3797,7 @@ export function Messenger() {
           if (!o) setForwardMsg(null);
         }}
       >
-        <DialogContent className="rounded-2xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle>Teruskan pesan</DialogTitle>
             <DialogDescription>Pilih percakapan tujuan.</DialogDescription>
@@ -3852,7 +3852,7 @@ export function Messenger() {
 
       {/* v53 — dialog buat polling (user) */}
       <Dialog open={pollOpen} onOpenChange={setPollOpen}>
-        <DialogContent className="rounded-2xl">
+        <DialogContent className="">
           <DialogHeader>
             <DialogTitle>📊 Buat polling / kuis</DialogTitle>
             <DialogDescription>
@@ -3996,7 +3996,7 @@ export function CameraCapture({
         if (!o) onClose();
       }}
     >
-      <DialogContent className="rounded-2xl">
+      <DialogContent className="">
         <DialogHeader>
           <DialogTitle>Kamera</DialogTitle>
           <DialogDescription>Ambil foto lalu kirim seperti foto biasa.</DialogDescription>

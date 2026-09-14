@@ -83,7 +83,7 @@ export function UserMediaDialog({
         if (!o) onClose();
       }}
     >
-      <DialogContent className="flex flex-col overflow-hidden rounded-2xl">
+      <DialogContent className="flex flex-col overflow-hidden">
         {target ? (
           <MediaBody
             key={target.id}

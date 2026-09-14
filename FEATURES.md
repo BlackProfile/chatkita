@@ -425,3 +425,25 @@
 - Tetap admin-only (by design): **AI asisten** (Ringkasan/Draf/TTS), karena merupakan perkakas operasional pemilik.
 
 **File kunci:** `mini-services/chat-service/index.ts` (poll:create), `src/components/chat/AdminPanel.tsx` (6 fitur paritas), `src/components/chat/Messenger.tsx` (poll user + `export function CameraCapture`).
+
+
+## v54 — Popup Jadi Halaman/Panel (Task 70)
+
+**Permintaan:** "buat yang popup sekarang jadikan halaman/panel, jangan popup lagi".
+
+Perubahan **satu pintu** pada komponen dasar — seluruh ~40 popup di aplikasi (user & admin) ikut berubah tanpa menyentuh tiap pemakaian:
+
+- **`DialogContent`** (`src/components/ui/dialog.tsx`) bukan lagi kotak melayang di tengah layar:
+  - **Desktop:** panel menempel kanan setinggi layar (`inset-y-0 right-0`), lebar 640px, sudut kiri membulat (`sm:rounded-l-2xl`), border kiri + `shadow-2xl`, animasi **slide dari/ke kanan** (`slide-in-from-right` / `slide-out-to-right`).
+  - **Mobile:** **halaman penuh** (`w-full`, 100vw×100dvh) — terasa pindah halaman, bukan popup.
+  - **Overlay gelap `bg-black/50` → `bg-transparent`**: layar belakang tidak lagi digelapkan; klik di luar panel tetap menutup (perilaku Radix dipertahankan).
+- **`AlertDialogContent`** (konfirmasi) bukan lagi popup tengah:
+  - **Mobile:** sheet menempel dasar layar (`inset-x-0 bottom-0`, sudut atas membulat, tinggi alami maks 85dvh, `safe-area-inset-bottom`).
+  - **Desktop:** panel bawah di tengah (lebar 640, melayang 24px dari dasar, slide dari/ke bawah).
+- **Sweep `rounded-2xl`** dari semua tag `<DialogContent>`/`<AlertDialogContent>` (12 file, ~36 tag) via `.zscripts/t70-sweep-panel.ts` — bentuk kini 100% dikendalikan komponen dasar; dialog wajib-password juga kehilangan ukuran kecil lama (`max-w-sm`) agar ikut panel standar.
+- Konten dalam panel tidak diubah: judul, deskripsi, footer, tombol X kanan-atas tetap. Kasus khusus tetap benar: media-viewer gelap (`bg-black`), link-viewer `p-0`, Account 360 `flex` internal dengan scroll sendiri, QR, polling, terjadwal, dsb.
+- Tinggi tetap `h-[min(85dvh,640px)]` era v49 diganti tinggi penuh/natural — aturan v49 (popup seragam) bermuara ke **panel seragam**.
+
+**E2E (gateway :81, agent-browser):** admin desktop 1440×900 — dialog ganti-nama & Media & konfirmasi reset terukur panel kanan `x=800, w=640, h=900`, overlay `rgba(0,0,0,0)`; user mobile 390×844 (UjiV49) — panel media & link-viewer jadi **halaman penuh (0,0,390×844)**; AlertDialog "Batalkan pesan terjadwal?" jadi sheet bawah: mobile `w=390, bottomGap=0`, desktop `x=400, w=640, bottomGap=24`, tinggi alami; alur jadwal→batal dua arah lulus; konsol 0 error dua sesi.
+
+**File kunci:** `src/components/ui/dialog.tsx`, `src/components/ui/alert-dialog.tsx`, `.zscripts/t70-sweep-panel.ts`, sweep 12 file komponen chat.
