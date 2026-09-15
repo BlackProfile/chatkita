@@ -227,7 +227,9 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * ON-DEMAND dan KHUSUS ADMIN (user tidak lagi menerima keduanya). */
 /* v61 (Task 77) — pratinjau peta statis pesan lokasi di klien (MiniMap,
  * tile OSM zoom 15 tanpa API key); server hanya bump versi. */
-const SERVICE_VERSION = 'v61'
+/* v62 (Task 78) — tautan masuk (magic link) buatan admin: token acak 256-bit,
+ * DB hanya menyimpan hash SHA-256, sekali pakai, rate-limit penukaran. */
+const SERVICE_VERSION = 'v62'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -474,6 +476,27 @@ db.run(`
   )
 `)
 
+/* v62 — tautan masuk (magic link) buatan admin: 1 tautan = 1 akun user.
+ * Token asli TIDAK PERNAH disimpan — hanya hash SHA-256-nya, sehingga kode
+ * link tidak bisa dibaca/dipulihkan siapa pun (termasuk dari bocornya DB).
+ * token_preview hanya 10 karakter pertama utk identifikasi visual admin. */
+db.run(`
+  CREATE TABLE IF NOT EXISTS login_links (
+    id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_preview TEXT NOT NULL DEFAULT '',
+    user_id TEXT NOT NULL,
+    label TEXT,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER,
+    used_device TEXT,
+    revoked_at INTEGER
+  )
+`)
+/* v62 — bersih-bersih riwayat tautan kedaluwarsa > 30 hari saat boot. */
+db.run('DELETE FROM login_links WHERE expires_at < ?', [Date.now() - 30 * 86400000])
+
 /** v11 — audit trail of admin actions (admin:audit). */
 db.run(`
   CREATE TABLE IF NOT EXISTS audit_log (
@@ -579,6 +602,20 @@ interface InviteCodeRow {
   label?: string | null
   used_by?: string | null
   used_at?: number | null
+}
+
+/* v62 — tautan masuk (magic link). */
+interface LoginLinkRow {
+  id: string
+  token_hash: string
+  token_preview: string
+  user_id: string
+  label: string | null
+  created_at: number
+  expires_at: number
+  used_at: number | null
+  used_device: string | null
+  revoked_at: number | null
 }
 
 interface MessageRow {
@@ -799,6 +836,40 @@ const randomInviteChunk = (len: number) => {
   return out
 }
 const makeInviteCode = () => `CK-${randomInviteChunk(5)}-${randomInviteChunk(4)}`
+
+/* v62 — tautan masuk: token acak 256-bit (base64url, prefix ckl_). Jauh lebih
+ * panjang dari kode undangan karena tidak pernah diketik tangan — selalu via
+ * tautan. Server hanya menyimpan hash; token asli dikirim SEKALI ke admin. */
+const LINK_TOKEN_PREFIX = 'ckl_'
+const linkHashOf = (token: string) =>
+  new Bun.CryptoHasher('sha256').update(token).digest('hex')
+const makeLinkToken = () => {
+  const bytes = crypto.getRandomValues(new Uint8Array(32))
+  let bin = ''
+  for (const b of bytes) bin += String.fromCharCode(b)
+  return (
+    LINK_TOKEN_PREFIX +
+    btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  )
+}
+/* v62 — anti brute-force penukaran tautan: maks 10 percobaan / 60 dtk / socket. */
+const LINK_TRY_WINDOW_MS = 60_000
+const LINK_TRY_MAX = 10
+const linkTries = new Map<string, { windowStart: number; count: number }>()
+const linkTryBlocked = (sid: string) => {
+  const rec = linkTries.get(sid)
+  return !!rec && Date.now() - rec.windowStart <= LINK_TRY_WINDOW_MS && rec.count >= LINK_TRY_MAX
+}
+const linkTryRecord = (sid: string) => {
+  const rec = linkTries.get(sid)
+  const t = Date.now()
+  if (!rec || t - rec.windowStart > LINK_TRY_WINDOW_MS) {
+    linkTries.set(sid, { windowStart: t, count: 1 })
+    if (linkTries.size > 2000) linkTries.clear()
+    return
+  }
+  rec.count += 1
+}
 
 /* ------------- v10 — application settings (admin dashboard) ------------- */
 
@@ -4312,6 +4383,79 @@ io.on('connection', (socket) => {
     ack({ ok: true, exists, suggestion: exists ? suggestFreeName(name) : undefined })
   }))
 
+  /* v62 — tautan masuk (magic link): klien membuka ?masuk=<token> lalu menukar
+   * token dengan identitas akun ({userId, name}) untuk dilanjutkan ke user:auth
+   * jalur sesi tersimpan. Token 256-bit + hanya hash yang disimpan + rate
+   * limit — tidak bisa ditebak/dibaca publik. Token asli tidak pernah
+   * dikirim balik maupun dicetak ke log. Sekali pakai: pemakaian ulang hanya
+   * ditoleransi bagi perangkat yang sama (idempoten untuk pemiliknya). */
+  socket.on('public:link_login', handler(socket, (data, ack) => {
+    if (linkTryBlocked(socket.id)) {
+      ack({ ok: false, error: 'RATE_LIMITED' })
+      return
+    }
+    linkTryRecord(socket.id)
+    const token = typeof data?.token === 'string' ? data.token.trim() : ''
+    const deviceIdRaw =
+      typeof data?.deviceId === 'string' ? data.deviceId.trim() : ''
+    const deviceId = /^[\w-]{8,80}$/.test(deviceIdRaw) ? deviceIdRaw : ''
+    if (
+      !token.startsWith(LINK_TOKEN_PREFIX) ||
+      token.length < 40 ||
+      token.length > 120
+    ) {
+      ack({ ok: false, error: 'LINK_INVALID' })
+      return
+    }
+    const row = db
+      .query('SELECT * FROM login_links WHERE token_hash = ?')
+      .get(linkHashOf(token)) as LoginLinkRow | undefined
+    if (!row) {
+      console.log(`Link login rejected — token tidak dikenal (socket ${socket.id})`)
+      ack({ ok: false, error: 'LINK_INVALID' })
+      return
+    }
+    if (row.revoked_at) {
+      ack({ ok: false, error: 'LINK_REVOKED' })
+      return
+    }
+    if (row.expires_at < now()) {
+      ack({ ok: false, error: 'LINK_EXPIRED' })
+      return
+    }
+    const user = findUserById(row.user_id)
+    if (!user || user.role !== 'user') {
+      ack({ ok: false, error: 'LINK_INVALID' })
+      return
+    }
+    if (row.used_at) {
+      /* idempoten utk pemilik: hanya perangkat yang sama yang dulu memakai */
+      if (!deviceId || row.used_device !== deviceId) {
+        ack({ ok: false, error: 'LINK_USED' })
+        return
+      }
+    } else {
+      /* 1 perangkat 1 akun: tautan tidak boleh dipakai merebut perangkat */
+      const bound = deviceId
+        ? (db
+            .query('SELECT user_id FROM devices WHERE device_id = ?')
+            .get(deviceId) as { user_id: string } | undefined)
+        : undefined
+      if (bound && bound.user_id !== user.id) {
+        ack({ ok: false, error: 'DEVICE_TAKEN' })
+        return
+      }
+      db.run(
+        'UPDATE login_links SET used_at = ?, used_device = ? WHERE id = ?',
+        [now(), deviceId || null, row.id]
+      )
+    }
+    console.log(
+      `Link login accepted for "${user.name}" (link ${row.id.slice(0, 8)}…, socket ${socket.id})`
+    )
+    ack({ ok: true, userId: user.id, name: user.name })
+  }))
+
   /* ---------------------------- auth ---------------------------- */
 
   socket.on(
@@ -6184,6 +6328,107 @@ io.on('connection', (socket) => {
       return
     }
     audit('invite_delete', `kode ${code} dihapus`)
+    ack({ ok: true })
+  }))
+
+  /* v62 — tautan masuk: admin membuat tautan khusus utk satu akun user.
+   * Token (URL lengkap) HANYA muncul sekali di ack admin:link_create —
+   * list/revoke/delete tidak pernah membawa token, dan tidak dicetak ke log. */
+  const linkRowToInfo = (r: LoginLinkRow) => ({
+    id: r.id,
+    tokenPreview: r.token_preview,
+    userId: r.user_id,
+    userName: findUserById(r.user_id)?.name ?? null,
+    label: r.label ?? null,
+    createdAt: new Date(r.created_at).toISOString(),
+    expiresAt: new Date(r.expires_at).toISOString(),
+    usedAt: r.used_at ? new Date(r.used_at).toISOString() : null,
+    revokedAt: r.revoked_at ? new Date(r.revoked_at).toISOString() : null,
+  })
+
+  /** v62 — buat 1 tautan masuk untuk satu akun user (nama → token baru). */
+  socket.on('admin:link_create', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const name = typeof data?.name === 'string' ? data.name.trim() : ''
+    const label =
+      typeof data?.label === 'string' ? data.label.trim().slice(0, 60) : ''
+    const ttlHours = Math.max(1, Math.min(720, Number(data?.ttlHours) || 24))
+    if (name.length < 1 || name.length > MAX_NAME_LENGTH) {
+      ack({ ok: false, error: 'INVALID_NAME' })
+      return
+    }
+    if (name.toLowerCase() === ADMIN_NAME.toLowerCase()) {
+      ack({ ok: false, error: 'NAME_RESERVED' })
+      return
+    }
+    const target = findUserByRoleAndName(name, 'user')
+    if (!target) {
+      ack({ ok: false, error: 'NAME_NOT_FOUND' })
+      return
+    }
+    const token = makeLinkToken()
+    const id = crypto.randomUUID()
+    const ts = now()
+    db.run(
+      'INSERT INTO login_links (id, token_hash, token_preview, user_id, label, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [
+        id,
+        linkHashOf(token),
+        token.slice(0, 10) + '…',
+        target.id,
+        label || null,
+        ts,
+        ts + ttlHours * 3600_000,
+      ]
+    )
+    audit(
+      'link_create',
+      `tautan masuk utk "${target.name}" (berlaku ${ttlHours} jam)`
+    )
+    console.log(
+      `Admin created login link for "${target.name}" (link ${id.slice(0, 8)}…, ttl ${ttlHours}h)`
+    )
+    const row = db
+      .query('SELECT * FROM login_links WHERE id = ?')
+      .get(id) as LoginLinkRow
+    ack({ ok: true, link: { ...linkRowToInfo(row), token } })
+  }))
+
+  /** v62 — daftar tautan masuk (TANPA token — hanya pratinjau + status). */
+  socket.on('admin:link_list', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    const rows = db
+      .query('SELECT * FROM login_links ORDER BY created_at DESC LIMIT 200')
+      .all() as LoginLinkRow[]
+    ack({ ok: true, links: rows.map(linkRowToInfo) })
+  }))
+
+  /** v62 — cabut tautan (token tak bisa dipakai lagi walau belum kedaluwarsa). */
+  socket.on('admin:link_revoke', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = typeof data?.id === 'string' ? data.id.trim() : ''
+    const res = db.run(
+      'UPDATE login_links SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL',
+      [now(), id]
+    )
+    if (res.changes === 0) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    audit('link_revoke', `tautan ${id.slice(0, 8)}… dicabut`)
+    ack({ ok: true })
+  }))
+
+  /** v62 — hapus satu tautan dari daftar. */
+  socket.on('admin:link_delete', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const id = typeof data?.id === 'string' ? data.id.trim() : ''
+    const res = db.run('DELETE FROM login_links WHERE id = ?', [id])
+    if (res.changes === 0) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    audit('link_delete', `tautan ${id.slice(0, 8)}… dihapus`)
     ack({ ok: true })
   }))
 

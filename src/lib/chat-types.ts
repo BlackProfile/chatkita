@@ -1014,6 +1014,44 @@ export interface AdminInviteDeleteAck {
   ok: true;
 }
 
+/* v62 — tautan masuk (magic link) buatan admin. */
+export interface AdminLinkInfo {
+  id: string;
+  /** Cuplikan 10 karakter pertama token — identifikasi visual, BUKAN token. */
+  tokenPreview: string;
+  userId: string;
+  userName: string | null;
+  label: string | null;
+  createdAt: string;
+  expiresAt: string;
+  usedAt: string | null;
+  revokedAt: string | null;
+}
+
+/** Ack `admin:link_create` — token penuh HANYA muncul di sini (sekali). */
+export interface AdminLinkCreateAck {
+  ok: true;
+  link: AdminLinkInfo & { token: string };
+}
+
+/** Ack `admin:link_list`. */
+export interface AdminLinkListAck {
+  ok: true;
+  links: AdminLinkInfo[];
+}
+
+/** Ack `admin:link_revoke` / `admin:link_delete`. */
+export interface AdminLinkRevokeAck {
+  ok: true;
+}
+
+/** Ack `public:link_login` — tukar token tautan dengan identitas akun. */
+export interface LinkLoginAck {
+  ok: true;
+  userId: string;
+  name: string;
+}
+
 /** Ack `admin:user_create` — akun dibuat admin dari dashboard. */
 export interface AdminUserCreateAck {
   ok: true;
@@ -2050,6 +2088,12 @@ export interface ConversationResetPayload {
 // admin:invite_create      { count?, label? } → AdminInviteCreateAck (1–20 codes,
 //                           format CK-XXXXX-XXXX, single-use) | ChatErrorAck
 // admin:invite_delete      { code } → { ok: true } | ChatErrorAck (NOT_FOUND)
+// admin:link_create         { name, label?, ttlHours? } → AdminLinkCreateAck | ChatErrorAck
+//                           (token penuh HANYA di ack ini — sekali tampil)
+// admin:link_list           {} → AdminLinkListAck | ChatErrorAck (tanpa token)
+// admin:link_revoke         { id } → AdminLinkRevokeAck | ChatErrorAck (NOT_FOUND)
+// admin:link_delete         { id } → AdminLinkRevokeAck | ChatErrorAck (NOT_FOUND)
+// public:link_login         { token, deviceId } → LinkLoginAck | ChatErrorAck
 // admin:user_create        { name, password } → AdminUserCreateAck | ChatErrorAck
 //                           Admin creates an account directly (no invite/device).
 // admin:user_reset_password { userId, password } → { ok: true } | ChatErrorAck

@@ -23,6 +23,9 @@ import {
   Images,
   Link2,
   Loader2,
+  Ban,
+  Copy,
+  TriangleAlert,
   MessageSquare,
   MessageSquareReply,
   MessagesSquare,
@@ -87,6 +90,10 @@ import type {
   AdminAccountSetAck,
   AdminAuditClearAck,
   AdminInviteCreateAck,
+  AdminLinkCreateAck,
+  AdminLinkInfo,
+  AdminLinkListAck,
+  AdminLinkRevokeAck,
   AdminInviteListAck,
   AdminInvitesClearAck,
   AdminPasswordChangeAck,
@@ -420,6 +427,14 @@ export function AdminDashboard({
   const [inviteLabel, setInviteLabel] = useState("");
   const [inviteBusy, setInviteBusy] = useState(false);
   const [inviteMsg, setInviteMsg] = useState<string | null>(null);
+  // v62 — tautan masuk admin (magic link).
+  const [links, setLinks] = useState<AdminLinkInfo[] | null>(null);
+  const [linkName, setLinkName] = useState("");
+  const [linkLabel, setLinkLabel] = useState("");
+  const [linkTtl, setLinkTtl] = useState(24);
+  const [linkBusy, setLinkBusy] = useState(false);
+  const [linkMsg, setLinkMsg] = useState<string | null>(null);
+  const [createdLink, setCreatedLink] = useState<(AdminLinkInfo & { token: string }) | null>(null);
   const [settingsResetOpen, setSettingsResetOpen] = useState(false);
   const [settingsResetBusy, setSettingsResetBusy] = useState(false);
 
@@ -478,10 +493,19 @@ export function AdminDashboard({
     });
   };
 
-  // Muat kode undangan saat tab Pengguna dibuka.
+  /** v62 — muat daftar tautan masuk (tab Pengguna) — tanpa token. */
+  const fetchLinks = () => {
+    if (!socket || !socket.connected) return;
+    socket.emit("admin:link_list", {}, (res: AckOf<AdminLinkListAck>) => {
+      if (res.ok) setLinks(res.links);
+    });
+  };
+
+  // Muat kode undangan + tautan masuk saat tab Pengguna dibuka.
   useEffect(() => {
     if (!open || tab !== "pengguna") return;
     fetchInvites();
+    fetchLinks();
   }, [open, tab]);
 
   // v29 — akun dihapus dari sesi admin mana pun → segarkan daftar pengguna.
@@ -589,6 +613,70 @@ export function AdminDashboard({
     socket.emit("admin:invite_delete", { code }, () => {
       setInviteBusy(false);
       fetchInvites();
+    });
+  };
+
+  /* v62 — tautan masuk admin: buat (token tampil sekali), cabut, hapus. */
+  const linkUrlOf = (token: string) =>
+    `${window.location.origin}/?masuk=${token}`;
+
+  const createLink = () => {
+    if (!socket || linkBusy) return;
+    const nm = linkName.trim();
+    if (!nm) {
+      setLinkMsg("Nama akun tujuan wajib diisi.");
+      return;
+    }
+    setLinkBusy(true);
+    setLinkMsg(null);
+    socket.emit(
+      "admin:link_create",
+      { name: nm, label: linkLabel.trim() || undefined, ttlHours: linkTtl },
+      (res: AckOf<AdminLinkCreateAck>) => {
+        setLinkBusy(false);
+        if (res.ok) {
+          setCreatedLink(res.link);
+          setLinkName("");
+          setLinkLabel("");
+          setLinkMsg(null);
+          fetchLinks();
+          toast.success(`Tautan untuk "${res.link.userName ?? nm}" dibuat`);
+        } else {
+          setLinkMsg(
+            res.error === "NAME_NOT_FOUND"
+              ? "Akun dengan nama itu tidak ditemukan."
+              : res.error === "NAME_RESERVED"
+                ? "Nama itu dipakai Admin."
+                : res.error === "INVALID_NAME"
+                  ? "Nama tidak valid (1–40 karakter)."
+                  : "Gagal membuat tautan."
+          );
+        }
+      }
+    );
+  };
+
+  const revokeLink = (id: string) => {
+    if (!socket) return;
+    socket.emit("admin:link_revoke", { id }, (res: AckOf<AdminLinkRevokeAck>) => {
+      if (res.ok) {
+        toast.success("Tautan dicabut — tidak bisa dipakai lagi.");
+        fetchLinks();
+      } else {
+        toast.error("Gagal mencabut tautan.");
+      }
+    });
+  };
+
+  const deleteLink = (id: string) => {
+    if (!socket) return;
+    socket.emit("admin:link_delete", { id }, (res: AckOf<AdminLinkRevokeAck>) => {
+      if (res.ok) {
+        toast.success("Tautan dihapus.");
+        fetchLinks();
+      } else {
+        toast.error("Gagal menghapus tautan.");
+      }
     });
   };
 
@@ -1354,6 +1442,170 @@ export function AdminDashboard({
                         </Button>
                       </div>
                     ))
+                  )}
+                </div>
+              </div>
+
+              {/* v62 — tautan masuk: login tanpa password via tautan khusus. */}
+              <div className="rounded-xl border bg-card p-3">
+                <div className="mb-2 flex items-center gap-2">
+                  <Link2 className="size-4 text-sky-600" aria-hidden="true" />
+                  <p className="text-sm font-medium">Tautan masuk</p>
+                  <Badge variant="secondary" className="font-mono text-[10px]">
+                    1 tautan = 1 akun
+                  </Badge>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7"
+                    onClick={fetchLinks}
+                    aria-label="Muat ulang tautan masuk"
+                  >
+                    <RefreshCw className="size-3.5" aria-hidden="true" />
+                  </Button>
+                </div>
+                <p className="mb-2 text-[11px] leading-snug text-muted-foreground">
+                  Kirim tautan ke user → ia membukanya di perangkatnya → langsung
+                  masuk tanpa password. Kode acak 256-bit, disimpan sebagai hash
+                  saja, dan hanya ditampilkan sekali saat dibuat.
+                </p>
+                <div className="mb-2 flex flex-col gap-2 sm:flex-row">
+                  <Input
+                    value={linkName}
+                    onChange={(e) => setLinkName(e.target.value)}
+                    placeholder="Nama akun tujuan — cth. Budi"
+                    maxLength={40}
+                    className="h-9 flex-1"
+                    aria-label="Nama akun tujuan tautan"
+                  />
+                  <select
+                    value={linkTtl}
+                    onChange={(e) => setLinkTtl(Number(e.target.value))}
+                    aria-label="Masa berlaku tautan"
+                    className="h-9 rounded-lg border bg-background px-2 text-xs"
+                  >
+                    {[1, 8, 24, 72, 168].map((h) => (
+                      <option key={h} value={h}>
+                        {h >= 24 ? `${h / 24} hari` : `${h} jam`}
+                      </option>
+                    ))}
+                  </select>
+                  <Input
+                    value={linkLabel}
+                    onChange={(e) => setLinkLabel(e.target.value)}
+                    placeholder="Catatan (opsional) — cth. HP baru Budi"
+                    maxLength={60}
+                    className="h-9 flex-1"
+                    aria-label="Catatan tautan masuk"
+                  />
+                  <Button
+                    size="sm"
+                    className="h-9 rounded-lg bg-sky-600 text-xs text-white hover:bg-sky-600/90"
+                    disabled={linkBusy}
+                    onClick={createLink}
+                  >
+                    {linkBusy ? (
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Link2 className="size-3.5" aria-hidden="true" />
+                    )}
+                    Buat tautan
+                  </Button>
+                </div>
+                {linkMsg ? <p className="mb-2 text-xs text-destructive">{linkMsg}</p> : null}
+                {createdLink ? (
+                  <div className="mb-2 rounded-lg border border-sky-500/40 bg-sky-500/5 p-2">
+                    <p className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-sky-600">
+                      <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />
+                      Tautan untuk {createdLink.userName ?? createdLink.userId} — hanya
+                      ditampilkan sekali, salin sekarang:
+                    </p>
+                    <div className="flex items-center gap-1.5">
+                      <code className="min-w-0 flex-1 truncate rounded bg-muted/70 px-2 py-1 font-mono text-[11px]">
+                        {linkUrlOf(createdLink.token)}
+                      </code>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 shrink-0 gap-1 text-[11px]"
+                        onClick={() => {
+                          void navigator.clipboard.writeText(linkUrlOf(createdLink.token));
+                          toast.success("Tautan disalin — kirim ke user.");
+                        }}
+                      >
+                        <Copy className="size-3" aria-hidden="true" />
+                        Salin
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+                <div className="max-h-64 divide-y divide-border/60 overflow-y-auto">
+                  {!links ? (
+                    <p className="py-4 text-center text-xs text-muted-foreground">
+                      Memuat tautan…
+                    </p>
+                  ) : links.length === 0 ? (
+                    <p className="py-4 text-center text-xs text-muted-foreground">
+                      Belum ada tautan masuk — buat tautan untuk memasukkan user
+                      tanpa password.
+                    </p>
+                  ) : (
+                    links.map((lk) => {
+                      const expired = new Date(lk.expiresAt).getTime() <= Date.now();
+                      return (
+                        <div key={lk.id} className="flex items-center gap-2 py-2">
+                          <span
+                            title={lk.tokenPreview}
+                            className="rounded-md bg-muted/70 px-2 py-1 font-mono text-xs"
+                          >
+                            {lk.tokenPreview}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
+                            {lk.userName ?? lk.userId}
+                            {lk.label ? ` · ${lk.label}` : ""}
+                            {` · s/d ${fmtIsoDay(lk.expiresAt)}`}
+                            {lk.usedAt ? ` · dipakai ${fmtIsoDay(lk.usedAt)}` : ""}
+                          </span>
+                          {lk.revokedAt ? (
+                            <Badge variant="destructive" className="text-[10px]">
+                              dicabut
+                            </Badge>
+                          ) : lk.usedAt ? (
+                            <Badge variant="secondary" className="text-[10px]">
+                              terpakai
+                            </Badge>
+                          ) : expired ? (
+                            <Badge variant="secondary" className="text-[10px]">
+                              kedaluwarsa
+                            </Badge>
+                          ) : (
+                            <Badge className="bg-sky-600 text-[10px] text-white">
+                              aktif
+                            </Badge>
+                          )}
+                          {!lk.revokedAt && !lk.usedAt && !expired ? (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="size-7 shrink-0 text-amber-600 hover:text-amber-600"
+                              onClick={() => revokeLink(lk.id)}
+                              aria-label={`Cabut tautan ${lk.userName ?? ""}`}
+                            >
+                              <Ban className="size-3.5" aria-hidden="true" />
+                            </Button>
+                          ) : null}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="size-7 shrink-0 text-destructive hover:text-destructive"
+                            onClick={() => deleteLink(lk.id)}
+                            aria-label={`Hapus tautan ${lk.userName ?? ""}`}
+                          >
+                            <Trash2 className="size-3.5" aria-hidden="true" />
+                          </Button>
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               </div>

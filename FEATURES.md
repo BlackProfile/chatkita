@@ -582,3 +582,34 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser, login UjiV49):** pesan lokasi id 329 (-5.42119, 105.27967 — persis screenshot permintaan) dan id 309 (Jakarta) keduanya merender peta; **8/8 tile termuat, 0 gagal** (`naturalWidth === 256`); pin & atribusi tampak; href peta → `https://maps.google.com/?q=-5.4211857939110075,105.2796700953496`; konsol bersih; tetap 8/8 setelah reload (post-fix rounding). Verify **425/425**; lint 0/0.
 
 **File kunci:** `src/components/chat/mini-map.tsx` (baru), `src/components/chat/ChatBubble.tsx`, `mini-services/chat-service/index.ts` (bump), `src/instrumentation.ts` (rescue-v61).
+
+## v62 — Tautan Masuk (Magic Link) Buatan Admin (Task 78)
+
+**Permintaan:** "tolong buatkan saya fitur user bisa login dari link khusus yang dibuat admin untuk user aplikasi ini, buat kode linknya jangan bisa dibaca oleh publik"
+
+**Fitur baru:** admin membuat **tautan masuk khusus untuk satu akun user**. User membuka tautan di perangkatnya → **langsung masuk tanpa password**. Kode tautan didesain mustahil dibaca/ditebak publik.
+
+**Keamanan kode link ("jangan bisa dibaca publik"):**
+
+- Token acak **256-bit** (`ckl_` + 43 karakter base64url, `crypto.getRandomValues`) — jauh lebih kuat dari kode undangan karena tidak pernah diketik tangan, selalu via tautan.
+- **Token asli TIDAK PERNAH disimpan server** — hanya hash SHA-256-nya (terverifikasi: DB berisi hex 64 char); bocornya DB pun tidak membuka akses.
+- Token penuh **hanya muncul sekali** di ack `admin:link_create` (kartu "hanya ditampilkan sekali, salin sekarang"); daftar admin hanya menampilkan cuplikan 10 char; tidak pernah dikirim ke user lain, tidak dicetak ke log (log hanya id+username), tidak masuk audit penuh.
+- **URL langsung dibersihkan** dari address bar/riwayat browser via `history.replaceState` saat tautan dibuka.
+- **Sekali pakai** — pemakaian ulang hanya ditoleransi bagi perangkat yang sama (idempoten untuk pemilik); perangkat lain mendapat pesan "Tautan ini sudah pernah digunakan di perangkat lain."
+- **Rate-limit** penukaran: maks 10 percobaan / 60 detik / socket.
+- Hormati aturan **1 perangkat 1 akun**: tautan tidak bisa dipakai merebut perangkat yang sudah terikat akun lain (DEVICE_TAKEN).
+
+**Server (`mini-services/chat-service/index.ts`):**
+
+- Tabel baru `login_links` (id, token_hash UNIQUE, token_preview, user_id, label, created_at, expires_at, used_at, used_device, revoked_at) + bersih-bersih riwayat kedaluwarsa >30 hari saat boot.
+- `public:link_login` (pre-login): tukar token → identitas akun `{userId, name}` → klien lanjut lewat `user:auth` jalur sesi-tersimpan (reuse penuh alur login: bind perangkat, login_events, aktivitas, riwayat).
+- Admin-only (adminGuard + audit): `admin:link_create` {name, label?, ttlHours 1–720 default 24}, `admin:link_list` (tanpa token), `admin:link_revoke` {id}, `admin:link_delete` {id}.
+
+**Klien:**
+
+- Messenger: baca `?masuk=<token>` saat connect (sebelum kartu login), bersihkan URL, emit `public:link_login`, sukses → auto-login; gagal → pesan jelas (LINK_USED/LINK_EXPIRED/LINK_REVOKED/DEVICE_TAKEN/RATE_LIMITED/LINK_INVALID) di kartu login + indikator "Memverifikasi tautan masuk dari admin…".
+- Dashboard tab Pengguna: kartu **"Tautan masuk"** (1 tautan = 1 akun) — form nama akun tujuan + masa berlaku (1 jam/8 jam/1 hari/3 hari/7 hari) + catatan; hasil create = kartu URL sekali-tampil + tombol Salin; daftar dengan status (aktif/terpakai/kedaluwarsa/dicabut), cabut, hapus.
+
+**E2E terverifikasi (agent-browser, 3 sesi):** admin buat tautan UjiV49 → URL `ckl_…` 43 char tampil sekali; DB berisi hash-only (hex 64, preview 10 char); sesi baru buka tautan → **auto-login UjiV49**, URL bersih jadi `/`, sesi tersimpan, chat tampil; DB: used=1 + used_device terisi; log server tanpa token; sesi ketiga buka tautan sama → ditolak "Tautan ini sudah pernah digunakan di perangkat lain." + kembali ke form login; konsol bersih. Verify **440/440**; lint 0/0.
+
+**File kunci:** `mini-services/chat-service/index.ts`, `src/components/chat/Messenger.tsx`, `src/components/chat/admin-dashboard.tsx`, `src/lib/chat-types.ts`.

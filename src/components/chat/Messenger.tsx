@@ -135,6 +135,7 @@ import {
   type UserToastPayload,
   type UserSetPasswordAck,
   type GhostMessagePayload,
+  type LinkLoginAck,
 } from "@/lib/chat-types";
 import { applyAppBadge } from "@/lib/app-badge";
 import {
@@ -305,6 +306,15 @@ function readDeviceId(): string {
     return id;
   } catch {
     return "";
+  }
+}
+
+/* v62 — token tautan masuk admin (?masuk=ckl_…) dari URL, bila ada. */
+function readMagicToken(): string | null {
+  try {
+    return new URLSearchParams(window.location.search).get("masuk");
+  } catch {
+    return null;
   }
 }
 
@@ -579,6 +589,8 @@ export function Messenger() {
   const [inviteCode, setInviteCode] = useState("");
   const [pwModalOpen, setPwModalOpen] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  // v62 — sedang menukar token tautan masuk admin dengan identitas akun.
+  const [linkChecking, setLinkChecking] = useState(false);
   // v28 — hasil cek nama pre-login: true = akun sudah ada → kolom kode
   // undangan disembunyikan (hanya relevan utk pendaftaran akun baru).
   const [nameExists, setNameExists] = useState<boolean | null>(null);
@@ -762,14 +774,13 @@ export function Messenger() {
           }
         });
       }
-      const current = meRef.current;
-      if (!current) return;
-      // Re-auth on EVERY connect to (re)join the personal room and get
-      // the freshest history (also closes reconnect gaps).
-      socket.emit(
-        "user:auth",
-        { name: current.name, userId: current.userId, deviceId: readDeviceId() },
-        (res: AckOf<UserAuthAck>) => {
+      /* v62 — tautan masuk admin (?masuk=<token>): URL langsung dibersihkan
+       * agar kode tidak tertinggal di address bar/riwayat browser, lalu token
+       * ditukar dengan identitas akun dan dilanjutkan lewat jalur user:auth
+       * sesi tersimpan (handler yang sama di bawah). */
+      const magic = readMagicToken();
+      if (magic) window.history.replaceState({}, "", window.location.pathname);
+      const applyAuthAck = (res: AckOf<UserAuthAck>) => {
           if (res.ok) {
             const next = { userId: res.user.id, name: res.user.name };
             window.localStorage.setItem(CHAT_SESSION_KEY, JSON.stringify(next));
@@ -811,7 +822,47 @@ export function Messenger() {
                 : "Sesi berakhir. Silakan masuk kembali."
             );
           }
-        }
+      };
+      if (magic && !meRef.current) {
+        setLinkChecking(true);
+        socket.emit(
+          "public:link_login",
+          { token: magic, deviceId: readDeviceId() },
+          (lr: AckOf<LinkLoginAck>) => {
+            setLinkChecking(false);
+            if (!lr.ok || !lr.userId || !lr.name) {
+              setAuthError(
+                lr.error === "LINK_USED"
+                  ? "Tautan ini sudah pernah digunakan di perangkat lain."
+                  : lr.error === "LINK_EXPIRED"
+                    ? "Tautan sudah kedaluwarsa — minta tautan baru dari admin."
+                    : lr.error === "LINK_REVOKED"
+                      ? "Tautan sudah dicabut oleh admin."
+                      : lr.error === "DEVICE_TAKEN"
+                        ? "1 perangkat 1 akun: perangkat ini sudah terdaftar dengan akun lain."
+                        : lr.error === "RATE_LIMITED"
+                          ? "Terlalu banyak percobaan — tunggu sebentar."
+                          : "Tautan tidak dikenal — periksa kembali tautan dari admin."
+              );
+              return;
+            }
+            socket.emit(
+              "user:auth",
+              { name: lr.name, userId: lr.userId, deviceId: readDeviceId() },
+              applyAuthAck
+            );
+          }
+        );
+        return;
+      }
+      const current = meRef.current;
+      if (!current) return;
+      // Re-auth on EVERY connect to (re)join the personal room and get
+      // the freshest history (also closes reconnect gaps).
+      socket.emit(
+        "user:auth",
+        { name: current.name, userId: current.userId, deviceId: readDeviceId() },
+        applyAuthAck
       );
     });
 
@@ -2162,6 +2213,12 @@ export function Messenger() {
                       />
                     </div>
                   ) : null}
+                  {linkChecking ? (
+                    <p className="flex items-center gap-2 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
+                      <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                      Memverifikasi tautan masuk dari admin…
+                    </p>
+                  ) : null}
                   {authError ? (
                     <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
                       {authError}
@@ -2335,6 +2392,12 @@ export function Messenger() {
                         }}
                       />
                     </div>
+                  ) : null}
+                  {linkChecking ? (
+                    <p className="flex items-center gap-2 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
+                      <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                      Memverifikasi tautan masuk dari admin…
+                    </p>
                   ) : null}
                   {authError ? (
                     <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">

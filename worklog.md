@@ -1584,3 +1584,21 @@ Work Log:
 Stage Summary:
 - v61: pesan lokasi kini menampilkan peta OSM statis langsung di bubble (user & admin), pin tepat di titik, klik peta/tombol → Google Maps, fallback anggun bila tile gagal. Tanpa perubahan perilaku server.
 - Commit + tag rescue-v61.
+
+---
+Task ID: 78
+Agent: Z.ai Code (utama)
+Task: "tolong buatkan saya fitur user bisa login dari link khusus yang dibuat admin untuk user aplikasi ini, buat kode linknya jangan bisa dibaca oleh publik" — tautan masuk (magic link) khusus admin (v62).
+
+Work Log:
+- Investigasi: alur login = user:auth (sessionRestore via userId+name), kode undangan CK-XXXXX-XXXX (admin:invite_*), dashboard tab Pengguna, ChatErrorAck/AckOf.
+- Desain keamanan: token 256-bit base64url prefix ckl_ (tidak diketik tangan → boleh panjang); DB hash-only SHA-256 (Bun.CryptoHasher); token penuh hanya di ack admin:link_create sekali; list hanya preview 10 char; log tanpa token; URL dibersihkan via history.replaceState; sekali pakai + idempoten untuk perangkat sama; rate-limit 10/60s/socket; hormati 1-perangkat-1-akun.
+- Server v62: tabel login_links + pembersihan >30 hari; public:link_login (pre-login, tukar token → {userId,name} → user:auth jalur restore); admin:link_create/list/revoke/delete (adminGuard + audit). Prosedur wajib pkill → port bebas → edit → nohup → banner "v62 listening" ✓.
+- Klien: chat-types (AdminLinkInfo/Create/List/Revoke + LinkLoginAck); Messenger (readMagicToken, refactor connect handler → applyAuthAck, jalur magic sebelum jalur normal, banner "Memverifikasi tautan masuk…", pesan error per-kode); dashboard (state + fetchLinks di efek tab pengguna + createLink/revokeLink/deleteLink/linkUrlOf + kartu UI lengkap dengan status aktif/terpakai/kedaluwarsa/dicabut + kartu URL sekali-tampil + Salin).
+- Insiden alat: MultiEdit lagi-lagi parsial (4 dari 5 edit dashboard masuk, 1 ditolak karena old_str tebakan) → audit rg menangkapnya, sisa diselesaikan dengan Edit ber-anchor persis (baca dulu isi deleteInvite).
+- verify-integrity: 2 cek versi v61 literal (SERVICE_VERSION/rescue-v61) mengikuti pola "cek nilai live" → diganti penanda historis tetap (blok komentar v61 di service, penanda kartu lokasi v61 di ChatBubble); seksi v62 +15 cek → 440/440; chmod 644.
+- E2E 3 sesi agent-browser: admin (password saja, TOTP tak diminta di alur ini) → Dashboard v62 → tab Pengguna → buat tautan UjiV49 (URL ckl_ 43 char, hanya preview di daftar); DB hash-only terverifikasi (hlen 64, preview 10 char); sesi baru buka ?masuk=… → auto-login UjiV49 (URL bersih jadi /, localStorage chatkita:user terisi, chat tampil); DB used=1 + used_device 36 char; log "Link login accepted for UjiV49 (link d0c0398a…)" tanpa token; sesi ketiga → LINK_USED "Tautan ini sudah pernah digunakan di perangkat lain." + form login; konsol bersih; lint 0/0.
+
+Stage Summary:
+- v62: user bisa login via tautan khusus buatan admin tanpa password; kode link 256-bit hash-only, sekali pakai, anti brute-force, tidak pernah terekspos ke publik (DB/log/list/user lain); admin punya kendali penuh (buat/cabut/hapus + status).
+- Commit + tag rescue-v62.
