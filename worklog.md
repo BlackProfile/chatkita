@@ -1695,3 +1695,19 @@ Work Log:
 Stage Summary:
 - v67: keluhan user tuntas — akun dihapus admin saat perangkat offline kini ikut "terhapus" dari sisi perangkat: begitu perangkat online lagi, kartu "Ketuk untuk lanjut" akun mati dibuang otomatis + catatan jelas, form bersih, langsung bisa login akun lain (terbukti via tautan masuk). Jalur v66 (paksa-logout real-time) teruji utuh. Server tanpa perubahan fungsional.
 - Commit + tag rescue-v67.
+
+---
+Task ID: 84
+Agent: Z.ai Code (utama)
+Task: "ini kenapa 'Perangkat ini belum terikat ke akun ini — masukkan password sekali untuk mengikatnya.'. padahal barusan keluar mau login lagi" (+ screenshot rvg) — kartu lanjut wajib password meski perangkat terikat (v68).
+
+Work Log:
+- Diagnosis via DB: perangkat user rvg SUDAH terikat (device_logins fb1bbc2c…↔rvg ada) → pesan "belum terikat" tidak akurat. Akar: kartu lanjut kirim nama saja (tanpa userId) → sessionRestore=false → gate password (user.password_hash && !sessionRestore) selalu PASSWORD_REQUIRED TANPA mengecek pasangan device_logins — janji v64 ("pasangan membolehkan restore tanpa password") tak pernah berlaku di jalur kartu; password diminta SETIAP ketukan, bukan sekali.
+- Fix server-only: dalam gate, bila password kosong → cek pasangan (deviceId, user.id) → ada → trustedDeviceLogin=true (lolos); tidak ada → PASSWORD_REQUIRED (pesan klien kini benar). Password terkirim tetap diverifikasi; rate-limit utuh. Struktur if/else-if/else menggantikan fallthrough; audit login_history + emitActivity memakai `sessionRestore || trustedDeviceLogin` → 'restore'/'sesi dipulihkan'. Force-logout/unbind tetap menghapus pasangan → password diminta lagi (semantik pencabutan terjaga).
+- Prosedur wajib: pkill → 3003 BEBAS → edit → nohup → banner "v68 listening" ✓.
+- verify: 2 cek literal v67 → historis ("v67 — buang sisa sesi akun", "v67 — nama akun yang ternyata sudah dihapus admin") + seksi v68 6 cek → awalnya 1 gagal (pola `\?` di BRE jadi kuantifier — pelajaran: jangan escape `?` di chk_grep) → ganti jangkar "trustedDeviceLogin = true" → **493/493**; lint 0/0.
+- E2E 3 sesi: buat UjiV68 via Dashboard→Pengguna→Buat akun (pw uji68); t84a login pw → keluar → ketuk kartu → MASUK TANPA PASSWORD (2 putaran; screenshot /tmp/t84a-kartu-tanpa-password.png); t84c perangkat baru: nama saja → ditolak "Akun ini memakai password" → pw sekali → keluar → kartu → mulus (/tmp/t84c-perangkat-baru-mulus.png); regresi: admin paksa-logout → t84a terkick live + log "2 perangkat dilepas, 2 socket diputus" + pasangan DB=0 → ketuk kartu → "Perangkat ini belum terikat…" (kini akurat). Sesi ditutup; UjiV68 sengaja dibiarkan (bisa dihapus admin kapan saja).
+
+Stage Summary:
+- v68: keluhan "keluar → login lagi diminta password terus" tuntas — perangkat yang pernah membuktikan kredensial kini benar-benar dipercaya di kartu lanjut (konsisten jalur restore); pesan "belum terikat" hanya muncul saat memang belum (pasca force-logout/unbind/perangkat segar). Server-only; klien tak tersentuh.
+- Commit + tag rescue-v68.

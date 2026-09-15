@@ -704,3 +704,21 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser, 2 sesi):** UjiV49 login → keluar sukarela → kartu lanjut + `chatkita:last-name` ada → admin hapus UjiV49 (DB: lenyap) → perangkat user di-RELOAD → kartu HILANG, catatan amber "Akun “UjiV49” telah dihapus oleh admin…", `chatkita:last-name` & `chatkita:user` NULL, form kosong → tautan masuk UjiBrowser59 dibuat admin → dibuka di perangkat sama → auto-login sukses (sesi = UjiBrowser59) → regresi v66: admin paksa-logout UjiBrowser59 online → user seketika ke form "Sesi diakhiri oleh admin", kartu lanjut DIPERTAHANKAN (desain 'forced'), log "[force-logout] 1 perangkat dilepas, 1 socket diputus". Verify **487/487**; lint 0/0.
 
 **File kunci:** `src/components/chat/Messenger.tsx` (purgeLastAccount + 3 titik validasi + catatan goneAccount), `mini-services/chat-service/index.ts` (bump v67 + komentar), `src/instrumentation.ts` (rescue-v67), `scripts/verify-integrity.sh` (+9 cek; 2 cek literal v66 → penanda historis).
+
+---
+
+### v68 (Task 84) — Kartu "Ketuk untuk lanjut" akhirnya menepati janji: perangkat terikat masuk tanpa password
+
+**Permintaan:** "ini kenapa 'Perangkat ini belum terikat ke akun ini — masukkan password sekali untuk mengikatnya.'. padahal barusan keluar mau login lagi" (+ screenshot akun rvg).
+
+**Diagnosis (bug desain, dibuktikan lewat DB):** kartu "Ketuk untuk lanjut" hanya mengirim **nama** (tanpa `userId`) → server menganggapnya login baru (`sessionRestore=false`) → akun ber-password selalu kena `PASSWORD_REQUIRED` — **gate password tidak pernah mengecek pasangan `device_logins`**, padahal pasangan (perangkat↔akun) yang dibuat v64 justru adalah bukti kredensial per perangkat. Bukti: DB menunjukkan perangkat user rvg SUDAH terikat (`device_logins` ada) — pesan "belum terikat… sekali" menyesatkan; kenyataannya password diminta **setiap** ketuk kartu, bukan sekali.
+
+**Perubahan v68 (server-only + bump):**
+- Password gate (`user.password_hash && !sessionRestore`, tanpa password dikirim): cek dulu pasangan `device_logins (deviceId, user.id)` → **ada → langsung lolos** (`trustedDeviceLogin=true`), **tidak ada → `PASSWORD_REQUIRED`** (pesan klien "belum terikat… sekali untuk mengikatnya" kini akurat: memang belum terikat; masuk password sekali → pasangan dibuat → berikutnya mulus).
+- Password tetap diverifikasi normal bila dikirim; rate-limit & audit tak berubah.
+- Audit/activity: login via kartu tercatat `restore` / "sesi dipulihkan" (bukan "login baru").
+- Pencabutan admin tetap bermakna: force-logout / lepas kunci perangkat menghapus pasangan → kartu kembali meminta password sekali.
+
+**E2E terverifikasi (agent-browser, 3 sesi):** akun uji UjiV68 (buat via admin, pw uji68) → login password (ikat) → keluar → **ketuk kartu → masuk TANPA password** ✅ (2 putaran) → perangkat baru t84c: nama saja → ditolak "Akun ini memakai password" ✅ → password sekali → masuk → keluar → kartu → **mulus tanpa password** ✅ → regresi: admin paksa-logout UjiV68 → t84a terkick live ("Sesi diakhiri oleh admin", log "2 perangkat dilepas, 2 socket diputus", pasangan DB = 0) → ketuk kartu → pesan "Perangkat ini belum terikat…" muncul (kini benar) ✅. Verify **493/493**; lint 0/0.
+
+**File kunci:** `mini-services/chat-service/index.ts` (bypass pasangan di password gate + audit + bump v68), `src/instrumentation.ts` (rescue-v68), `scripts/verify-integrity.sh` (+6 cek; 2 cek literal v67 → penanda historis).

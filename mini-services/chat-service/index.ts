@@ -254,7 +254,15 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * KLIEN yang memvalidasi setiap kali layar login muncul: public:check_name
  * (v28) dipakai ulang — akun hilang → kartu dibuang + catatan "telah
  * dihapus admin". Server hanya bump versi; tak ada event baru. */
-const SERVICE_VERSION = 'v67'
+/* v68 (Task 84) — kartu "Ketuk untuk lanjut" akhirnya menepati janjinya:
+ * kartu hanya mengirim nama (tanpa userId) sehingga selalu terbaca login
+ * baru → akun ber-password selalu dimintai password meski perangkat SUDAH
+ * terikat (pesan "belum terikat ... sekali" menyesatkan — bukti DB: pasangan
+ * device_logins rvg ada). Password gate kini mengecek pasangan dulu:
+ * ada → lanjut tanpa password (audit 'sesi dipulihkan'); tidak ada →
+ * PASSWORD_REQUIRED sekali untuk mengikat. Pencabutan admin (force-logout/
+ * unbind) tetap melepas pasangan → password diminta lagi. */
+const SERVICE_VERSION = 'v68'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -4569,6 +4577,10 @@ io.on('connection', (socket) => {
         typeof data?.userId === 'string' &&
         data.userId === user.id
       )
+      /* v68 — login-nama dari perangkat yang sudah terikat akun ini
+       * (device_logins) juga diperlakukan sebagai pemulihan sesi —
+       * dipakai oleh kartu "Ketuk untuk lanjut" yang hanya mengirim nama. */
+      let trustedDeviceLogin = false
 
       if (!user) {
         // v13 — registration may be closed from the dashboard (Pengaturan → Akses).
@@ -4673,21 +4685,43 @@ io.on('connection', (socket) => {
          * Rate limit per-nama mencegah brute-force. */
         if (user.password_hash && !sessionRestore) {
           if (!password) {
-            ack({ ok: false, error: 'PASSWORD_REQUIRED' })
-            return
-          }
-          if (userPwBlocked(user.name.toLowerCase())) {
+            /* v68 — kartu "Ketuk untuk lanjut" hanya mengirim nama (tanpa
+             * userId), jadi selalu terbaca login baru → selalu dimintai
+             * password meski perangkat SUDAH terikat (bug nyata: pesan
+             * "belum terikat" padahal pasangan device_logins ada). Janji
+             * v64 kini dipenuhi: pasangan (perangkat, akun) itu sendiri
+             * adalah bukti kredensial per perangkat → lanjut tanpa password.
+             * Belum ada pasangan → PASSWORD_REQUIRED (pesan klien kini
+             * akurat: memang belum terikat; masuk password sekali, pasangan
+             * dibuat, berikutnya mulus). Force-logout admin melepas pasangan
+             * → kartu kembali minta password — sesuai maksud pencabutan. */
+            const trustedPair = deviceId
+              ? (db
+                  .query(
+                    'SELECT 1 AS x FROM device_logins WHERE device_id = ? AND user_id = ?'
+                  )
+                  .get(deviceId, user.id) as { x: number } | undefined)
+              : undefined
+            if (!trustedPair) {
+              ack({ ok: false, error: 'PASSWORD_REQUIRED' })
+              return
+            }
+            trustedDeviceLogin = true
+          } else if (userPwBlocked(user.name.toLowerCase())) {
             ack({ ok: false, error: 'TOO_MANY_ATTEMPTS' })
             return
+          } else {
+            const pwOk = Bun.password.verifySync(password, user.password_hash)
+            if (!pwOk) {
+              userPwRecordFail(user.name.toLowerCase())
+              console.log(
+                `Rejected login "${user.name}" — wrong password (socket ${socket.id})`
+              )
+              ack({ ok: false, error: 'INVALID_PASSWORD' })
+              return
+            }
+            userPwClear(user.name.toLowerCase())
           }
-          const pwOk = Bun.password.verifySync(password, user.password_hash)
-          if (!pwOk) {
-            userPwRecordFail(user.name.toLowerCase())
-            console.log(`Rejected login "${user.name}" — wrong password (socket ${socket.id})`)
-            ack({ ok: false, error: 'INVALID_PASSWORD' })
-            return
-          }
-          userPwClear(user.name.toLowerCase())
         }
         // PIN gate: fresh (name-only) logins must present the PIN (akun lama
         // yang memakai PIN dan belum punya password).
@@ -4799,13 +4833,17 @@ io.on('connection', (socket) => {
             now(),
             firstForwardedIp(socket),
             typeof uaHeader === 'string' ? uaHeader.slice(0, 300) : null,
-            sessionRestore ? 'restore' : 'login',
+            sessionRestore || trustedDeviceLogin ? 'restore' : 'login',
           ]
         )
       } catch {
         /* riwayat tidak boleh menggagalkan login */
       }
-      emitActivity(user.id, 'login', sessionRestore ? 'sesi dipulihkan' : 'login baru')
+      emitActivity(
+        user.id,
+        'login',
+        sessionRestore || trustedDeviceLogin ? 'sesi dipulihkan' : 'login baru'
+      )
       const admin = findUserById(ADMIN_ID) // seeded on boot — always exists
       // v47 — viewerId disertakan agar penonton "kebal hapus" (antiDelete)
       // langsung melihat isi asli pesan yang dihapus pada halaman pertama.
