@@ -1477,3 +1477,25 @@ Stage Summary:
 - v56 = gelembung foto/video SELALU merangkul media (maks 336px, tak ada lagi ruang kosong) dan media yang filenya hilang tampil sebagai kartu jelas "Media tidak tersedia" — di panel user & admin sekaligus.
 - Media sandbox-loss terdokumentasi + jalur backup media terbukti berjalan (tar media ada di /home/z/backups).
 - Integritas: verify 391/391, lint 0/0; commit + tag rescue-v56 (anti-rollback).
+
+---
+Task ID: 73
+Agent: Z.ai Code (main)
+Task: v57 — "ini fungsi tombol play untuk apa?": identifikasi tombol play di screenshot + perbaiki tumpukan tombol di viewer media
+
+Work Log:
+- PERTANYAAN USER + screenshot lingkaran gelap ▶ dengan × di tepinya → diidentifikasi sebagai viewer media layar penuh (bg hitam): tombol ▶ = SLIDESHOW (fitur v48, maju otomatis 3 dtk/media, hanya muncul bila ≥2 media di percakapan); ikon × = tombol tutup viewer.
+- AKAR TAMPILAN ANEH: tombol slideshow (`absolute right-3 top-3`, 36px) BERTUMPUK dengan × bawaan shadcn DialogContent (`top-4 right-4`, ikon 16px) — keduanya di pojok kanan-atas, × tampak "menempel" di lingkaran ▶ (persis screenshot user). audit `absolute right-2/3 top-2/3` di seluruh chat components: hanya media-viewer yang bentrok (2 lainnya = ThemeToggle layar login).
+- FIX `src/components/chat/media-viewer.tsx`: `showCloseButton={false}` pada DialogContent viewer → grup kanan-atas BARU `absolute right-3 top-3 flex gap-2` berisi tombol slideshow (perilaku sama) + tombol tutup kustom `aria-label="Tutup pratinjau"` — dua lingkaran gelap 36px seragam berdampingan; target sentuh × naik 16→36px. Escape & klik-luar tetap menutup (Radix onOpenChange).
+- Versi v57: pkill (port 3003 FREE terverifikasi) → SERVICE_VERSION 'v57' → spawn → banner "chat-service v57 listening on port 3003"; instrumentation rescue-v57 + void 0 (Task 73).
+- verify-integrity segmen v57 +5 cek (wrapper grup, label tutup kustom, label slideshow, showCloseButton=false, komentar v57) → **396/396, 0 gagal** (chmod 644; insiden chmod +x tak sengaja pada commit pertama di-amend, mode kembali 644). FEATURES.md segmen v57 (chmod 644). Lint 0/0.
+- E2E gateway :81 (session t73u mobile 390×844 + t73d desktop 1440×900, akun UjiV49/uji49; percakapan punya 2 foto uji → chip "1 / 2"):
+  - Mobile: play 298–334 / close 342–378 (36px, y sama 12) → **overlap=false**; klik "Putar slideshow" → label jadi "Hentikan slideshow", chip maju "1 / 2"→"**2 / 2**" dalam 3,6 dtk (slideshow bekerja); tombol "Tutup pratinjau" menutup viewer ✓; screenshot /tmp/t73-viewer-mobile.png ([⏸][×] berdampingan rapi).
+  - Desktop: play 1348–1384 / close 1392–1428 → **overlap=false**; page errors 0; screenshot /tmp/t73-viewer-desktop.png.
+  - Konsol: 0 error/warn (hanya noise React DevTools/HMR).
+- Commit 1c7ab8c + tag rescue-v57 di-push (main force-push setelah amend mode file).
+
+Stage Summary:
+- Tombol ▶ di viewer = slideshow otomatis (3 dtk/media); kini ▶ dan × tampil sebagai dua tombol seragam berdampingan tanpa tumpang tindih, di panel user & admin sekaligus (komponen bersama).
+- Bonus aksesibilitas: target sentuh × viewer 16px → 36px.
+- Integritas: verify 396/396, lint 0/0; commit + tag rescue-v57 (anti-rollback).
