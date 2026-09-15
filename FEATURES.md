@@ -722,3 +722,24 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser, 3 sesi):** akun uji UjiV68 (buat via admin, pw uji68) → login password (ikat) → keluar → **ketuk kartu → masuk TANPA password** ✅ (2 putaran) → perangkat baru t84c: nama saja → ditolak "Akun ini memakai password" ✅ → password sekali → masuk → keluar → kartu → **mulus tanpa password** ✅ → regresi: admin paksa-logout UjiV68 → t84a terkick live ("Sesi diakhiri oleh admin", log "2 perangkat dilepas, 2 socket diputus", pasangan DB = 0) → ketuk kartu → pesan "Perangkat ini belum terikat…" muncul (kini benar) ✅. Verify **493/493**; lint 0/0.
 
 **File kunci:** `mini-services/chat-service/index.ts` (bypass pasangan di password gate + audit + bump v68), `src/instrumentation.ts` (rescue-v68), `scripts/verify-integrity.sh` (+6 cek; 2 cek literal v67 → penanda historis).
+
+---
+
+### v69 (Task 85) — Konsol Database: admin mengedit DB lengkap dari aplikasi, anti-bocor berlapis
+
+**Permintaan:** "buat admin bisa edit database lengkap dari aplikasi langsung, buat jangan sampai bocor."
+
+**Perubahan v69 (server + klien):**
+- Menu admin baru: **⋮ → "Konsol database"** → dialog penuh: daftar tabel+view (dengan jumlah baris), browser isi tabel (60 baris/halaman, filter WHERE, DDL collapsible), **edit sel** (klik sel → editor + opsi NULL), **tambah baris**, **hapus baris**, dan **SQL bebas** (multi-statement; SELECT → hasil ≤400 baris, lainnya dieksekusi; Ctrl+Enter).
+- **Anti-bocor berlapis:**
+  1. **Step-up password** — membuka konsol meminta password admin **lagi** (`admin:db_unlock`, rate-limit 5/60 dtk sendiri, TOTP ikut dituntut bila 2FA aktif); konsol **terkunci kembali** setiap dialog ditutup (`admin:db_lock`).
+  2. **Masking kolom sensitif default-aktif** — kolom password/token/hash/secret/salt/vapid dkk. tampil `••••••••` di grid (toggle "Sembunyikan nilai sensitif" per sesi) sehingga **screenshot tidak membocorkan nilai**.
+  3. **Anti-injection identifier** — nama tabel divalidasi ke `sqlite_master`, kolom ke `PRAGMA table_info`, identifier di-quote, nilai via prepared statement, filter WHERE dibatasi satu ekspresi.
+  4. **Cadangan fisik otomatis** — sebelum **tulisan pertama** tiap sesi buka, `VACUUM INTO backups/dbconsole-<stamp>.db` dibuat (retensi 10); tombol "Cadangkan" tersedia kapan saja.
+  5. **Audit total** — unlock (termasuk gagal), lock, backup, edit sel, insert, delete, dan SQL semua masuk `audit_log`.
+- Sisi non-admin: semua event `admin:db_*` menolak dengan `UNAUTHORIZED` (harus admin:auth) lalu `DB_LOCKED` (harus unlock); UI konsol hanya ada di panel admin.
+- Objek internal SQLite (`sqlite_%`) tidak ditampilkan; view ditandai baca-saja (edit via SQL).
+
+**E2E terverifikasi:** uji keamanan socket **22/22** (non-admin ditolak, DB_LOCKED default, password salah ditolak, injection tabel/kolom ditolak, siklus CREATE→INSERT→SELECT→edit→DELETE→DROP→lock mulus, berkas backup fisik terbentuk); browser: gerbang step-up → skema 15 objek/79 MB → masking users 20 sel •••• default, toggle reveal 0↔20 → CREATE+INSERT multi-statement + auto-backup tercatat → edit sel live di grid → DROP bersih → "Kunci konsol" kembali minta password; sisi user (UjiV68) tanpa menu/konsol; audit_log memuat seluruh jejak. Verify **512/512**; lint 0/0.
+
+**File kunci:** `mini-services/chat-service/index.ts` (helper + 8 handler admin:db_* + bump v69), `src/components/chat/db-console.tsx` (BARU), `src/components/chat/AdminPanel.tsx` (menu + mount), `src/lib/chat-types.ts` (8 tipe + katalog), `src/instrumentation.ts` (rescue-v69), `scripts/verify-integrity.sh` (+18 cek; 2 cek literal v68 → penanda historis).

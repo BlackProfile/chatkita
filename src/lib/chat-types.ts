@@ -1119,6 +1119,78 @@ export interface VacuumAck {
   after: { dbBytes: number; walBytes: number };
 }
 
+/* v69 — konsol database admin (edit DB penuh, anti-bocor berlapis). */
+
+/** Satu tabel/view untuk konsol DB (rows = -1 bila gagal dihitung). */
+export interface DbTableInfo {
+  name: string;
+  type: string;
+  ddl: string;
+  rows: number;
+}
+
+/** Ack `admin:db_schema` — daftar tabel + ukuran DB + daftar backup. */
+export interface DbSchemaAck {
+  ok: true;
+  tables: DbTableInfo[];
+  dbBytes: number;
+  backups: string[];
+}
+
+/** Kolom hasil PRAGMA table_info (dflt = default value). */
+export interface DbColumnInfo {
+  name: string;
+  type: string;
+  notnull: number;
+  dflt: string | null;
+  pk: number;
+}
+
+/** Ack `admin:db_rows` — satu halaman 60 baris (rows berisi __rid saat editable). */
+export interface DbRowsAck {
+  ok: true;
+  table: string;
+  page: number;
+  total: number;
+  editable: boolean;
+  columns: DbColumnInfo[];
+  rows: Record<string, unknown>[];
+}
+
+/** Ack tulis generik konsol DB (cell_update / row_insert / row_delete). */
+export interface DbWriteAck {
+  ok: true;
+  changes?: number;
+  lastInsertRowid?: number;
+  /** Nama berkas cadangan otomatis yang dibuat sebelum tulisan pertama. */
+  autoBackup?: string;
+}
+
+/** Ack `admin:db_sql` — hasil SELECT (rows) atau eksekusi (exec). */
+export interface DbSqlAck {
+  ok: true;
+  kind: "rows" | "exec";
+  columns?: string[];
+  rows?: Record<string, unknown>[];
+  truncated?: boolean;
+  changes?: number;
+  lastInsertRowid?: number;
+  executed: number;
+  autoBackup?: string;
+}
+
+/** Ack `admin:db_backup` — berkas cadangan manual yang baru dibuat. */
+export interface DbBackupAck {
+  ok: true;
+  file: string;
+  backups: string[];
+}
+
+/** Ack `admin:db_unlock` / `admin:db_lock` — step-up konsol DB. */
+export interface DbUnlockAck {
+  ok: true;
+}
+
 /* v13 — dashboard: runtime info, audit tail, manual cleanup. */
 
 /** Runtime snapshot returned by `admin:system` (Sistem tab). */
@@ -2185,3 +2257,27 @@ export interface ConversationResetPayload {
 // conversation:reset   ConversationResetPayload (v11) — bulk tombstone after
 //                      admin:reset_conversation; clients clear the message
 //                      list for that conversation.
+//
+// ---- v69 (admin konsol database — step-up password, anti-bocor) ----
+//
+// admin:db_unlock      { password, totp? } → DbUnlockAck | ChatErrorAck
+//                      Step-up: password admin LAGI (rate-limit sendiri,
+//                      TOTP ikut bila 2FA aktif) → socket.data.dbUnlocked.
+// admin:db_lock        {} → DbUnlockAck | ChatErrorAck  (kunci kembali)
+// admin:db_schema      {} → DbSchemaAck | ChatErrorAck
+//                      Tabel+view (sqlite_% disembunyikan), jumlah baris,
+//                      ukuran DB (db+wal), daftar backup dbconsole-*.db.
+// admin:db_rows        { table, page, where? } → DbRowsAck | ChatErrorAck
+//                      Halaman 60 baris per rowid; WHERE teks-bebas 1
+//                      ekspresi; table divalidasi ke sqlite_master.
+// admin:db_cell_update { table, rid, column, value?, isNull? }
+//                      → DbWriteAck | ChatErrorAck
+// admin:db_row_insert  { table, values: Record<col, string|null> }
+//                      → DbWriteAck | ChatErrorAck (INTEGER PK otomatis)
+// admin:db_row_delete  { table, rid } → DbWriteAck | ChatErrorAck
+// admin:db_sql         { sql } → DbSqlAck | ChatErrorAck
+//                      SELECT/PRAGMA/WITH/EXPLAIN → rows (≤400, truncated);
+//                      lainnya dieksekusi (multi-statement aman-string).
+// admin:db_backup      {} → DbBackupAck | ChatErrorAck
+//                      VACUUM INTO backups/dbconsole-<stamp>.db (retensi 10).
+//                      Semua tulisan pertama tiap sesi → backup otomatis.

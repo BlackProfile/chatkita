@@ -13,6 +13,7 @@ import {
   ChevronUp,
   Clock,
   DatabaseBackup,
+  DatabaseZap,
   Eye,
   EyeOff,
   Film,
@@ -90,6 +91,7 @@ import {
   type MediaMetaTarget,
 } from "@/components/chat/media-meta-dialog";
 import { TypingDots } from "@/components/chat/TypingDots";
+import { DbConsole } from "@/components/chat/db-console";
 import { UserManager } from "@/components/chat/user-manager";
 import {
   UserCheatDialog,
@@ -415,6 +417,8 @@ export function AdminPanel() {
 
   // v11 — intelijen & moderasi + sinyal palsu
   const [umOpen, setUmOpen] = useState(false);
+  /* v69 — konsol database (akses penuh SQLite, step-up password). */
+  const [dbConsoleOpen, setDbConsoleOpen] = useState(false);
   const [umTarget, setUmTarget] = useState<string | null>(null);
   const [forensicsOpen, setForensicsOpen] = useState(false);
   const [msgSearchOpen, setMsgSearchOpen] = useState(false);
@@ -2625,6 +2629,11 @@ export function AdminPanel() {
                         <DatabaseBackup className="mr-2 size-4" aria-hidden="true" />
                         Kompres VACUUM
                       </DropdownMenuItem>
+                      {/* v69 — konsol database: edit DB penuh (step-up password). */}
+                      <DropdownMenuItem onClick={() => setDbConsoleOpen(true)}>
+                        <DatabaseZap className="mr-2 size-4" aria-hidden="true" />
+                        Konsol database
+                      </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuLabel>Intelijen &amp; moderasi</DropdownMenuLabel>
                       <DropdownMenuItem
@@ -4299,6 +4308,16 @@ export function AdminPanel() {
         initialUserId={umTarget}
         onNotice={showMenuNotice}
       />
+
+      {/* v69 — Konsol database (edit DB penuh; step-up password + masking). */}
+      {dbConsoleOpen ? (
+        <DbConsole
+          open
+          onOpenChange={setDbConsoleOpen}
+          socket={socketRef.current}
+          onNotice={showMenuNotice}
+        />
+      ) : null}
 
       {/* v38/v46 — pusat cheat PER-USER dari toolbar percakapan */}
       <UserCheatDialog

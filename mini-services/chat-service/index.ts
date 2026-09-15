@@ -262,7 +262,19 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * ada → lanjut tanpa password (audit 'sesi dipulihkan'); tidak ada →
  * PASSWORD_REQUIRED sekali untuk mengikat. Pencabutan admin (force-logout/
  * unbind) tetap melepas pasangan → password diminta lagi. */
-const SERVICE_VERSION = 'v68'
+/* v69 (Task 85) — KONSOL DATABASE: admin mengedit database lengkap langsung
+ * dari aplikasi (browse tabel, edit sel, tambah/hapus baris, SQL bebas).
+ * Anti-bocor berlapis: (1) admin:auth WAJIB dulu (adminGuard); (2) STEP-UP —
+ * password admin diminta lagi khusus untuk membuka konsol (admin:db_unlock,
+ * rate-limit sendiri + TOTP ikut menuntut bila 2FA aktif) dan TERKUNCI lagi
+ * tiap dialog ditutup; (3) identifier tabel/kolom divalidasi ke sqlite_master
+ * & PRAGMA table_info (anti-injection identifier), nilai via prepared stmt;
+ * (4) cadangan fisik otomatis (VACUUM INTO backups/dbconsole-*.db) sebelum
+ * tulisan pertama tiap sesi buka + tombol backup manual, retensi 10 berkas;
+ * (5) SEMUA perubahan masuk audit_log (db_unlock/db_cell/db_insert/db_delete/
+ * db_sql/db_backup); (6) masking kolom sensitif di klien (password/token/
+ * hash/secret → ••••) default AKTIF agar screenshot tidak membocorkannya. */
+const SERVICE_VERSION = 'v69'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -2835,6 +2847,151 @@ const runDailyBackup = () => {
 }
 setInterval(runDailyBackup, 10 * 60_000)
 setTimeout(runDailyBackup, 20_000)
+
+/* ------------------------------------------------------------------ */
+/* v69 — Konsol database: helper level modul (backup, validasi, split)  */
+/* ------------------------------------------------------------------ */
+
+/** Rate-limit step-up unlock konsol DB (jendela global 60 dtk + per-socket). */
+const DB_UNLOCK_WINDOW_MS = 60_000
+const DB_UNLOCK_MAX = 5
+const dbUnlockFails = { windowStart: 0, count: 0 }
+const dbUnlockSocketFails = new Map<string, number>()
+
+/** Berkas cadangan buatan konsol (prefix dbconsole-, retensi 10). */
+const DBCONSOLE_KEEP = 10
+const dbConsoleBackups = (): string[] => {
+  try {
+    return readdirSync(BACKUP_DIR)
+      .filter((f) => f.startsWith('dbconsole-') && f.endsWith('.db'))
+      .sort()
+      .reverse()
+  } catch {
+    return []
+  }
+}
+
+/** Buat cadangan fisik DB via VACUUM INTO (aman saat service berjalan). */
+const dbConsoleBackup = (): string => {
+  mkdirSync(BACKUP_DIR, { recursive: true })
+  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+  let file = join(BACKUP_DIR, `dbconsole-${stamp}.db`)
+  for (let i = 1; existsSync(file); i++) file = join(BACKUP_DIR, `dbconsole-${stamp}-${i}.db`)
+  db.run(`VACUUM INTO '${file}'`)
+  const files = readdirSync(BACKUP_DIR)
+    .filter((f) => f.startsWith('dbconsole-') && f.endsWith('.db'))
+    .sort()
+  while (files.length > DBCONSOLE_KEEP) {
+    const old = files.shift()
+    if (old) {
+      try {
+        unlinkSync(join(BACKUP_DIR, old))
+      } catch {}
+    }
+  }
+  return file.split('/').pop() ?? file
+}
+
+/** Daftar tabel+view milik aplikasi (sqlite internal disembunyikan). */
+const dbConsoleTables = (): { name: string; type: string; ddl: string }[] =>
+  db
+    .query(
+      "SELECT name, type, COALESCE(sql, '') AS ddl FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    )
+    .all() as { name: string; type: string; ddl: string }[]
+
+/** Kutip identifier (tabel/kolom) → anti-injection pada bagian statis SQL. */
+const qId = (name: string): string => `"${name.replace(/"/g, '""')}"`
+
+/** Nama tabel valid menurut sqlite_master (bukan teks bebas dari klien). */
+const assertDbTable = (raw: unknown): string => {
+  const name = typeof raw === 'string' ? raw.trim() : ''
+  if (!name || name.length > 64) throw new Error('INVALID_TABLE')
+  if (!dbConsoleTables().some((t) => t.name === name)) throw new Error('INVALID_TABLE')
+  return name
+}
+
+/** Kolom sah menurut PRAGMA table_info — UPDATE/INSERT hanya via daftar ini. */
+const dbConsoleColumns = (
+  table: string
+): { name: string; type: string; notnull: number; dflt: string | null; pk: number }[] =>
+  (db.query(`PRAGMA table_info(${qId(table)})`).all() as {
+    name: string
+    type: string
+    notnull: number
+    dflt_value: string | null
+    pk: number
+  }[]).map((c) => ({ name: c.name, type: c.type, notnull: c.notnull, dflt: c.dflt_value, pk: c.pk }))
+
+/** Tabel bisa diedit per-baris hanya bila punya rowid (bukan view). */
+const dbConsoleHasRowid = (table: string): boolean => {
+  try {
+    db.query(`SELECT rowid AS __rid FROM ${qId(table)} LIMIT 1`).get()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Pecah SQL multi-statement dengan hormati string & komentar. */
+const splitSqlStatements = (sql: string): string[] => {
+  const out: string[] = []
+  let cur = ''
+  let quote: string | null = null
+  let lineComment = false
+  let blockComment = false
+  for (let i = 0; i < sql.length; i++) {
+    const c = sql[i]
+    const next = sql[i + 1]
+    if (lineComment) {
+      cur += c
+      if (c === '\n') lineComment = false
+      continue
+    }
+    if (blockComment) {
+      cur += c
+      if (c === '*' && next === '/') {
+        cur += next
+        i++
+        blockComment = false
+      }
+      continue
+    }
+    if (!quote && c === '-' && next === '-') {
+      lineComment = true
+      cur += c
+      continue
+    }
+    if (!quote && c === '/' && next === '*') {
+      blockComment = true
+      cur += c
+      continue
+    }
+    if (quote) {
+      cur += c
+      if (c === quote) {
+        if (next === quote && (quote === "'" || quote === '"')) {
+          cur += next
+          i++
+        } else quote = null
+      }
+      continue
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      quote = c
+      cur += c
+      continue
+    }
+    if (c === ';') {
+      if (cur.trim()) out.push(cur.trim())
+      cur = ''
+      continue
+    }
+    cur += c
+  }
+  if (cur.trim()) out.push(cur.trim())
+  return out
+}
 
 /* ------------------------------------------------------------------ */
 /* v8 — retention sweeper (media aging) + SQLite housekeeping          */
@@ -7294,6 +7451,343 @@ io.on('connection', (socket) => {
     // v11 — audit trail.
     audit('vacuum', `db ${before.dbBytes} → ${after.dbBytes} bytes`)
     ack({ ok: true, before, after })
+  }))
+
+  /* ---------------------------------------------------------------- */
+  /* v69 — KONSOL DATABASE (edit DB penuh, anti-bocor berlapis)        */
+  /* ---------------------------------------------------------------- */
+
+  /** Konsol butuh adminGuard + step-up unlock (socket.data.dbUnlocked). */
+  const dbGuard = (ack: AckFn): boolean => {
+    if (!adminGuard(ack)) return false
+    if (socket.data.dbUnlocked !== true) {
+      ack({ ok: false, error: 'DB_LOCKED' })
+      return false
+    }
+    return true
+  }
+
+  /** Cadangan otomatis SEBELUM penulisan pertama tiap sesi buka. */
+  const ensureDbConsoleBackup = (sock: IoSocket): string | undefined => {
+    if (sock.data.dbBackupMade) return undefined
+    const file = dbConsoleBackup()
+    sock.data.dbBackupMade = file
+    audit('db_auto_backup', `cadangan otomatis konsol DB → ${file}`)
+    return file
+  }
+
+  /** Terjemahan error SQLite → kode ack + detail singkat. */
+  const dbConsoleError = (err: unknown): { error: string; detail?: string } => {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg === 'INVALID_TABLE') return { error: 'INVALID_TABLE' }
+    return { error: 'DB_ERROR', detail: msg.slice(0, 300) }
+  }
+
+  /**
+   * v69 — step-up unlock: password admin diminta LAGI khusus untuk konsol DB
+   * (socket yang sama tetap harus sudah lewat admin:auth). Rate-limit sendiri
+   * + TOTP ikut dituntut bila 2FA aktif (konsisten admin:auth). Terkunci lagi
+   * saat dialog ditutup (admin:db_lock) — jejak unlock/lock masuk audit.
+   */
+  socket.on('admin:db_unlock', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const password = typeof data?.password === 'string' ? data.password : ''
+    const nowMs = Date.now()
+    if (nowMs - dbUnlockFails.windowStart > DB_UNLOCK_WINDOW_MS) {
+      dbUnlockFails.windowStart = nowMs
+      dbUnlockFails.count = 0
+    }
+    const socketFails = dbUnlockSocketFails.get(socket.id) ?? 0
+    if (dbUnlockFails.count >= DB_UNLOCK_MAX || socketFails >= DB_UNLOCK_MAX) {
+      console.warn(`DB console unlock rate-limited (socket ${socket.id})`)
+      ack({ ok: false, error: 'RATE_LIMITED' })
+      return
+    }
+    if (!password) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const storedHash = getAdminPasswordHash()
+    const check = storedHash
+      ? Bun.password.verify(password, storedHash)
+      : Promise.resolve(password === (process.env.ADMIN_PASSWORD || 'admin123'))
+    void check.then((match) => {
+      if (!match) {
+        dbUnlockFails.count += 1
+        dbUnlockSocketFails.set(socket.id, socketFails + 1)
+        if (dbUnlockSocketFails.size > 1000) dbUnlockSocketFails.clear()
+        audit('db_unlock_gagal', 'percobaan buka konsol DB ditolak (password salah)')
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      dbUnlockFails.count = 0
+      dbUnlockSocketFails.delete(socket.id)
+      const totpEnabled = getSetting('totp_enabled') === '1'
+      const totpSecret = getSetting('totp_secret') ?? ''
+      if (totpEnabled && totpSecret) {
+        const totp = typeof data?.totp === 'string' ? data.totp.trim() : ''
+        if (!totp) {
+          ack({ ok: false, error: 'TOTP_REQUIRED' })
+          return
+        }
+        if (!totpVerify(totpSecret, totp)) {
+          ack({ ok: false, error: 'INVALID_TOTP' })
+          return
+        }
+      }
+      socket.data.dbUnlocked = true
+      socket.data.dbBackupMade = undefined
+      audit('db_unlock', 'konsol database dibuka (step-up password)')
+      ack({ ok: true })
+    })
+  }))
+
+  /** v69 — kunci kembali konsol (dipanggil klien saat dialog ditutup). */
+  socket.on('admin:db_lock', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    if (socket.data.dbUnlocked === true) audit('db_lock', 'konsol database dikunci')
+    socket.data.dbUnlocked = false
+    socket.data.dbBackupMade = undefined
+    ack({ ok: true })
+  }))
+
+  /** v69 — skema: daftar tabel+view, jumlah baris, ukuran DB, daftar backup. */
+  socket.on('admin:db_schema', handler(socket, (_data, ack) => {
+    if (!dbGuard(ack)) return
+    const tables = dbConsoleTables().map((t) => {
+      let rows = -1
+      try {
+        rows = Number((db.query(`SELECT COUNT(*) AS n FROM ${qId(t.name)}`).get() as { n: number }).n)
+      } catch {
+        /* view rusak dsb. — biarkan -1 */
+      }
+      return { ...t, rows }
+    })
+    const sizeOf = (p: string): number => {
+      try {
+        return statSync(p).size
+      } catch {
+        return 0
+      }
+    }
+    ack({
+      ok: true,
+      tables,
+      dbBytes: sizeOf(DB_PATH) + sizeOf(`${DB_PATH}-wal`),
+      backups: dbConsoleBackups(),
+    })
+  }))
+
+  /** v69 — baris satu tabel: kolom sah, total, halaman 60 baris (rowid). */
+  socket.on('admin:db_rows', handler(socket, (data, ack) => {
+    if (!dbGuard(ack)) return
+    try {
+      const table = assertDbTable(data?.table)
+      const page = Math.max(0, Math.min(10_000, Math.floor(Number(data?.page) || 0)))
+      const where = typeof data?.where === 'string' ? data.where.trim().slice(0, 500) : ''
+      if (where && /;\s*\S/.test(where)) {
+        ack({ ok: false, error: 'DB_ERROR', detail: 'Filter WHERE hanya satu ekspresi (tanpa ;)' })
+        return
+      }
+      const whereSql = where ? ` WHERE (${where})` : ''
+      const editable = dbConsoleHasRowid(table)
+      const total = Number(
+        (db.query(`SELECT COUNT(*) AS n FROM ${qId(table)}${whereSql}`).get() as { n: number }).n
+      )
+      const rows = editable
+        ? db
+            .query(
+              `SELECT rowid AS __rid, * FROM ${qId(table)}${whereSql} ORDER BY rowid LIMIT 60 OFFSET ${page * 60}`
+            )
+            .all()
+        : db.query(`SELECT * FROM ${qId(table)}${whereSql} LIMIT 60 OFFSET ${page * 60}`).all()
+      ack({
+        ok: true,
+        table,
+        page,
+        total,
+        editable,
+        columns: dbConsoleColumns(table),
+        rows: rows as Record<string, unknown>[],
+      })
+    } catch (err) {
+      ack({ ok: false, ...dbConsoleError(err) })
+    }
+  }))
+
+  /** v69 — ubah satu sel (per rowid, kolom tervalidasi, nilai prepared stmt). */
+  socket.on('admin:db_cell_update', handler(socket, (data, ack) => {
+    if (!dbGuard(ack)) return
+    try {
+      const table = assertDbTable(data?.table)
+      if (!dbConsoleHasRowid(table)) {
+        ack({ ok: false, error: 'NOT_EDITABLE' })
+        return
+      }
+      const col = typeof data?.column === 'string' ? data.column : ''
+      if (!dbConsoleColumns(table).some((c) => c.name === col)) {
+        ack({ ok: false, error: 'INVALID_COLUMN' })
+        return
+      }
+      const rid = Number(data?.rid)
+      if (!Number.isFinite(rid) || rid < 0) {
+        ack({ ok: false, error: 'INVALID_ROW' })
+        return
+      }
+      let value: string | null = null
+      if (data?.isNull !== true) {
+        if (data?.value === null || data?.value === undefined) value = null
+        else {
+          value = String(data.value)
+          if (value.length > 100_000) {
+            ack({ ok: false, error: 'VALUE_TOO_LARGE' })
+            return
+          }
+        }
+      }
+      const autoBackup = ensureDbConsoleBackup(socket)
+      db.run(`UPDATE ${qId(table)} SET ${qId(col)} = ? WHERE rowid = ?`, [value, rid])
+      audit(
+        'db_cell',
+        `UPDATE ${table}.${col} rowid=${rid} → ${value === null ? 'NULL' : JSON.stringify(value).slice(0, 120)}`
+      )
+      ack({ ok: true, autoBackup })
+    } catch (err) {
+      ack({ ok: false, ...dbConsoleError(err) })
+    }
+  }))
+
+  /** v69 — sisip baris baru (kolom INTEGER PRIMARY KEY diisi otomatis). */
+  socket.on('admin:db_row_insert', handler(socket, (data, ack) => {
+    if (!dbGuard(ack)) return
+    try {
+      const table = assertDbTable(data?.table)
+      if (!dbConsoleHasRowid(table)) {
+        ack({ ok: false, error: 'NOT_EDITABLE' })
+        return
+      }
+      const values = ((data?.values ?? {}) as Record<string, unknown>) ?? {}
+      const names: string[] = []
+      const params: (string | null)[] = []
+      for (const c of dbConsoleColumns(table)) {
+        if (c.pk && /int/i.test(c.type)) continue // rowid alias → auto
+        if (!Object.prototype.hasOwnProperty.call(values, c.name)) continue
+        const v = values[c.name]
+        names.push(c.name)
+        params.push(v === null || v === undefined ? null : String(v))
+      }
+      if (names.length === 0) {
+        ack({ ok: false, error: 'NO_COLUMNS' })
+        return
+      }
+      const autoBackup = ensureDbConsoleBackup(socket)
+      const res = db.run(
+        `INSERT INTO ${qId(table)} (${names.map(qId).join(', ')}) VALUES (${names.map(() => '?').join(', ')})`,
+        params
+      )
+      audit('db_insert', `INSERT ${table} (${names.join(', ').slice(0, 200)}) → rowid ${res.lastInsertRowid}`)
+      ack({ ok: true, lastInsertRowid: Number(res.lastInsertRowid), autoBackup })
+    } catch (err) {
+      ack({ ok: false, ...dbConsoleError(err) })
+    }
+  }))
+
+  /** v69 — hapus satu baris per rowid. */
+  socket.on('admin:db_row_delete', handler(socket, (data, ack) => {
+    if (!dbGuard(ack)) return
+    try {
+      const table = assertDbTable(data?.table)
+      if (!dbConsoleHasRowid(table)) {
+        ack({ ok: false, error: 'NOT_EDITABLE' })
+        return
+      }
+      const rid = Number(data?.rid)
+      if (!Number.isFinite(rid) || rid < 0) {
+        ack({ ok: false, error: 'INVALID_ROW' })
+        return
+      }
+      const autoBackup = ensureDbConsoleBackup(socket)
+      const res = db.run(`DELETE FROM ${qId(table)} WHERE rowid = ?`, [rid])
+      audit('db_delete', `DELETE ${table} rowid=${rid} (changes=${res.changes})`)
+      ack({ ok: true, changes: res.changes, autoBackup })
+    } catch (err) {
+      ack({ ok: false, ...dbConsoleError(err) })
+    }
+  }))
+
+  /**
+   * v69 — SQL bebas: SELECT/PRAGMA/WITH/EXPLAIN → hasil baris (≤400);
+   * lainnya dieksekusi (multi-statement dipecah dengan hormati string &
+   * komentar). Cadangan otomatis dibuat bila ada statement penulisan.
+   */
+  socket.on('admin:db_sql', handler(socket, (data, ack) => {
+    if (!dbGuard(ack)) return
+    const sql = typeof data?.sql === 'string' ? data.sql.trim() : ''
+    if (!sql) {
+      ack({ ok: false, error: 'EMPTY_SQL' })
+      return
+    }
+    if (sql.length > 20_000) {
+      ack({ ok: false, error: 'SQL_TOO_LARGE' })
+      return
+    }
+    try {
+      const statements = splitSqlStatements(sql)
+      if (statements.length === 0) {
+        ack({ ok: false, error: 'EMPTY_SQL' })
+        return
+      }
+      const isRead = (st: string) => /^(select|pragma|with|explain)\b/i.test(st)
+      const autoBackup = statements.some((st) => !isRead(st)) ? ensureDbConsoleBackup(socket) : undefined
+      let lastRows: Record<string, unknown>[] | null = null
+      let lastChanges = 0
+      let lastInsertRowid = 0
+      for (const st of statements) {
+        if (isRead(st)) {
+          lastRows = db.query(st).all() as Record<string, unknown>[]
+        } else {
+          const res = db.run(st)
+          lastChanges = res.changes
+          lastInsertRowid = Number(res.lastInsertRowid)
+          lastRows = null
+        }
+      }
+      if (lastRows) {
+        const truncated = lastRows.length > 400
+        const rows = truncated ? lastRows.slice(0, 400) : lastRows
+        const columns = rows.length > 0 ? Object.keys(rows[0]) : []
+        audit(
+          'db_sql',
+          `SELECT (${rows.length} baris${truncated ? ', dipotong 400' : ''}) — ${sql.slice(0, 200)}`
+        )
+        ack({ ok: true, kind: 'rows', columns, rows, truncated, executed: statements.length, autoBackup })
+      } else {
+        audit('db_sql', `exec changes=${lastChanges} — ${sql.slice(0, 200)}`)
+        ack({
+          ok: true,
+          kind: 'exec',
+          changes: lastChanges,
+          lastInsertRowid,
+          executed: statements.length,
+          autoBackup,
+        })
+      }
+    } catch (err) {
+      ack({ ok: false, ...dbConsoleError(err) })
+    }
+  }))
+
+  /** v69 — backup manual on-demand (retensi 10 berkas dbconsole-*.db). */
+  socket.on('admin:db_backup', handler(socket, (_data, ack) => {
+    if (!dbGuard(ack)) return
+    try {
+      const file = dbConsoleBackup()
+      socket.data.dbBackupMade = file
+      audit('db_backup', `cadangan manual konsol DB → ${file}`)
+      ack({ ok: true, file, backups: dbConsoleBackups() })
+    } catch (err) {
+      ack({ ok: false, ...dbConsoleError(err) })
+    }
   }))
 
   /**
