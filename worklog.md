@@ -1678,3 +1678,20 @@ Work Log:
 Stage Summary:
 - v66: paksa-logout & penghapusan akun kini REAL-TIME — perangkat user langsung mendarat di form login dengan pesan jelas; akun dihapus → localStorage bersih total (sesi + nama terakhir) sehingga perangkat siap dipakai akun lain tanpa jejak akun mati; lubang lama account_delete (socket dibiarkan hidup) tertutup; bug reconnect pasca server-disconnect (warisan v40) ditemukan & diperbaiki.
 - Commit + tag rescue-v66.
+
+---
+Task ID: 83
+Agent: Z.ai Code (utama)
+Task: "ketika masih dichat akun user udah kehapus jika dihapus admin, tapi jika user sudah keluar akunnya malah ga kehapus. bagusnya gimana" (+ screenshot kartu "jawat — Ketuk untuk lanjut" basi) — bersihkan sisa sesi perangkat offline (v67).
+
+Work Log:
+- Investigasi: penghapusan akun di server SUDAH selalu tuntas (admin:user_delete v29/v66 menghapus users/messages/conversations/devices apapun status koneksi); yang tersisa hanyalah localStorage `chatkita:last-name` di perangkat yang offline saat penghapusan — session:revoked mustahil sampai ke socket yang tidak ada. Screenshot user = kartu lanjut basi.
+- Keputusan desain (jawaban "bagusnya gimana"): tidak ada cara menghapus localStorage jarak jauh tanpa koneksi → praktik standar Telegram Web dkk: klien memvalidasi sesi tersimpan tiap kali layar login muncul. Reuse `public:check_name` (v28) — TANPA event baru; server hanya bump versi.
+- Klien (13 edit): state `goneAccount` + `purgeLastAccount` (useCallback stabil; buang chatkita:last-name + chatkita:user, reset form); 3 titik validasi — (1) efek [connected, me, lastName] saat login screen, (2) handleAuth `override && REGISTRATION_CLOSED` (tap kartu akun mati), (3) applyAuthAck gagal memakai `attemptedName` (diteruskan dari magic-link & restore) === readLastName() → check_name → purge alih-alih "Sesi berakhir"; catatan amber "Akun “X” telah dihapus oleh admin — silakan masuk dengan akun lain."; setGoneAccount(null) di 2 jalur auth sukses + handleLogout; deps socket effect +purgeLastAccount (stabil — aman).
+- Prosedur wajib: pkill → 3003 BEBAS → edit index.ts (bump v67 + blok komentar; typo "perangkatOffline" diperbaiki) → nohup → banner "v67 listening" ✓.
+- verify: 2 cek literal v66 dikonversi historis ("const revokeSessionsOf = (userId: string", "v66 — reset total state TANPA reload") + seksi v67 9 cek → **487/487**; lint 0/0.
+- E2E agent-browser 2 sesi (gateway :81): t83a UjiV49 login→keluar→kartu+lastName ada (menggambar ulang skenario screenshot user); t83b admin Dashboard→Manajemen pengguna→Kendali akun→Hapus akun permanen (dialog "Ya, hapus akun") → DB: UjiV49 lenyap; t83a RELOAD → kartu HILANG + catatan amber + lastName/session NULL + form kosong (screenshot /tmp/t83a-purge-ok.png); t83b buat tautan masuk UjiBrowser59 (Dashboard→Pengguna→Buat tautan) → t83a ?masuk=ckl_… → auto-login, chatkita:user = UjiBrowser59 (screenshot /tmp/t83a-login-akun-lain.png); regresi v66: paksa-logout UjiBrowser59 online (dialog "Ya, paksa logout") → "Sesi diakhiri oleh admin", kartu lanjut DIPERTAHANKAN, session key null, log "[force-logout] 1 perangkat dilepas, 1 socket diputus". dev.log bersih.
+
+Stage Summary:
+- v67: keluhan user tuntas — akun dihapus admin saat perangkat offline kini ikut "terhapus" dari sisi perangkat: begitu perangkat online lagi, kartu "Ketuk untuk lanjut" akun mati dibuang otomatis + catatan jelas, form bersih, langsung bisa login akun lain (terbukti via tautan masuk). Jalur v66 (paksa-logout real-time) teruji utuh. Server tanpa perubahan fungsional.
+- Commit + tag rescue-v67.

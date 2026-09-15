@@ -601,6 +601,9 @@ export function Messenger() {
   /* v51 — anti-dupe nama: saran nama alternatif bebas dari server (mis.
    * "kevin (2)") saat nama yang diketik ternyata milik akun orang lain. */
   const [nameSuggestion, setNameSuggestion] = useState<string | null>(null);
+  /* v67 — nama akun yang ternyata sudah dihapus admin (kartu lanjut / sesi
+   * tersimpan menunjuk akun mati). Terisi → form login menampilkan catatan. */
+  const [goneAccount, setGoneAccount] = useState<string | null>(null);
   /* v52 — dialog kirim kontak + pilihan polling saya. */
   const [contactOpen, setContactOpen] = useState(false);
   const [contactName, setContactName] = useState("");
@@ -726,6 +729,26 @@ export function Messenger() {
   // v28 — penanda urutan respons cek nama (buang respons kedaluwarsa).
   const nameCheckSeqRef = useRef(0);
 
+  /* v67 — buang sisa sesi akun yang sudah tidak ada di server (dihapus
+   * admin saat perangkat ini offline, sehingga event session:revoked tak
+   * pernah sampai). Membersihkan kartu "Ketuk untuk lanjut" + sesi mati
+   * dari localStorage, lalu menampilkan catatan supaya pengguna bisa
+   * langsung masuk dengan akun lain tanpa kebingungan. */
+  const purgeLastAccount = useCallback((goneName: string) => {
+    try {
+      window.localStorage.removeItem(CHAT_LAST_NAME_KEY);
+      window.localStorage.removeItem(CHAT_SESSION_KEY);
+    } catch {
+      /* abaikan */
+    }
+    setLastName("");
+    setLoginMode("other");
+    setName("");
+    setPassword("");
+    setInviteCode("");
+    setGoneAccount(goneName);
+  }, []);
+
   const recorder = useVoiceRecorder();
 
   // v8 — mode hemat data dibaca sekali saat mount (localStorage).
@@ -791,12 +814,13 @@ export function Messenger() {
        * sesi tersimpan (handler yang sama di bawah). */
       const magic = readMagicToken();
       if (magic) window.history.replaceState({}, "", window.location.pathname);
-      const applyAuthAck = (res: AckOf<UserAuthAck>) => {
+      const applyAuthAck = (res: AckOf<UserAuthAck>, attemptedName?: string) => {
           if (res.ok) {
             const next = { userId: res.user.id, name: res.user.name };
             window.localStorage.setItem(CHAT_SESSION_KEY, JSON.stringify(next));
             saveLastName(res.user.name);
             setLastName(res.user.name);
+            setGoneAccount(null); // v67 — catatan akun-mati tak relevan setelah berhasil masuk.
             meRef.current = next;
             conversationIdRef.current = res.conversationId;
             setMe(next);
@@ -827,11 +851,37 @@ export function Messenger() {
             setConversationId(null);
             setPartner(null);
             setMessages([]);
-            setAuthError(
-              res.error === "NAME_RESERVED"
-                ? "Nama “Admin” tidak tersedia — coba nama lain."
-                : "Sesi berakhir. Silakan masuk kembali."
-            );
+            /* v67 — sesi tersimpan menunjuk akun yang sudah tidak ada
+             * (dihapus admin saat perangkat offline) → validasi ke server:
+             * benar hilang → bersihkan kartu lanjut + catatan spesifik,
+             * bukan "Sesi berakhir" yang membingungkan. */
+            const failedName =
+              attemptedName && attemptedName === readLastName()
+                ? attemptedName
+                : "";
+            if (failedName) {
+              socket.emit(
+                "public:check_name",
+                { name: failedName },
+                (chk: AckOf<PublicCheckNameAck>) => {
+                  if (chk.ok && !chk.exists) {
+                    purgeLastAccount(failedName);
+                    return;
+                  }
+                  setAuthError(
+                    res.error === "NAME_RESERVED"
+                      ? "Nama “Admin” tidak tersedia — coba nama lain."
+                      : "Sesi berakhir. Silakan masuk kembali."
+                  );
+                }
+              );
+            } else {
+              setAuthError(
+                res.error === "NAME_RESERVED"
+                  ? "Nama “Admin” tidak tersedia — coba nama lain."
+                  : "Sesi berakhir. Silakan masuk kembali."
+              );
+            }
           }
       };
       if (magic && !meRef.current) {
@@ -860,7 +910,7 @@ export function Messenger() {
             socket.emit(
               "user:auth",
               { name: lr.name, userId: lr.userId, deviceId: readDeviceId() },
-              applyAuthAck
+              (res: AckOf<UserAuthAck>) => applyAuthAck(res, lr.name)
             );
           }
         );
@@ -873,7 +923,7 @@ export function Messenger() {
       socket.emit(
         "user:auth",
         { name: current.name, userId: current.userId, deviceId: readDeviceId() },
-        applyAuthAck
+        (res: AckOf<UserAuthAck>) => applyAuthAck(res, current.name)
       );
     });
 
@@ -1177,7 +1227,7 @@ export function Messenger() {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [epoch, scrollToBottom]);
+  }, [epoch, scrollToBottom, purgeLastAccount]);
 
   /* Jump to latest whenever the conversation switches. */
   useEffect(() => {
@@ -1242,6 +1292,30 @@ export function Messenger() {
     return () => window.clearTimeout(timer);
   }, [name, connected]);
 
+  /* v67 — kartu "Ketuk untuk lanjut" bisa menunjuk akun yang sudah dihapus
+   * admin saat perangkat ini offline (tidak ada socket yang menerima
+   * session:revoked). Setiap layar login muncul dengan kartu lanjut,
+   * validasi sekali ke server (public:check_name v28): akun hilang →
+   * kartu dibuang otomatis + catatan, pengguna langsung bisa masuk
+   * dengan akun lain. */
+  useEffect(() => {
+    if (!connected || me || !lastName) return;
+    const socket = socketRef.current;
+    if (!socket) return;
+    let stale = false;
+    socket.emit(
+      "public:check_name",
+      { name: lastName },
+      (res: AckOf<PublicCheckNameAck>) => {
+        if (stale || !res.ok) return;
+        if (!res.exists) purgeLastAccount(lastName);
+      }
+    );
+    return () => {
+      stale = true;
+    };
+  }, [connected, me, lastName, purgeLastAccount]);
+
   /* ---------------------------------------------------------------- */
   /* Actions                                                           */
   /* ---------------------------------------------------------------- */
@@ -1292,6 +1366,7 @@ export function Messenger() {
             setPinEntry("");
             setPassword("");
             setInviteCode("");
+            setGoneAccount(null); // v67 — catatan akun-mati tak relevan setelah berhasil masuk.
             // v27 — akun lama tanpa password → wajib pasang lewat modal.
             if (res.mustSetPassword) setPwModalOpen(true);
             setConversationId(res.conversationId);
@@ -1345,6 +1420,14 @@ export function Messenger() {
                   ? `Akun “${trimmed}” belum pernah memasang password — hanya pemiliknya dari perangkat terdaftar yang bisa masuk. Chat pemilik akun tidak bisa dibuka orang lain. Daftar dengan nama lain, mis. “${res.suggestion ?? `${trimmed} (2)`}”.`
                   : `Akun “${trimmed}” belum pernah memasang password — hanya pemiliknya dari perangkat terdaftar yang bisa masuk. Pendaftaran akun baru sedang ditutup admin.`
               );
+              return;
+            }
+            // v67 — kartu lanjut ditekan untuk akun yang sudah dihapus admin:
+            // server memandang nama asing → REGISTRATION_CLOSED. Bersihkan
+            // sisa sesi + tampilkan catatan spesifik (bukan pesan "pendaftaran
+            // ditutup" yang menyesatkan).
+            if (override && res.error === "REGISTRATION_CLOSED") {
+              purgeLastAccount(trimmed);
               return;
             }
             setAuthError(
@@ -1409,6 +1492,7 @@ export function Messenger() {
     setPinHiddenId(null);
     setRestricted(null);
     setPushPublicKey(null);
+    setGoneAccount(null); // v67 — keluar sendiri bukan berarti akun mati.
     if (pendingImage) URL.revokeObjectURL(pendingImage.previewUrl);
     setPendingImage(null);
     if (pendingFile?.previewUrl) URL.revokeObjectURL(pendingFile.previewUrl);
@@ -2210,6 +2294,14 @@ export function Messenger() {
               <p className="mb-4 rounded-xl bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
                 🛠 Mode pemeliharaan aktif
                 {appSettings.maintenanceNote ? ` — ${appSettings.maintenanceNote}` : ""}
+              </p>
+            ) : null}
+            {/* v67 — kartu lanjut/sesi ternyata menunjuk akun yang sudah
+             * dihapus admin; sisa sesinya dibersihkan otomatis (purge). */}
+            {goneAccount ? (
+              <p className="mb-4 rounded-xl bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                Akun “{goneAccount}” telah dihapus oleh admin — silakan masuk
+                dengan akun lain.
               </p>
             ) : null}
             <form

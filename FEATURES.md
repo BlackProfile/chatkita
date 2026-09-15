@@ -686,3 +686,21 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser, 2 sesi):** UjiV49 online → admin Kendali akun → Paksa logout → user SEKETIKA kembali ke form (pesan merah "Sesi diakhiri oleh admin", `chatkita:user` null, nama-terakhir utuh, kartu lanjut aktif lagi, tap → minta password ikat perangkat); UjiV64 login di perangkat sama → admin Hapus akun permanen → user SEKETIKA keluar dengan pesan "Akun ini telah dihapus oleh admin — silakan masuk dengan akun lain.", `chatkita:user` & `chatkita:last-name` NULL, form kosong, socket tersambung ulang, langsung login UjiV49 pada form yang sama → sukses; DB: UjiV64 lenyap, UjiV49 utuh. Verify **479/479**; lint 0/0.
 
 **File kunci:** `mini-services/chat-service/index.ts` (revokeSessionsOf + 3 handler), `src/components/chat/Messenger.tsx` (handler reset real-time + reconnect), `src/lib/chat-types.ts` (SessionRevokedPayload), `src/instrumentation.ts` (rescue-v66), `scripts/verify-integrity.sh` (+13 cek; 2 cek literal v65 → penanda historis).
+
+---
+
+### v67 (Task 83) — Sisa sesi perangkat-offline ikut beres: kartu "Ketuk untuk lanjut" akun mati dibuang otomatis
+
+**Permintaan:** "ketika masih dichat akun user udah kehapus jika dihapus admin, tapi jika user sudah keluar akunnya malah ga kehapus. bagusnya gimana" (+ screenshot kartu "jawat — Ketuk untuk lanjut" yang masih muncul padahal akunnya sudah dihapus).
+
+**Diagnosis:** Penghapusan akun DI SERVER memang selalu tuntas (DB dibersihkan entah user online/offline — v29/v66). Yang "tidak kehapus" hanyalah **sisa localStorage di perangkat** (`chatkita:last-name`) penyebab kartu lanjut basi — karena `session:revoked` mustahil sampai ke perangkat yang tidak terhubung. Tak ada cara membersihkan localStorage jarak jauh tanpa koneksi; praktik standar (Telegram Web dkk): **klien memvalidasi sesi tersimpan setiap kali kembali**.
+
+**Perubahan v67 (klien-only + bump server):**
+- Helper `purgeLastAccount(goneName)`: buang `chatkita:last-name` + `chatkita:user`, reset form (nama/mode/password/kode), set catatan `goneAccount`.
+- Validasi 3 titik memakai `public:check_name` (v28, dipakai ulang — tanpa event baru): (1) **efek layar-login** — setiap login screen muncul dengan kartu lanjut & socket tersambung, nama divalidasi sekali; akun hilang → kartu dibuang otomatis; (2) **ketukan kartu** — tap kartu ke akun mati (server menolak `REGISTRATION_CLOSED`) → purge + catatan spesifik, bukan pesan "pendaftaran ditutup" yang menyesatkan; (3) **restore gagal** — sesi tersimpan menunjuk akun yang sudah dihapus → applyAuthAck memvalidasi via check_name sebelum menampilkan "Sesi berakhir" generik.
+- Catatan amber di form login: "Akun “X” telah dihapus oleh admin — silakan masuk dengan akun lain."
+- `goneAccount` dibersihkan saat auth sukses (2 jalur) & logout sukarela.
+
+**E2E terverifikasi (agent-browser, 2 sesi):** UjiV49 login → keluar sukarela → kartu lanjut + `chatkita:last-name` ada → admin hapus UjiV49 (DB: lenyap) → perangkat user di-RELOAD → kartu HILANG, catatan amber "Akun “UjiV49” telah dihapus oleh admin…", `chatkita:last-name` & `chatkita:user` NULL, form kosong → tautan masuk UjiBrowser59 dibuat admin → dibuka di perangkat sama → auto-login sukses (sesi = UjiBrowser59) → regresi v66: admin paksa-logout UjiBrowser59 online → user seketika ke form "Sesi diakhiri oleh admin", kartu lanjut DIPERTAHANKAN (desain 'forced'), log "[force-logout] 1 perangkat dilepas, 1 socket diputus". Verify **487/487**; lint 0/0.
+
+**File kunci:** `src/components/chat/Messenger.tsx` (purgeLastAccount + 3 titik validasi + catatan goneAccount), `mini-services/chat-service/index.ts` (bump v67 + komentar), `src/instrumentation.ts` (rescue-v67), `scripts/verify-integrity.sh` (+9 cek; 2 cek literal v66 → penanda historis).

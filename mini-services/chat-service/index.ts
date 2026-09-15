@@ -247,7 +247,14 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * kini ikut memutus (dulu socket dibiarkan hidup — aplikasi tampak masih
  * masuk); klien mereset state tanpa reload & membersihkan localStorage
  * (nama terakhir ikut dibuang saat akun dihapus) agar bisa login akun lain. */
-const SERVICE_VERSION = 'v66'
+/* v67 (Task 83) — sisa sesi di perangkat offline ikut beres: penghapusan akun
+ * DI SERVER memang selalu tuntas (tanpa memandang online/offline), tapi
+ * perangkat yang sudah tidak terhubung tak mungkin menerima session:revoked
+ * — kartu "Ketuk untuk lanjut" & localStorage-nya tertinggal. Karena itu
+ * KLIEN yang memvalidasi setiap kali layar login muncul: public:check_name
+ * (v28) dipakai ulang — akun hilang → kartu dibuang + catatan "telah
+ * dihapus admin". Server hanya bump versi; tak ada event baru. */
+const SERVICE_VERSION = 'v67'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
