@@ -669,3 +669,20 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser, 2 sesi):** peramban segar saat ditutup → tanpa kolom undangan/tombol daftar, catatan tutup tampil; login UjiV49/uji49 tetap sukses → keluar → kartu lanjut tanpa tombol daftar; admin Dashboard v65 → Pengaturan → nyalakan *Buka pendaftaran* → DB jadi '1' & sesi user **live** (tanpa reload) menampilkan kembali tombol + kolom undangan; matikan lagi → semua tersembunyi live; konsol kedua sesi bersih. Verify **467/467**; lint 0/0.
 
 **File kunci:** `src/components/chat/Messenger.tsx`, `src/components/chat/admin-dashboard.tsx`, `mini-services/chat-service/index.ts` (bump + blok komentar), `src/instrumentation.ts` (rescue-v65), `scripts/verify-integrity.sh` (+10 cek; 2 cek literal v64 → penanda historis), chat.db (settings.allowRegistration='0').
+
+## v66 — Paksa Logout & Hapus Akun Mengeluarkan User Real-Time (Task 82)
+
+**Permintaan:** "jika user dipaksa logout maka otomatis keluar juga. jika akun user dihapus maka user otomatis keluar, dan otomatis juga hapus dari localstoragenya supaya bisa login dengan akun lain."
+
+**Kondisi awal:**
+- Paksa logout (v40) sudah mengeluarkan user — tapi lewat reload paksa penuh & tanpa alasan.
+- **Lubang nyata:** `admin:account_delete` & `admin:user_delete` tidak mengirim `session:revoked` (account_delete bahkan tidak memutus socket) — aplikasi user yang online tampak masih masuk setelah akunnya dihapus.
+
+**Perubahan v66:**
+- Server: helper `revokeSessionsOf(userId, reason)` = emit `session:revoked {by:'admin', reason:'forced'|'deleted'}` + putus seluruh socket user. Dipakai oleh `admin:user_force_logout` ('forced'), `admin:user_delete` ('deleted', dulu hanya putus diam-diam), dan `admin:account_delete` ('deleted', BARU — dulu tidak menyentuh socket sama sekali).
+- Klien: handler `session:revoked` ditulis ulang — reset total state TANPA reload (pola applyAuthAck-gagal): form login tampil seketika di tempat, nama & mode ikut direset. `reason` menentukan: *forced* → sesi dibuang, nama-terakhir DIPERTAHANKAN (kartu lanjut tetap ada, balas dengan password); *deleted* → sesi + nama-terakhir (`chatkita:last-name`) DIBUANG dari localStorage → form kosong, tak ada kartu akun mati, langsung bisa masuk akun lain. Pesan: "Sesi diakhiri oleh admin — silakan masuk kembali." / "Akun ini telah dihapus oleh admin — silakan masuk dengan akun lain."
+- Bug tersembunyi yang terbongkar: setelah server memutus socket paksa, klien socket.io **tidak pernah reconnect sendiri** di jalur gateway (dulu tertutupi oleh reload v40) → handler kini memanggil `socket.connect()` eksplisit setelah 500 ms; kartu lanjut aktif kembali dalam ±2 detik.
+
+**E2E terverifikasi (agent-browser, 2 sesi):** UjiV49 online → admin Kendali akun → Paksa logout → user SEKETIKA kembali ke form (pesan merah "Sesi diakhiri oleh admin", `chatkita:user` null, nama-terakhir utuh, kartu lanjut aktif lagi, tap → minta password ikat perangkat); UjiV64 login di perangkat sama → admin Hapus akun permanen → user SEKETIKA keluar dengan pesan "Akun ini telah dihapus oleh admin — silakan masuk dengan akun lain.", `chatkita:user` & `chatkita:last-name` NULL, form kosong, socket tersambung ulang, langsung login UjiV49 pada form yang sama → sukses; DB: UjiV64 lenyap, UjiV49 utuh. Verify **479/479**; lint 0/0.
+
+**File kunci:** `mini-services/chat-service/index.ts` (revokeSessionsOf + 3 handler), `src/components/chat/Messenger.tsx` (handler reset real-time + reconnect), `src/lib/chat-types.ts` (SessionRevokedPayload), `src/instrumentation.ts` (rescue-v66), `scripts/verify-integrity.sh` (+13 cek; 2 cek literal v65 → penanda historis).

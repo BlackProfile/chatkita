@@ -1660,3 +1660,21 @@ Stage Summary:
 - v65: admin kini benar-benar mengendalikan VISIBILITAS form pendaftaran — menutup pendaftaran menyembunyikan seluruh jalur daftar dari UI login (kolom undangan, "Masuk dengan nama lain", saran daftar), bukan sekadar menolak saat submit; aplikasi tampil sebagai "hanya form login / login dari link" sesuai permintaan, dan admin bisa membukanya kapan saja lewat Dashboard → Pengaturan.
 - Keadaan saat ini: PENDAFTARAN DITUTUP (settings.allowRegistration='0'); login akun lama + kartu lanjut + magic link tetap berfungsi penuh.
 - Commit + tag rescue-v65.
+
+---
+Task ID: 82
+Agent: Z.ai Code (utama)
+Task: "jika user dipaksa logout maka otomatis keluar juga. jika akun user dihapus maka user otomatis keluar, dan otomatis juga hapus dari localstoragenya supaya bisa login dengan akun lain" — kick real-time paksa-logout & hapus akun (v66).
+
+Work Log:
+- Investigasi: paksa-logout v40 sudah emit session:revoked + putus socket, klien merespons dgn reload; account_delete & user_delete TIDAK emit (account_delete bahkan tak memutus socket — user online tampak masih masuk); Pusat reset/restore sudah tertangani via app:reset reload.
+- Server v66: helper revokeSessionsOf(userId, reason) — emit session:revoked {by:'admin', reason:'forced'|'deleted'} + disconnectSockets(true); dipakai admin:user_force_logout ('forced'), admin:user_delete ('deleted', dulu putus diam), admin:account_delete ('deleted', BARU). Bump SERVICE_VERSION 'v66' + blok komentar.
+- Klien: chat-types SessionRevokedPayload; handler session:revoked ditulis ulang — reset total state TANPA reload (mirror applyAuthAck-gagal + ekstra: pinned/restricted/replyTo/unread/typing/dst), hapus CHAT_SESSION_KEY selalu + CHAT_LAST_NAME_KEY saat 'deleted', reset name & loginMode (baca localStorage utk hindari closure basah), pesan per-alasan, toast, socket.connect() eksplisit setelah 500 ms.
+- Bug tersembunyi terbongkar via E2E: setelah disconnectSockets(true), klien socket.io TIDAK reconnect sendiri di jalur gateway (dulu tertutupi reload v40) → kartu lanjut stuck "Menghubungkan…" → diperbaiki dengan socket.connect().
+- Pola alat berulang: 2× MultiEdit lapor gagal padahal edit pertama masuk; dideteksi via Read ulang, diselesaikan Edit anchor persis (PASSWORD_REQUIRED butuh indentasi 20/22/22 dari cat -A).
+- Prosedur wajib: pkill → port 3003 BEBAS → edit → nohup → banner "v66 listening" ✓; verify: 2 cek literal v65 → penanda historis ("sembunyikan form pendaftaran saat admin menutupnya", "Pendaftaran akun baru sedang ditutup admin.") + seksi v66 +13 cek → 479/479; lint 0/0.
+- E2E agent-browser 2 sesi (gateway :81): (1) UjiV49 online → admin Kendali akun → Paksa logout (ada dialog konfirmasi) → user seketika ke form, pesan "Sesi diakhiri oleh admin", chatkita:user null, nama-terakhir utuh, kartu lanjut aktif (reconnect), tap → "masukkan password sekali untuk mengikatnya"; (2) UjiV64 login perangkat sama → Hapus akun permanen (dialog kirim confirm HAPUS) → user seketika keluar, pesan "Akun ini telah dihapus oleh admin — silakan masuk dengan akun lain.", chatkita:user & chatkita:last-name NULL, form kosong mode lain, socket tersambung ulang, login UjiV49 pada form sama → sukses; DB: UjiV64 lenyap, UjiV49 utuh; konsol bersih; screenshot /tmp/t82-force-logout-v3.png, /tmp/t82-deleted.png, /tmp/t82-final-relogin.png.
+
+Stage Summary:
+- v66: paksa-logout & penghapusan akun kini REAL-TIME — perangkat user langsung mendarat di form login dengan pesan jelas; akun dihapus → localStorage bersih total (sesi + nama terakhir) sehingga perangkat siap dipakai akun lain tanpa jejak akun mati; lubang lama account_delete (socket dibiarkan hidup) tertutup; bug reconnect pasca server-disconnect (warisan v40) ditemukan & diperbaiki.
+- Commit + tag rescue-v66.

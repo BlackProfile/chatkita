@@ -241,7 +241,13 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * login lewat public:settings + broadcast app:settings:update — kolom kode
  * undangan, tombol "Masuk dengan nama lain", dan saran daftar disembunyikan
  * klien; keadaan awal ditutup (settings.allowRegistration='0'). */
-const SERVICE_VERSION = 'v65'
+/* v66 (Task 82) — paksa logout & hapus akun mengeluarkan user seketika:
+ * helper revokeSessionsOf mengirim session:revoked (beralasan 'forced' /
+ * 'deleted') ke seluruh socket user lalu memutusnya; admin:account_delete
+ * kini ikut memutus (dulu socket dibiarkan hidup — aplikasi tampak masih
+ * masuk); klien mereset state tanpa reload & membersihkan localStorage
+ * (nama terakhir ikut dibuang saat akun dihapus) agar bisa login akun lain. */
+const SERVICE_VERSION = 'v66'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -3697,6 +3703,17 @@ const pushRestrictedTo = (userId: string, onlyWhenActive = false) => {
   io.to(`user:${userId}`).emit('user:restricted', state)
 }
 
+/**
+ * v66 — akhiri SELURUH sesi milik `userId`: kirim `session:revoked` (dengan
+ * alasan) ke semua socket user lalu putuskan paksa. Alasan dipakai klien
+ * untuk membedakan pesan & apakah localStorage nama-terakhir ikut dibuang
+ * ('deleted' → dibuang, supaya form login bersih untuk akun lain).
+ */
+const revokeSessionsOf = (userId: string, reason: 'forced' | 'deleted') => {
+  io.in(`user:${userId}`).emit('session:revoked', { by: 'admin', reason })
+  io.in(`user:${userId}`).disconnectSockets(true)
+}
+
 /** Seconds until the oldest stamp in the user's sliding window expires. */
 const rateRetryAfterSeconds = (userId: string, bucket: string): number => {
   const stamps = rateBuckets.get(`${bucket}:${userId}`) ?? []
@@ -7020,8 +7037,10 @@ io.on('connection', (socket) => {
       ack({ ok: false, error: 'NOT_FOUND' })
       return
     }
-    // Putuskan semua socket user lebih dulu (mencegah re-auth selama hapus).
-    io.in(`user:${target.id}`).disconnectSockets(true)
+    // v66 — user_delete kini mengirim session:revoked (reason 'deleted') juga,
+    // bukan sekadar memutus: perangkat user langsung tampil form login dengan
+    // pesan jelas + localStorage nama-terakhir ikut dibersihkan.
+    revokeSessionsOf(target.id, 'deleted')
     const convs = db
       .query('SELECT * FROM conversations WHERE user_a_id = ? OR user_b_id = ?')
       .all(target.id, target.id) as ConversationRow[]
@@ -8561,6 +8580,9 @@ io.on('connection', (socket) => {
       ack({ ok: false, error: 'CONFIRM_REQUIRED' })
       return
     }
+    /* v66 — account_delete kini memutus socket user juga (dulu BOCOR: socket
+       dibiarkan hidup, aplikasi user tampak masih masuk setelah akun dihapus). */
+    revokeSessionsOf(target.id, 'deleted')
     const convs = db
       .query('SELECT * FROM conversations WHERE user_a_id = ? OR user_b_id = ?')
       .all(target.id, target.id) as ConversationRow[]
@@ -9350,8 +9372,9 @@ io.on('connection', (socket) => {
     db.run('DELETE FROM device_logins WHERE user_id = ?', [target.id])
     db.run('DELETE FROM devices WHERE user_id = ?', [target.id])
     const sockets = onlineSockets.get(target.id)?.size ?? 0
-    io.in(`user:${target.id}`).emit('session:revoked', { by: 'admin' })
-    io.in(`user:${target.id}`).disconnectSockets(true)
+    /* v66 — alasan 'forced' ikut dikirim; klien kembali ke form login tanpa
+       reload (dulu: reload paksa penuh). */
+    revokeSessionsOf(target.id, 'forced')
     audit('force_logout', `${target.name} (${dev.c} perangkat, ${sockets} socket)`)
     console.log(`[force-logout] ${target.name}: ${dev.c} perangkat dilepas, ${sockets} socket diputus`)
     ack({ ok: true, devices: dev.c, sockets })

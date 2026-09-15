@@ -675,6 +675,13 @@ export interface UserToastPayload {
   body: string;
 }
 
+/** v66 — sesi user dicabut admin: paksa logout atau akun dihapus.
+ * `reason` dipakai klien membedakan pesan & pembersihan localStorage. */
+export interface SessionRevokedPayload {
+  by?: string;
+  reason?: "forced" | "deleted";
+}
+
 /* ------------------------------------------------------------------ */
 /* v10 — admin dashboard / app settings / broadcast                    */
 /* ------------------------------------------------------------------ */

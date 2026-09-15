@@ -563,8 +563,8 @@ chk_grep "Penanda v64 komentar klien"           "src/components/chat/Messenger.t
 
 # ── v65 (Task 81) — sembunyikan form pendaftaran saat admin menutupnya ──
 chk_grep "Blok komentar v65 di service"         "mini-services/chat-service/index.ts" "v65 (Task 81)"
-chk_grep "Versi service v65"                    "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v65'"
-chk_grep "Penanda rescue v65"                   "src/instrumentation.ts" "rescue-v65"
+chk_grep "Penanda v65 blok komentar (teks)"     "mini-services/chat-service/index.ts" "sembunyikan form pendaftaran saat admin menutupnya"
+chk_grep "Penanda v65 copy error tutup (klien)" "src/components/chat/Messenger.tsx" "Pendaftaran akun baru sedang ditutup admin."
 chk_grep "Derivasi registrationOpen klien"      "src/components/chat/Messenger.tsx" "const registrationOpen = appSettings?.allowRegistration"
 chk_grep "Tombol masuk-nama-lain kondisional"   "src/components/chat/Messenger.tsx" "v65 — pendaftaran ditutup admin → jalur"
 chk_grep "Kolom undangan kondisional v65"       "src/components/chat/Messenger.tsx" "nameExists !== true && registrationOpen"
@@ -572,6 +572,20 @@ chk_grep "Catatan tutup ganti kolom undangan"   "src/components/chat/Messenger.t
 chk_grep "Footer tutup arahkan tautan admin"    "src/components/chat/Messenger.tsx" "Minta admin mengirim tautan masuk"
 chk_grep "Kotak amber sadar-tutup v65"          "src/components/chat/Messenger.tsx" "v65 — pendaftaran ditutup: saran daftar"
 chk_grep "Deskripsi toggle dashboard v65"       "src/components/chat/admin-dashboard.tsx" "kode undangan, “Masuk dengan nama lain”"
+
+# ── v66 (Task 82) — paksa logout & hapus akun mengeluarkan user real-time ──
+chk_grep "Helper revokeSessionsOf"              "mini-services/chat-service/index.ts" "const revokeSessionsOf"
+chk_grep "Force logout kirim alasan forced"     "mini-services/chat-service/index.ts" "revokeSessionsOf(target.id, 'forced')"
+chk_grep "user_delete kirim reason deleted"     "mini-services/chat-service/index.ts" "user_delete kini mengirim session:revoked"
+chk_grep "account_delete putus socket user"     "mini-services/chat-service/index.ts" "account_delete kini memutus socket user"
+chk_grep "Blok komentar v66 di service"         "mini-services/chat-service/index.ts" "v66 (Task 82)"
+chk_grep "Versi service v66"                    "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v66'"
+chk_grep "Penanda rescue v66"                   "src/instrumentation.ts" "rescue-v66"
+chk_grep "Tipe SessionRevokedPayload"           "src/lib/chat-types.ts" "export interface SessionRevokedPayload"
+chk_grep "Klien reset state tanpa reload"       "src/components/chat/Messenger.tsx" "v66 — reset total state TANPA reload"
+chk_grep "Klien sadar-alasan deleted"           "src/components/chat/Messenger.tsx" "const deleted = p?.reason === \"deleted\""
+chk_grep "Hapus nama-terakhir saat akun dihapus" "src/components/chat/Messenger.tsx" "localStorage.removeItem(CHAT_LAST_NAME_KEY)"
+chk_grep "Pesan akun-dihapus (klien)"           "src/components/chat/Messenger.tsx" "Akun ini telah dihapus oleh admin"
 echo ""
 echo "== Versi server terdaftar =="
 grep -m1 "SERVICE_VERSION = " mini-services/chat-service/index.ts || echo "  ❌ SERVICE_VERSION tidak ditemukan"

@@ -128,6 +128,7 @@ import {
   type PublicCheckNameAck,
   type PublicSettingsAck,
   type ScheduleCancelAllAck,
+  type SessionRevokedPayload,
   type SetPinAck,
   type UnstarAllAck,
   type UserAuthAck,
@@ -957,15 +958,68 @@ export function Messenger() {
       setRestricted(r);
     });
 
-    // v40 — paksa logout oleh admin: akhiri sesi di sisi klien (reload → login).
-    socket.on("session:revoked", () => {
+    // v40 — paksa logout oleh admin: akhiri sesi di sisi klien.
+    // v66 — reset total state TANPA reload (pola applyAuthAck gagal): form
+    // login tampil seketika di tempat. Alasan dari server membedakan pesan;
+    // akun dihapus → nama-terakhir ikut dibuang dari localStorage supaya
+    // pengguna bisa langsung masuk dengan akun lain (tak ada kartu akun mati).
+    socket.on("session:revoked", (p?: SessionRevokedPayload) => {
+      const deleted = p?.reason === "deleted";
       try {
         window.localStorage.removeItem(CHAT_SESSION_KEY);
+        if (deleted)
+          window.localStorage.removeItem(CHAT_LAST_NAME_KEY);
       } catch {
         /* abaikan */
       }
-      toast.error("Sesi diakhiri oleh admin.");
-      setTimeout(() => window.location.reload(), 1200);
+      if (deleted) setLastName("");
+      // v66 — nama & mode ikut direset: form mendarat BERSIH (bukan form
+      // lama dengan nama terisi). Paksa-logout → kartu lanjut (nama terakhir
+      // dipertahankan); akun dihapus → form kosong untuk akun lain.
+      // Baca dari localStorage (bukan state closure yang bisa basah).
+      setName("");
+      const storedName = (() => {
+        try {
+          return window.localStorage.getItem(CHAT_LAST_NAME_KEY) ?? "";
+        } catch {
+          return "";
+        }
+      })();
+      setLoginMode(deleted || !storedName ? "other" : "continue");
+      meRef.current = null;
+      conversationIdRef.current = null;
+      setMe(null);
+      setHasPin(false);
+      setNeedsPin(false);
+      setPinEntry("");
+      setPassword("");
+      setInviteCode("");
+      setPwModalOpen(false);
+      setConversationId(null);
+      setPartner(null);
+      setMessages([]);
+      setHasMore(false);
+      setAdminReadId(0);
+      setPinnedMsg(null);
+      setRestricted(null);
+      setReplyTo(null);
+      setInput("");
+      setUnread(0);
+      setPartnerTyping(false);
+      setSendError(false);
+      setSendErrorDetail(null);
+      setAuthError(
+        deleted
+          ? "Akun ini telah dihapus oleh admin — silakan masuk dengan akun lain."
+          : "Sesi diakhiri oleh admin — silakan masuk kembali."
+      );
+      toast.error(
+        deleted ? "Akun Anda telah dihapus oleh admin." : "Sesi diakhiri oleh admin."
+      );
+      // v66 — pastikan socket menyambung ulang: server memutus paksa dan
+      // pada sebagian jalur (proxy/gateway) klien bisa terjebak dianggap
+      // putus selamanya. connect() no-op bila memang sudah tersambung.
+      window.setTimeout(() => socket.connect(), 500);
     });
 
     // v40 — pesan yang menunggu moderasi ditolak admin.
