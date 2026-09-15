@@ -19,13 +19,13 @@ export async function register() {
   const net = await import(/* turbopackIgnore: true */ "node:net");
 
   const PORT = 3003;
-  void 0; // v63 — bump agar register() dijalankan ulang oleh dev server (Task 79).
+  void 0; // v64 — bump agar register() dijalankan ulang oleh dev server (Task 80).
 
   /* v21 Task 37 — SELF-HEAL anti-rollback: checkpoint sandbox pernah menghapus
    * file lewat "commit UUID" (contoh df40cd2 menghapus /api/upload/route.ts).
    * Saat boot, jika file kritis hilang tapi git tag rescue masih ada,
    * pulihkan otomatis dan catat di dev.log. */
-  const RESCUE_TAG = "rescue-v63";
+  const RESCUE_TAG = "rescue-v64";
   const CRITICAL_FILES = ["src/app/api/upload/route.ts"];
   try {
     const { execFileSync } = await import(/* turbopackIgnore: true */ "node:child_process");

@@ -1621,3 +1621,22 @@ Stage Summary:
 - Keputusan desain: nama tetap unik + password sebagai kunci kepemilikan — pertanyaan "apa mainkan dipassword?" terjawab: memang sudah; melarang nama sama justru melindungi (daftar chat tak ambigu, anti-penyaruhan).
 - v63: dua titik UI (kotak amber + pesan password salah) kini menuntun pemilik lupa-password ke admin (reset), bukan ke fragmentasi akun.
 - Commit + tag rescue-v63.
+
+---
+Task ID: 80
+Agent: Z.ai Code (utama)
+Task: "sekarang buat perakun bisa login di banyak perangkat" (+screenshot error "Perangkat ini terikat ke akun lain") — akses multi-perangkat per akun (v64).
+
+Work Log:
+- Investigasi: devices (v27) = device_id PK → 1 perangkat 1 akun append-only; restore sesi ditolak (PASSWORD_REQUIRED) bila perangkat terikat akun lain → akun kedua di perangkat sama wajib password tiap reload (persis screenshot). DEVICE_LIMIT_PER_USER = 8; titik sentuh devices: link_login, registrasi, ACCOUNT_UNCLAIMED, bind login, unbind, user_delete, account_delete, force_logout, statistik (daftar user + account_get).
+- Desain v64: tabel baru device_logins (device_id, user_id, bound_at, PK composite) = pasangan akses "kredensial pernah dibuktikan di perangkat ini"; restore tanpa password sah bila pasangan ada (atau perangkat sama sekali belum terikat — perilaku lama lestari). devices tetap penanda pendaftaran (anti-abuse undangan) + jangkar anti-pembajakan akun warisan; restore foreign-device tanpa pasangan tetap wajib password (celah salin localStorage tetap tertutup).
+- Server: CREATE device_logins + backfill idempoten dari devices + index user_id; registrasi ikut menyisip pasangan; bind login ditulis ulang (pair/bound; fresh login foreign-device kini menambah pasangan; devices tak berpindah); magic link kini menambah pasangan (DEVICE_TAKEN hanya bila kuota 8 perangkat habis); unbind/force_logout/user_delete/account_delete membersihkan kedua tabel; statistik dev dipindah ke device_logins.
+- Klien: copy PASSWORD_REQUIRED-override → "Perangkat ini belum terikat ke akun ini — masukkan password sekali untuk mengikatnya."; dua copy DEVICE_TAKEN → batas perangkat + minta admin lepas; blok komentar deviceId v64.
+- DB: akun uji kedua UjiV64 (uji64, bcrypt cost 10) disisipkan langsung saat service berhenti.
+- Insiden alat (pola berulang): dua MultiEdit parsial — Messenger (3/4 masuk; copy DEVICE_TAKEN tertolak karena tebakan indentasi meleset) & verify (edit 1 masuk, seksi v64 tidak karena old_str chain dikonsumsi edit 1); terdeteksi via audit grep/Read, diselesaikan dgn Edit anchor persis. Satu cek v63 (marker instrumentation) ikut basi karena void-0 komentar naik ke v64 → dialihkan ke teks blok komentar v63 permanen ("bukan didorong daftar nama").
+- Prosedur wajib: pkill → port 3003 BEBAS → edit → nohup bun --hot → banner "ChatKita chat-service v64 listening on port 3003" ✓; verify 457/457; chmod 644; lint 0/0.
+- E2E agent-browser (1 browser = 1 perangkat, gateway :81): login UjiV49/uji49 ✓ → Keluar → "Masuk dengan nama lain" → login UjiV64/uji64 ✓ (fresh+password; devices tetap UjiV49, pasangan UjiV64 dibuat) → RELOAD → sesi UjiV64 langsung terbuka TANPA password & TANPA pesan perangkat (localStorage chatkita:user = UjiV64, adaFormLogin=false, tidak ada kartu "Ketuk untuk lanjut"); DB: pasangan UjiV64 tercatat + backfill ikatan lama (ASU, UjiV49 multi-perangkat); konsol bersih; screenshot /tmp/t80-multi-device.png.
+
+Stage Summary:
+- v64: SATU AKUN BANYAK PERANGKAT + SATU PERANGKAT BANYAK AKUN — error "Perangkat ini terikat ke akun lain" pada sesi tersimpan hilang; password cukup SEKALI per perangkat; anti-abuse pendaftaran (1 perangkat 1 pendaftaran) & anti-pembajakan akun warisan tetap utuh; magic link kini bisa dipakai di perangkat bersama.
+- Commit + tag rescue-v64.

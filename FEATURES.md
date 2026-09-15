@@ -627,3 +627,23 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser):** ketik "rvg" (akun existing di DB) → label berubah "Nama akun", kode undangan disembunyikan, kotak amber + saran "rvg (2)" + hint reset tampil; submit password salah → "Nama atau password salah. Lupa password? Minta admin me-reset akunmu." (verbatim via DOM); konsol bersih. Verify **447/447**; lint 0/0.
 
 **File kunci:** `src/components/chat/Messenger.tsx`, `mini-services/chat-service/index.ts` (bump), `src/instrumentation.ts` (rescue-v63), `scripts/verify-integrity.sh` (+7 cek; 2 cek literal v62 → penanda historis).
+
+## v64 — Akses Multi-Perangkat per Akun (Task 80)
+
+**Permintaan:** "sekarang buat perakun bisa login di banyak perangkat" + screenshot error "Perangkat ini terikat ke akun lain — masukkan password untuk melanjutkan."
+
+**Akar masalah:** tabel `devices` (v27) = 1 perangkat 1 akun, append-only. Sesi tersimpan (restore tanpa password) ditolak server bila perangkat terikat akun lain → akun kedua di perangkat yang sama harus mengetik password SETIAP reload.
+
+**Solusi — tabel `device_logins` (many-to-many):**
+- Pasangan `(device_id, user_id)` = "kredensial akun ini pernah dibuktikan di perangkat ini". Pasangan inilah yang membolehkan restore sesi tanpa password.
+- **Satu akun boleh banyak perangkat** (maks `DEVICE_LIMIT_PER_USER` = 8) **dan satu perangkat boleh menampung banyak akun**.
+- Backfill idempoten saat boot: semua ikatan lama otomatis jadi pasangan akses (data lama tak terganggu).
+- Pasangan dibuat saat: pendaftaran, login fresh dengan kredensial benar (termasuk di perangkat milik akun lain), dan penukaran tautan masuk (magic link kini boleh dipakai di perangkat yang menampung akun lain — yang dibatasi hanya kuota perangkat per akun).
+- `devices` tetap penanda PENDAFTARAN (1 perangkat 1 pendaftaran — anti-abuse kode undangan) + jangkar anti-pembajakan akun warisan; restore di perangkat terikat akun lain tanpa pasangan tetap wajib password (celah salin localStorage tetap tertutup).
+- Admin: lepas-perangkat / paksa-keluar / hapus akun kini membersihkan kedua tabel; statistik jumlah perangkat (dashboard & kendali akun) dihitung dari pasangan.
+
+**Klien (copy):** "Perangkat ini terikat ke akun lain — masukkan password untuk melanjutkan." → "Perangkat ini **belum terikat ke akun ini** — masukkan password **sekali untuk mengikatnya**."; pesan DEVICE_TAKEN diarahkan ke batas perangkat + minta admin melepas perangkat lama.
+
+**E2E terverifikasi (agent-browser, 1 browser = 1 perangkat):** login UjiV49/uji49 → keluar → login UjiV64/uji64 (password; pendaftaran perangkat tetap milik UjiV49, pasangan UjiV64 dibuat) → **reload → sesi UjiV64 langsung terbuka tanpa password, tanpa pesan perangkat** (localStorage `chatkita:user` = UjiV64, tak ada form login); DB memuat pasangan UjiV64 + backfill ikatan lama (ASU, UjiV49 multi-perangkat); konsol bersih. Verify **457/457**; lint 0/0.
+
+**File kunci:** `mini-services/chat-service/index.ts`, `src/components/chat/Messenger.tsx`, `src/instrumentation.ts` (rescue-v64), `scripts/verify-integrity.sh` (+10 cek).

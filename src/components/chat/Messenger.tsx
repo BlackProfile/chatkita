@@ -286,7 +286,10 @@ function starredSnippet(m: ChatMessage): string {
 }
 
 /* ------------------------------------------------------------------ */
-/* v27 — ID perangkat stabil (kunci 1 perangkat 1 akun)                */
+/* v27 — ID perangkat stabil (kunci 1 perangkat 1 pendaftaran)          */
+/* v64 — akses multi-perangkat: satu akun boleh dipakai di banyak      */
+/*       perangkat & satu perangkat boleh menampung banyak akun;        */
+/*       server mencatat pasangan (perangkat, akun) per kredensial.     */
 /* ------------------------------------------------------------------ */
 
 const DEVICE_ID_KEY = "chatkita:deviceId";
@@ -839,7 +842,7 @@ export function Messenger() {
                     : lr.error === "LINK_REVOKED"
                       ? "Tautan sudah dicabut oleh admin."
                       : lr.error === "DEVICE_TAKEN"
-                        ? "1 perangkat 1 akun: perangkat ini sudah terdaftar dengan akun lain."
+                        ? "Akun ini sudah mencapai batas perangkat terdaftar — minta admin melepas perangkat lama dari dashboard."
                         : lr.error === "RATE_LIMITED"
                           ? "Terlalu banyak percobaan — tunggu sebentar."
                           : "Tautan tidak dikenal — periksa kembali tautan dari admin."
@@ -1253,8 +1256,9 @@ export function Messenger() {
             // v63 — jalur pemulihan: pesan error ikut mengarahkan pemilik
             // yang lupa password minta admin reset (bukan daftar nama baru).
             if (res.error === "INVALID_PASSWORD") setNameExists(true);
-            // v27 — sesi lanjutan ditolak server (perangkat terikat akun lain)
-            // → pindah ke mode isi nama dan minta password.
+            // v27/v64 — sesi lanjutan di perangkat yang belum pernah
+            // membuktikan kredensial akun ini → minta password SEKALI untuk
+            // mengikat perangkat (setelah itu restore selalu lancar).
             if (
               res.error === "PASSWORD_REQUIRED" &&
               override &&
@@ -1263,7 +1267,7 @@ export function Messenger() {
               setLoginMode("other");
               setName(override);
               setAuthError(
-                "Perangkat ini terikat ke akun lain — masukkan password untuk melanjutkan."
+                "Perangkat ini belum terikat ke akun ini — masukkan password sekali untuk mengikatnya."
               );
               return;
             }
@@ -1300,7 +1304,7 @@ export function Messenger() {
                                 : res.error === "INVITE_USED"
                                   ? "Kode undangan ini sudah pernah dipakai."
                                   : res.error === "DEVICE_TAKEN"
-                                    ? "1 perangkat 1 akun: perangkat ini sudah terdaftar dengan akun lain."
+                                    ? "Batas perangkat untuk akun ini tercapai — minta admin melepas perangkat lama."
                                     : "Terjadi kesalahan, coba lagi."
             );
           }

@@ -232,7 +232,11 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
 /* v63 (Task 79) — anti-nama-sama: pemilik yang lupa password diarahkan minta
  * admin reset (admin:user_reset_password), bukan didorong daftar nama
  * duplikat; server hanya bump versi. */
-const SERVICE_VERSION = 'v63'
+/* v64 (Task 80) — akses multi-perangkat per akun: tabel device_logins
+ * (pasangan perangkat↔akun yang pernah membuktikan kredensial) membolehkan
+ * satu akun dipakai di banyak perangkat DAN satu perangkat menampung banyak
+ * akun; devices tetap penanda pendaftaran (anti-abuse kode undangan). */
+const SERVICE_VERSION = 'v64'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -467,6 +471,25 @@ db.run(`
     bound_at INTEGER NOT NULL
   )
 `)
+/* v64 — akses multi-perangkat: pasangan (perangkat, akun) yang pernah
+ * membuktikan kredensial di perangkat itu. Satu akun boleh banyak perangkat
+ * (maks DEVICE_LIMIT_PER_USER), satu perangkat boleh menampung banyak akun.
+ * Pasangan inilah yang membolehkan restore sesi tanpa password. Tabel
+ * `devices` tetap penanda PENDAFTARAN (1 perangkat 1 pendaftaran,
+ * anti-abuse kode undangan) + jangkar anti-pembajakan akun warisan. */
+db.run(`
+  CREATE TABLE IF NOT EXISTS device_logins (
+    device_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    bound_at INTEGER NOT NULL,
+    PRIMARY KEY (device_id, user_id)
+  )
+`)
+/* Backfill idempoten: ikatan lama otomatis jadi pasangan akses. */
+db.run(
+  'INSERT OR IGNORE INTO device_logins (device_id, user_id, bound_at) SELECT device_id, user_id, bound_at FROM devices'
+)
+db.run('CREATE INDEX IF NOT EXISTS idx_device_logins_user ON device_logins(user_id)')
 /* v27 — kode undangan sekali pakai (1 kode = 1 akun). */
 db.run(`
   CREATE TABLE IF NOT EXISTS invite_codes (
@@ -1273,7 +1296,7 @@ const dashboardStats = () => {
       .query(
         `SELECT u.id, u.name, u.created_at, u.last_seen_at,
            u.password_hash IS NOT NULL AS has_pw,
-           (SELECT COUNT(*) FROM devices d WHERE d.user_id = u.id) AS dev,
+           (SELECT COUNT(*) FROM device_logins d WHERE d.user_id = u.id) AS dev,
            (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id) AS c,
            (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id AND m.type != 'text') AS media,
            (SELECT MAX(m.created_at) FROM messages m WHERE m.sender_id = u.id) AS last_msg
@@ -4438,15 +4461,27 @@ io.on('connection', (socket) => {
         return
       }
     } else {
-      /* 1 perangkat 1 akun: tautan tidak boleh dipakai merebut perangkat */
-      const bound = deviceId
-        ? (db
-            .query('SELECT user_id FROM devices WHERE device_id = ?')
-            .get(deviceId) as { user_id: string } | undefined)
-        : undefined
-      if (bound && bound.user_id !== user.id) {
-        ack({ ok: false, error: 'DEVICE_TAKEN' })
-        return
+      /* v64 — akses multi-perangkat: tautan BOLEH dipakai di perangkat yang
+       * juga menampung akun lain; yang dibatasi hanya jumlah perangkat per
+       * akun (DEVICE_LIMIT_PER_USER). Pasangan akses dibuat di sini agar
+       * user:auth jalur restore langsung sah di perangkat itu. */
+      if (deviceId) {
+        const pair = db
+          .query('SELECT 1 AS x FROM device_logins WHERE device_id = ? AND user_id = ?')
+          .get(deviceId, user.id)
+        if (!pair) {
+          const cnt = db
+            .query('SELECT COUNT(*) AS c FROM device_logins WHERE user_id = ?')
+            .get(user.id) as { c: number }
+          if (cnt.c >= DEVICE_LIMIT_PER_USER) {
+            ack({ ok: false, error: 'DEVICE_TAKEN' })
+            return
+          }
+          db.run(
+            'INSERT OR IGNORE INTO device_logins (device_id, user_id, bound_at) VALUES (?, ?, ?)',
+            [deviceId, user.id, now()]
+          )
+        }
       }
       db.run(
         'UPDATE login_links SET used_at = ?, used_device = ? WHERE id = ?',
@@ -4563,6 +4598,11 @@ io.on('connection', (socket) => {
           id,
           ts,
         ])
+        /* v64 — perangkat pendaftar langsung mendapat pasangan akses. */
+        db.run(
+          'INSERT OR IGNORE INTO device_logins (device_id, user_id, bound_at) VALUES (?, ?, ?)',
+          [deviceId, id, ts]
+        )
         user = {
           id,
           name,
@@ -4641,32 +4681,48 @@ io.on('connection', (socket) => {
             }
           }
         }
-        /* v27 — kunci perangkat: bind perangkat ke akun saat login (maks
-         * DEVICE_LIMIT_PER_USER). Sesi restore di perangkat yang sudah
-         * terikat akun LAIN tidak sah bila tak bisa membuktikan password
-         * (menutup celah salin localStorage antar browser). */
+        /* v64 — akses multi-perangkat: pasangan (perangkat, akun) di
+         * device_logins dicatat setiap kredensial terbukti di perangkat itu;
+         * pasangan inilah yang membolehkan restore sesi tanpa password.
+         * Satu akun boleh banyak perangkat (maks DEVICE_LIMIT_PER_USER) dan
+         * satu perangkat boleh menampung banyak akun. Restore di perangkat
+         * yang terikat akun LAIN (devices) tetap wajib password bila belum
+         * ada pasangan — menutup celah salin localStorage antar browser.
+         * Tabel devices tetap penanda pendaftaran (tidak berpindah). */
         if (deviceId) {
+          const pair = db
+            .query('SELECT 1 AS x FROM device_logins WHERE device_id = ? AND user_id = ?')
+            .get(deviceId, user.id)
           const bound = db
             .query('SELECT user_id FROM devices WHERE device_id = ?')
             .get(deviceId) as { user_id: string } | undefined
-          if (bound && bound.user_id !== user.id) {
+          if (bound && bound.user_id !== user.id && !pair) {
             if (sessionRestore && !password) {
               ack({ ok: false, error: user.password_hash ? 'PASSWORD_REQUIRED' : 'DEVICE_TAKEN' })
               return
             }
-            // Login fresh dengan password benar di perangkat milik akun lain
-            // tetap diizinkan (lintas perangkat via kredensial) — perangkat
-            // TETAP terikat ke akun asal (tidak berpindah).
-          } else if (!bound) {
+            // Login fresh dengan kredensial benar di perangkat milik akun
+            // lain tetap diizinkan — perangkat tidak berpindah pendaftaran,
+            // tapi pasangan akses baru dibuat di bawah (multi-akun 1 perangkat).
+          }
+          if (!pair || !bound) {
             const devCount = db
-              .query('SELECT COUNT(*) AS c FROM devices WHERE user_id = ?')
+              .query('SELECT COUNT(*) AS c FROM device_logins WHERE user_id = ?')
               .get(user.id) as { c: number }
             if (devCount.c < DEVICE_LIMIT_PER_USER) {
-              db.run('INSERT INTO devices (device_id, user_id, bound_at) VALUES (?, ?, ?)', [
-                deviceId,
-                user.id,
-                now(),
-              ])
+              if (!bound) {
+                db.run('INSERT INTO devices (device_id, user_id, bound_at) VALUES (?, ?, ?)', [
+                  deviceId,
+                  user.id,
+                  now(),
+                ])
+              }
+              if (!pair) {
+                db.run(
+                  'INSERT OR IGNORE INTO device_logins (device_id, user_id, bound_at) VALUES (?, ?, ?)',
+                  [deviceId, user.id, now()]
+                )
+              }
             }
           }
         }
@@ -6503,6 +6559,8 @@ io.on('connection', (socket) => {
       return
     }
     const res = db.run('DELETE FROM devices WHERE user_id = ?', [target.id])
+    /* v64 — pasangan akses multi-perangkat ikut dilepas. */
+    db.run('DELETE FROM device_logins WHERE user_id = ?', [target.id])
     audit('user_unbind_devices', `${res.changes} perangkat dilepas dari "${target.name}"`)
     ack({ ok: true, removed: res.changes })
   }))
@@ -6980,6 +7038,7 @@ io.on('connection', (socket) => {
       }
     }
     db.run('DELETE FROM devices WHERE user_id = ?', [target.id])
+    db.run('DELETE FROM device_logins WHERE user_id = ?', [target.id])
     db.run('DELETE FROM push_subscriptions WHERE user_id = ?', [target.id])
     db.run('DELETE FROM users WHERE id = ?', [target.id])
     audit(
@@ -8257,7 +8316,7 @@ io.on('connection', (socket) => {
     const target = restrictionTarget(data, ack)
     if (!target) return
     const devices = db
-      .query('SELECT COUNT(*) AS v FROM devices WHERE user_id = ?')
+      .query('SELECT COUNT(*) AS v FROM device_logins WHERE user_id = ?')
       .get(target.id) as { v: number | null }
     let logins = 0
     try {
@@ -8508,6 +8567,7 @@ io.on('connection', (socket) => {
     db.run('DELETE FROM message_reactions WHERE user_id = ?', [target.id])
     db.run('DELETE FROM reads WHERE user_id = ?', [target.id])
     db.run('DELETE FROM devices WHERE user_id = ?', [target.id])
+    db.run('DELETE FROM device_logins WHERE user_id = ?', [target.id])
     try { db.run('DELETE FROM push_subscriptions WHERE user_id = ?', [target.id]) } catch {}
     try { db.run('DELETE FROM login_events WHERE user_id = ?', [target.id]) } catch {}
     db.run('DELETE FROM users WHERE id = ?', [target.id])
@@ -9280,7 +9340,9 @@ io.on('connection', (socket) => {
     if (!adminGuard(ack)) return
     const target = restrictionTarget(data, ack)
     if (!target) return
-    const dev = db.query('SELECT COUNT(*) AS c FROM devices WHERE user_id = ?').get(target.id) as { c: number }
+    /* v64 — hitung & lepas pasangan akses multi-perangkat juga. */
+    const dev = db.query('SELECT COUNT(*) AS c FROM device_logins WHERE user_id = ?').get(target.id) as { c: number }
+    db.run('DELETE FROM device_logins WHERE user_id = ?', [target.id])
     db.run('DELETE FROM devices WHERE user_id = ?', [target.id])
     const sockets = onlineSockets.get(target.id)?.size ?? 0
     io.in(`user:${target.id}`).emit('session:revoked', { by: 'admin' })
