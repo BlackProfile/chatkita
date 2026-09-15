@@ -511,3 +511,30 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 - `src/components/chat/media-viewer.tsx` — panggung foto/video/PDF dari `h-[72vh]` tetap → **`min-h-0 w-full flex-1`**: panggung mengisi seluruh sisa panel, bar footer (nama/reaksi/Unduh) kini nempel di dasar; media tetap object-contain (justru tampil lebih besar di layar tinggi).
 
 **File kunci:** `src/components/ui/dialog.tsx`, `src/components/chat/media-viewer.tsx`.
+
+## v59 — Media Permanen di Database (Blob chat.db, Disk Jadi Cache) (Task 75)
+
+**Permintaan:** "saya ingin menggunakan database supaya media tidak terhapus otomatis oleh server, bagusnya apa?"
+
+**Diagnosa (bukti nyata):** retensi memang sudah mati sejak v36 (boot log "retensi: tidak pernah (media permanen)", env `MEDIA_RETENTION_DAYS` tidak diset, settings retensi per-jenis 0/0/0) — server ChatKita TIDAK menghapus media. Tetapi audit integritas menemukan **16 dari 19 file media yang masih direferensikan pesan hidup HILANG dari disk**. Akar masalahnya BUKAN server, melainkan lingkungan sandbox yang di-reset: `chat.db` (database) ikut ter-commit otomatis tiap sesi sehingga PESAN selamat, sedangkan `db/media/` di-gitignore sehingga FILE-nya hilang tiap reset (log /tmp/chat-service.log lahir baru 01:39 = bukti reset pagi itu).
+
+**Keputusan arsitektur:** simpan byte media SEBAGAI BLOB di dalam `chat.db` (tabel `media_blobs`) — database yang sudah ter-commit + ter-backup otomatis (git bundle + push GitHub tiap commit). `db/media/` diturunkan statusnya menjadi **cache tulis-lulus**: cepat untuk streaming/Range/ETag, tapi bukan lagi sumber kebenaran. (Alternatif yang DITOLAK: BLOB di custom.db Prisma — siklus hidup media ada di chat-service, jadi satu tempat; un-gitignore db/media — riwayat git membengkak per versi file.)
+
+**Server (`mini-services/chat-service/index.ts`, v59):**
+
+- Migrasi `CREATE TABLE IF NOT EXISTS media_blobs (name PK, mime, size, data BLOB, created_at)`.
+- `storeMediaBlob(name)` — salin file disk → blob (dedup: nama = hash SHA-256 isi, baris yang sudah ada dilewati; idempoten). Dipanggil saat: pesan media dikirim (media + thumbnail), TTS suara dibuat, cheat inject media, dan boot (backfill).
+- `restoreMediaBlobToDisk(name)` — tulis balik blob → disk.
+- `backfillAndRestoreMedia()` saat boot (2,5 dtk): (1) backfill blob untuk semua media yang direferensikan pesan hidup, (2) pulihkan file disk yang hilang. Log: `[media-blob] boot: backfill N blob, pulihkan M file disk`.
+- `releaseMediaFile` — kini menghapus blob juga (siklus hidup serempak); file disk yang memang sudah hilang tidak lagi membatalkan proses.
+- Endpoint HTTP baru `GET /http/media_blob?name=…` (validasi nama ketat; 400/404) — dipakai Next.js sebagai fallback.
+
+**Next.js (`src/app/api/media/[name]/route.ts`):**
+
+- Saat file tidak ada di disk → `restoreFromBlob()`: tarik blob dari `http://127.0.0.1:3003/http/media_blob`, tulis kembali ke disk (re-materialize), lanjut melayani normal (ETag/Range/immutable tetap utuh).
+
+**E2E terverifikasi:** upload UI UjiV49 → blob otomatis tercatat di chat.db saat kirim; file disk dihapus → `GET /api/media` HTTP 200 + file terpulihkan byte-identik; restart service → boot memulihkan file dari blob; foto lama tetap tampil; konsol bersih; verify-integrity 411/411.
+
+**Batas yang jujur:** 16 file korban reset LAMA tidak bisa dipulihkan (belum pernah masuk blob/backup) — pesannya tampil kartu "Media tidak tersedia" (v56). Mulai v59, media baru dijamin selamat.
+
+**File kunci:** `mini-services/chat-service/index.ts`, `src/app/api/media/[name]/route.ts`, `scripts/verify-integrity.sh`.

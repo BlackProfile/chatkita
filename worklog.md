@@ -1524,3 +1524,24 @@ Work Log:
 Stage Summary:
 - v58 = panel dialog kini menumpuk konten dari atas tanpa baris terentang (semua dialog user+admin sekali fix dari base), dan viewer media mengisi penuh panel dengan footer di dasar.
 - Integritas: verify 399/399, lint 0/0; commit + tag rescue-v58 (anti-rollback).
+
+---
+Task ID: 75
+Agent: Z.ai Code (utama)
+Task: Jawab "bagusnya apa?" — pengguna ingin media tidak terhapus otomatis, minta solusi database (v59).
+
+Work Log:
+- Audit integritas media: 19 file unik direferensikan pesan hidup, hanya 3 ada di disk — 16 HILANG (pesannya tetap hidup di chat.db).
+- Diagnosa akar: retensi memang mati sejak v36 (boot log "retensi: tidak pernah"); yang menghapus = reset lingkungan sandbox. Bukti: chat.db ter-commit otomatis tiap sesi (commit UUID 5a27849 berisi chat.db + upload/ + worklog.md), sedangkan db/media di-gitignore → file hilang saat reset; /tmp/chat-service.log Birth 01:39 = bukti reset pagi itu.
+- Keputusan: simpan byte media sebagai BLOB di chat.db (tabel media_blobs) — DB yang sudah ikut ter-commit/ter-backup otomatis; db/media diturunkan jadi cache tulis-lulus. Alternatif ditolak: blob di custom.db Prisma (siklus hidup media ada di chat-service), un-gitignore db/media (git bengkak).
+- Prosedur wajib: pkill chat-service + verifikasi port 3003 bebas SEBELUM edit index.ts.
+- Service v59: migrasi media_blobs; storeMediaBlob (dedup by hash-name, idempoten); restoreMediaBlobToDisk; backfillAndRestoreMedia saat boot (setTimeout 2,5 dtk — backfill blob pesan hidup + pulihkan disk dari blob); releaseMediaFile kini hapus blob juga & tahan ENOENT disk; ingest di 3 titik (kirim media+thumb, TTS, cheat inject); endpoint GET /http/media_blob (validasi nama, 400/404) di dua dispatcher HTTP.
+- Next.js /api/media/[name]: stat fail → restoreFromBlob (fetch 127.0.0.1:3003, tulis balik disk, lanjut normal).
+- E2E: (1) boot v59 → "backfill 4 blob, pulihkan 0"; (2) endpoint blob byte-identik dgn disk (cmp OK); (3) rm disk → /api/media 200 + re-materialize (mtime baru, isi identik); (4) rm + restart service → "pulihkan 1 file disk" + file kembali; (5) UI UjiV49 upload uji-v59.txt → kirim → blob 7cb8a0cc (35 B) otomatis tercatat saat kirim; rm file tsb → /api/media 200 + pulih; (6) foto lama tampil, konsol bersih, screenshot /tmp/t59-send.png.
+- verify-integrity.sh seksi v59 +12 cek (chmod 644) → 411/411; lint 0/0; instrumentation RESCUE_TAG rescue-v59 + bump void 0; FEATURES.md seksi v59.
+
+Stage Summary:
+- v59: MEDIA PERMANEN DI DATABASE — byte media disimpan di chat.db (ikut commit/bundle/push GitHub otomatis), disk db/media jadi cache; pemulihan otomatis saat boot & saat diminta.
+- Retensi tetap 0 hari; tombol hapus manual admin tetap berfungsi (blob ikut terhapus).
+- 16 file korban reset lama tidak dapat dipulihkan (belum pernah masuk blob/backup) — tampil kartu "Media tidak tersedia" (v56); media baru dijamin selamat.
+- Service v59 jalan di :3003 (banner terkonfirmasi); commit + tag rescue-v59.

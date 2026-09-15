@@ -78,6 +78,29 @@ function notFound() {
 }
 
 /**
+ * v59 — pulihkan file media dari blob permanen chat-service (chat.db).
+ * Disk db/media hanyalah cache tulis-lulus; sumber kebenaran tersimpan di
+ * database (ikut ter-commit/ter-backup). File di-write-back ke disk agar
+ * bacaan berikutnya kembali cepat (stat + readFile lokal, ETag stabil).
+ */
+async function restoreFromBlob(filePath: string, name: string): Promise<boolean> {
+  try {
+    const r = await fetch(
+      `http://127.0.0.1:3003/http/media_blob?name=${encodeURIComponent(name)}`,
+      { signal: AbortSignal.timeout(8000) }
+    );
+    if (!r.ok) return false;
+    const bytes = Buffer.from(await r.arrayBuffer());
+    if (bytes.length === 0) return false;
+    await fs.mkdir(MEDIA_DIR, { recursive: true });
+    await fs.writeFile(filePath, bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Nama attachment dari query `?name=`: buang karakter kontrol/kutip/pemisah
  * header, batasi 255 karakter. Fallback: nama tersimpan (sudah punya ekstensi).
  */
@@ -114,7 +137,14 @@ export async function GET(
   try {
     stat = await fs.stat(filePath);
   } catch {
-    return notFound();
+    // v59 — file hilang di disk (mis. reset lingkungan): tarik blob permanen
+    // dari chat-service (chat.db), tulis kembali ke disk, lanjut normal.
+    if (!(await restoreFromBlob(filePath, name))) return notFound();
+    try {
+      stat = await fs.stat(filePath);
+    } catch {
+      return notFound();
+    }
   }
   // Direktori bukan media yang valid (readFile lama gagal EISDIR → 404 juga).
   if (!stat.isFile()) return notFound();

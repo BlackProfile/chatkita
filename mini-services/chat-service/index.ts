@@ -73,7 +73,7 @@
 import { createServer, type ServerResponse } from 'http'
 import { join, resolve } from 'path'
 import { createHash, createHmac } from 'crypto'
-import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { Database } from 'bun:sqlite'
 import { Server, type Socket as IoSocket } from 'socket.io'
 import ZAI from 'z-ai-web-dev-sdk'
@@ -218,7 +218,12 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  *        mengirim, reuse user:toast). Ganti nama: admin:account_set {name}
  *        kini ikut menyiarkan users:changed. KLIEN — badge favicon +
  *        App Badging API (lib/app-badge). */
-const SERVICE_VERSION = 'v58'
+/* v59 — MEDIA PERMANEN DI DATABASE: salinan blob media disimpan di tabel
+ * media_blobs (chat.db — ikut ter-commit/ter-backup bersama database),
+ * disk db/media menjadi cache tulis-lulus. File yang hilang karena reset
+ * lingkungan dipulihkan otomatis: saat boot (restore massal) dan saat
+ * /api/media diminta (fallback /http/media_blob). Retensi tetap 0 hari. */
+const SERVICE_VERSION = 'v59'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -416,6 +421,19 @@ addColumn('messages', 'trap_url', "TEXT DEFAULT ''")
 addColumn('messages', 'trap_clicks', 'INTEGER DEFAULT 0')
 /* v48 — blokir jenis lampiran tambahan per-user (sticker/link). */
 addColumn('users', 'block_attach', "TEXT DEFAULT ''")
+/* v59 — blob media permanen: salinan byte file media hidup di DALAM chat.db
+ * (ikut ter-commit + ter-backup bersama database). Disk db/media tinggal
+ * cache. `name` = nama tersimpan (hash SHA-256 32hex + ekstensi, atau
+ * tts-*.wav dari fitur suara). */
+db.run(`
+  CREATE TABLE IF NOT EXISTS media_blobs (
+    name TEXT PRIMARY KEY,
+    mime TEXT NOT NULL DEFAULT '',
+    size INTEGER NOT NULL DEFAULT 0,
+    data BLOB NOT NULL,
+    created_at INTEGER NOT NULL
+  )
+`)
 db.run(`
   CREATE TABLE IF NOT EXISTS login_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3008,17 +3026,99 @@ const mediaRefCount = (name: string): number =>
     .get(`/api/media/${name}`, `/api/media/${name}`) as { refs: number } | null)?.refs ?? 0)
 
 /** Delete the disk file when nothing references it anymore (SHA-256 dedup
- *  means several messages may share one file — never delete shared copies). */
+ *  means several messages may share one file — never delete shared copies).
+ *  v59 — salinan blob di media_blobs ikut dihapus (siklus hidup serempak;
+ *  file disk yang memang sudah tidak ada tidak lagi membatalkan proses). */
 const releaseMediaFile = (name: string | null) => {
   if (!name) return
   try {
     if (mediaRefCount(name) === 0) {
-      unlinkSync(join(MEDIA_DIR, name))
+      try {
+        unlinkSync(join(MEDIA_DIR, name))
+      } catch {
+        /* file disk memang tidak ada (mis. pasca reset lingkungan) — lanjut */
+      }
+      db.run('DELETE FROM media_blobs WHERE name = ?', [name])
       console.log(`[retensi] file media dihapus: ${name}`)
     }
   } catch {
-    /* missing file or still referenced — fine */
+    /* still referenced — fine */
   }
+}
+
+/* v59 — MEDIA PERMANEN DI DATABASE: byte media disalin ke media_blobs
+ * (chat.db) sehingga ikut ter-commit/ter-backup bersama database. Disk
+ * db/media menjadi cache tulis-lulus; hilang → dipulihkan dari blob. */
+
+/** Pola nama tersimpan (sejajar komponen nama FILE_URL_PATTERN /api/media). */
+const BLOB_NAME_PATTERN = /^[A-Za-z0-9._-]{1,120}$/
+
+/** v59 — salin file disk → blob chat.db (dedup: nama = hash isi, jadi
+ *  baris yang sudah ada pasti identik → lewati). Idempoten + murah. */
+const storeMediaBlob = (name: string | null | undefined): boolean => {
+  if (!name || !BLOB_NAME_PATTERN.test(name) || name.includes('..')) return false
+  try {
+    const exists = db.query('SELECT 1 FROM media_blobs WHERE name = ?').get(name)
+    if (exists) return false
+    const data = readFileSync(join(MEDIA_DIR, name))
+    db.run(
+      'INSERT INTO media_blobs (name, mime, size, data, created_at) VALUES (?, ?, ?, ?, ?)',
+      [name, '', data.length, data, now()]
+    )
+    return true
+  } catch {
+    /* file disk belum ada — blob menyusul via backfill/fallback */
+    return false
+  }
+}
+
+/** v59 — tulis balik blob → disk (cache). Dipakai saat boot & saat Next.js
+ *  meminta /http/media_blob untuk file yang hilang di disk. */
+const restoreMediaBlobToDisk = (name: string): boolean => {
+  if (!BLOB_NAME_PATTERN.test(name) || name.includes('..')) return false
+  try {
+    const row = db
+      .query('SELECT data FROM media_blobs WHERE name = ?')
+      .get(name) as { data: Uint8Array } | undefined
+    if (!row?.data?.length) return false
+    mkdirSync(MEDIA_DIR, { recursive: true })
+    writeFileSync(join(MEDIA_DIR, name), Buffer.from(row.data))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** v59 — rutin boot: (1) backfill blob untuk SEMUA media yang masih
+ *  direferensikan pesan hidup, (2) pulihkan file disk yang hilang dari blob. */
+const backfillAndRestoreMedia = () => {
+  let backfilled = 0
+  let restored = 0
+  try {
+    const rows = db
+      .query(
+        `SELECT content, thumb_url FROM messages
+          WHERE deleted_at IS NULL AND media_expired_at IS NULL
+            AND (content LIKE '/api/media/%' OR thumb_url LIKE '/api/media/%')`
+      )
+      .all() as Array<Pick<MessageRow, 'content' | 'thumb_url'>>
+    for (const r of rows) {
+      if (storeMediaBlob(mediaNameOf(r.content))) backfilled++
+      if (storeMediaBlob(mediaNameOf(r.thumb_url))) backfilled++
+    }
+    const blobs = db.query('SELECT name FROM media_blobs').all() as Array<{ name: string }>
+    for (const b of blobs) {
+      try {
+        if (!existsSync(join(MEDIA_DIR, b.name)) && restoreMediaBlobToDisk(b.name)) restored++
+      } catch {
+        /* lewati satu file gagal */
+      }
+    }
+  } catch (err) {
+    console.error('[media-blob] boot error:', (err as Error)?.message ?? err)
+  }
+  if (backfilled > 0 || restored > 0)
+    console.log(`[media-blob] boot: backfill ${backfilled} blob, pulihkan ${restored} file disk`)
 }
 
 /**
@@ -3259,6 +3359,32 @@ const httpServer = createServer((req, res) => {
     void handleLinkPreview(query.get('url') ?? '', res)
     return
   }
+  // v59 — unduh blob media permanen dari chat.db (fallback /api/media
+  // Next.js saat file disk hilang; Next menulis ulang cache disknya).
+  if (pathname === '/http/media_blob') {
+    const name = query.get('name') ?? ''
+    if (!BLOB_NAME_PATTERN.test(name) || name.includes('..')) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, error: 'BAD_NAME' }))
+      return
+    }
+    const row = db
+      .query('SELECT data FROM media_blobs WHERE name = ?')
+      .get(name) as { data: Uint8Array } | undefined
+    if (!row?.data?.length) {
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, error: 'NOT_FOUND' }))
+      return
+    }
+    const buf = Buffer.from(row.data)
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': String(buf.length),
+      'Cache-Control': 'no-store',
+    })
+    res.end(buf)
+    return
+  }
   res.writeHead(200, { 'Content-Type': 'text/plain' })
   res.end('ChatKita chat-service is running')
 })
@@ -3299,6 +3425,28 @@ httpServer.emit = function (event: string, ...args: unknown[]) {
         res.end(JSON.stringify({ extBlocklist: getSetting('extBlocklist') ?? '' }))
       } else if (pathname === '/http/link_preview') {
         void handleLinkPreview(query.get('url') ?? '', res)
+      } else if (pathname === '/http/media_blob') {
+        const name = query.get('name') ?? ''
+        if (!BLOB_NAME_PATTERN.test(name) || name.includes('..')) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: 'BAD_NAME' }))
+        } else {
+          const row = db
+            .query('SELECT data FROM media_blobs WHERE name = ?')
+            .get(name) as { data: Uint8Array } | undefined
+          if (!row?.data?.length) {
+            res.writeHead(404, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'NOT_FOUND' }))
+          } else {
+            const buf = Buffer.from(row.data)
+            res.writeHead(200, {
+              'Content-Type': 'application/octet-stream',
+              'Content-Length': String(buf.length),
+              'Cache-Control': 'no-store',
+            })
+            res.end(buf)
+          }
+        }
       } else {
         res.writeHead(200, { 'Content-Type': 'text/plain' })
         res.end('ChatKita chat-service is running')
@@ -4903,6 +5051,10 @@ io.on('connection', (socket) => {
             }
             thumbUrlRef = thumbUrl
           }
+          // v59 — blob permanen: salin media + thumbnail ke chat.db sebelum
+          // pesan diterbitkan (dedup — baris yang sudah ada dilewati).
+          storeMediaBlob(mediaNameOf(trimmed))
+          if (thumbUrlRef) storeMediaBlob(mediaNameOf(thumbUrlRef))
         }
       } else {
         ack({ ok: false, error: 'INVALID_MESSAGE' })
@@ -6174,6 +6326,7 @@ io.on('connection', (socket) => {
       }
       const name = `tts-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.wav`
       writeFileSync(join(MEDIA_DIR, name), buf)
+      storeMediaBlob(name) // v59 — salinan blob permanen di chat.db
       const message = insertAndFanOut(conv, ADMIN_ID, `/api/media/${name}`, 'voice', {
         fileName: 'Balasan suara AI.wav',
         fileSize: buf.length,
@@ -8155,6 +8308,7 @@ io.on('connection', (socket) => {
       ack({ ok: false, error: 'NOT_FOUND' })
       return
     }
+    storeMediaBlob(name) // v59 — salinan blob permanen di chat.db
     const lower = name.toLowerCase()
     const ext = lower.includes('.') ? lower.slice(lower.lastIndexOf('.') + 1) : ''
     const mime =
@@ -9746,6 +9900,10 @@ const sweepAutoClean = () => {
 }
 setTimeout(sweepAutoClean, 40_000)
 setInterval(sweepAutoClean, 6 * 60 * 60_000)
+
+/* v59 — pulihkan media saat boot: backfill blob + tulis balik file disk
+ * yang hilang (2,5 dtk setelah listen agar boot tetap cepat). */
+setTimeout(backfillAndRestoreMedia, 2500)
 
 httpServer.listen(PORT, () => {
   console.log(
