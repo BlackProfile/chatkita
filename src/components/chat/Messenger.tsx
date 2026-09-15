@@ -681,6 +681,13 @@ export function Messenger() {
   const [pinHiddenId, setPinHiddenId] = useState<number | null>(null);
   // v10 — pengaturan aplikasi (nama + mode pemeliharaan) dari server.
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  /* v65 — saklar admin "Buka pendaftaran" (Dashboard → Pengaturan → Akses &
+   * pendaftaran, setting allowRegistration sudah ada sejak v10/v13). Saat
+   * ditutup, SELURUH jalur pendaftaran akun baru disembunyikan dari UI login:
+   * kolom kode undangan, tombol "Masuk dengan nama lain", dan saran daftar.
+   * Settings belum termuat → dianggap tutup (aman; sesuai keadaan sekarang
+   * yang memang ditutup). Berlaku live lewat broadcast app:settings:update. */
+  const registrationOpen = appSettings?.allowRegistration ?? false;
   const [editing, setEditing] = useState<ChatMessage | null>(null);
   const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
   const [installAvailable, setInstallAvailable] = useState(false);
@@ -1274,11 +1281,15 @@ export function Messenger() {
             // v51 — anti-pembajakan nama: nama milik akun warisan tanpa
             // password/PIN, dan perangkat ini bukan perangkat terikatnya →
             // server menolak + mengirim saran nama alternatif.
+            // v65 — saat pendaftaran ditutup admin, saran daftar diganti
+            // pemberitahuan tutup (jalur daftar memang tak tersedia).
             if (res.error === "ACCOUNT_UNCLAIMED") {
               setNameExists(true);
               if (res.suggestion) setNameSuggestion(res.suggestion);
               setAuthError(
-                `Akun “${trimmed}” belum pernah memasang password — hanya pemiliknya dari perangkat terdaftar yang bisa masuk. Chat pemilik akun tidak bisa dibuka orang lain. Daftar dengan nama lain, mis. “${res.suggestion ?? `${trimmed} (2)`}”.`
+                registrationOpen
+                  ? `Akun “${trimmed}” belum pernah memasang password — hanya pemiliknya dari perangkat terdaftar yang bisa masuk. Chat pemilik akun tidak bisa dibuka orang lain. Daftar dengan nama lain, mis. “${res.suggestion ?? `${trimmed} (2)`}”.`
+                  : `Akun “${trimmed}” belum pernah memasang password — hanya pemiliknya dari perangkat terdaftar yang bisa masuk. Pendaftaran akun baru sedang ditutup admin.`
               );
               return;
             }
@@ -1290,7 +1301,9 @@ export function Messenger() {
                   : res.error === "REGISTRATION_CLOSED"
                     ? "Pendaftaran sedang ditutup admin — masuk dengan akun yang sudah ada."
                     : res.error === "PASSWORD_REQUIRED"
-                      ? "Akun ini memakai password — masukkan password Anda. Bukan akun Anda? Chat pemiliknya tidak bisa dibuka; daftar dengan nama lain."
+                      ? registrationOpen
+                        ? "Akun ini memakai password — masukkan password Anda. Bukan akun Anda? Chat pemiliknya tidak bisa dibuka; daftar dengan nama lain."
+                        : "Akun ini memakai password — masukkan password Anda. Bukan akun Anda? Chat pemiliknya tidak bisa dibuka orang lain."
                       : res.error === "INVALID_PASSWORD"
                         ? "Nama atau password salah. Lupa password? Minta admin me-reset akunmu."
                         : res.error === "TOO_MANY_ATTEMPTS"
@@ -2248,25 +2261,33 @@ export function Messenger() {
                       )}
                     </Button>
                   ) : null}
-                  <div className="flex items-center gap-3" aria-hidden="true">
-                    <span className="h-px flex-1 bg-emerald-900/10 dark:bg-white/10" />
-                    <span className="text-[11px] uppercase tracking-wider text-emerald-900/45 dark:text-emerald-100/35">
-                      atau
-                    </span>
-                    <span className="h-px flex-1 bg-emerald-900/10 dark:bg-white/10" />
-                  </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="h-10 w-full rounded-xl text-sm font-medium text-emerald-800/70 hover:bg-emerald-900/5 hover:text-emerald-950 dark:text-emerald-100/60 dark:hover:bg-white/5 dark:hover:text-emerald-50"
-                    onClick={() => {
-                      setLoginMode("other");
-                      setName("");
-                      setAuthError(null);
-                    }}
-                  >
-                    Masuk dengan nama lain
-                  </Button>
+                  {/* v65 — pendaftaran ditutup admin → jalur "nama lain"
+                      (form daftar) disembunyikan total: tinggal kartu lanjut
+                      + login via tautan khusus. Admin membuka lagi lewat
+                      Dashboard → Pengaturan → Akses & pendaftaran. */}
+                  {registrationOpen ? (
+                    <>
+                      <div className="flex items-center gap-3" aria-hidden="true">
+                        <span className="h-px flex-1 bg-emerald-900/10 dark:bg-white/10" />
+                        <span className="text-[11px] uppercase tracking-wider text-emerald-900/45 dark:text-emerald-100/35">
+                          atau
+                        </span>
+                        <span className="h-px flex-1 bg-emerald-900/10 dark:bg-white/10" />
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="h-10 w-full rounded-xl text-sm font-medium text-emerald-800/70 hover:bg-emerald-900/5 hover:text-emerald-950 dark:text-emerald-100/60 dark:hover:bg-white/5 dark:hover:text-emerald-50"
+                        onClick={() => {
+                          setLoginMode("other");
+                          setName("");
+                          setAuthError(null);
+                        }}
+                      >
+                        Masuk dengan nama lain
+                      </Button>
+                    </>
+                  ) : null}
                 </>
               ) : (
                 <>
@@ -2276,7 +2297,9 @@ export function Messenger() {
                       className="text-emerald-950/80 dark:text-emerald-100/70"
                     >
                       {/* v28 — nama yang sudah terdaftar bukan "nama baru" lagi. */}
-                      {nameExists === true
+                      {/* v65 — pendaftaran ditutup: nama yang diketik pasti
+                          untuk masuk akun lama, bukan mendaftar. */}
+                      {nameExists === true || !registrationOpen
                         ? "Nama akun"
                         : lastName
                           ? "Nama baru"
@@ -2326,35 +2349,50 @@ export function Messenger() {
                         v63 — pemilik yang lupa password diarahkan minta admin
                         reset, bukan didorong mendaftar nama duplikat.
                         Peringatkan + tawarkan daftar dengan nama alternatif
-                        supaya chat pemilik nama pertama tidak bisa dibuka. */}
+                        supaya chat pemilik nama pertama tidak bisa dibuka.
+                        v65 — pendaftaran ditutup: saran daftar diganti
+                        pemberitahuan tutup (tak ada lagi tombol daftar). */}
                     {nameExists === true && nameSuggestion ? (
                       <div className="space-y-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 dark:border-amber-400/25 dark:bg-amber-400/10">
-                        <p className="text-xs font-medium leading-relaxed text-amber-900 dark:text-amber-200">
-                          Nama ini sudah dipakai akun lain. Punya akunnya?
-                          Masukkan password di atas — lupa password? Minta
-                          admin me-reset akunmu. Bukan kamu? Chat pemilik
-                          akun tidak bisa dibuka orang lain — daftar sebagai
-                          akun baru dengan nama berbeda.
-                        </p>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-9 rounded-lg border-amber-500/40 bg-white/60 text-xs font-semibold text-amber-900 hover:bg-amber-500/15 dark:border-amber-400/30 dark:bg-transparent dark:text-amber-200 dark:hover:bg-amber-400/10"
-                          onClick={() => {
-                            setName(nameSuggestion);
-                            setPassword("");
-                            setAuthError(null);
-                          }}
-                        >
-                          Daftar sebagai “{nameSuggestion}”
-                        </Button>
+                        {registrationOpen ? (
+                          <p className="text-xs font-medium leading-relaxed text-amber-900 dark:text-amber-200">
+                            Nama ini sudah dipakai akun lain. Punya akunnya?
+                            Masukkan password di atas — lupa password? Minta
+                            admin me-reset akunmu. Bukan kamu? Chat pemilik
+                            akun tidak bisa dibuka orang lain — daftar sebagai
+                            akun baru dengan nama berbeda.
+                          </p>
+                        ) : (
+                          <p className="text-xs font-medium leading-relaxed text-amber-900 dark:text-amber-200">
+                            Nama ini sudah dipakai akun lain. Punya akunnya?
+                            Masukkan password di atas — lupa password? Minta
+                            admin me-reset akunmu. Pendaftaran akun baru sedang
+                            ditutup admin.
+                          </p>
+                        )}
+                        {registrationOpen ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-9 rounded-lg border-amber-500/40 bg-white/60 text-xs font-semibold text-amber-900 hover:bg-amber-500/15 dark:border-amber-400/30 dark:bg-transparent dark:text-amber-200 dark:hover:bg-amber-400/10"
+                            onClick={() => {
+                              setName(nameSuggestion);
+                              setPassword("");
+                              setAuthError(null);
+                            }}
+                          >
+                            Daftar sebagai “{nameSuggestion}”
+                          </Button>
+                        ) : null}
                       </div>
                     ) : null}
                   </div>
                   {/* v28 — kode undangan HANYA untuk pendaftaran akun baru:
-                      disembunyikan begitu nama terdeteksi milik akun yang ada. */}
-                  {nameExists !== true ? (
+                      disembunyikan begitu nama terdeteksi milik akun yang ada.
+                      v65 — juga disembunyikan saat pendaftaran ditutup admin;
+                      diganti pemberitahuan tutup agar pengguna tak bingung. */}
+                  {nameExists !== true && registrationOpen ? (
                     <div className="space-y-2">
                       <Label
                         htmlFor="messenger-invite"
@@ -2378,6 +2416,13 @@ export function Messenger() {
                         }}
                       />
                     </div>
+                  ) : null}
+                  {/* v65 — pendaftaran ditutup: pengganti kolom kode undangan. */}
+                  {!registrationOpen && nameExists !== true ? (
+                    <p className="rounded-xl bg-emerald-900/5 px-3 py-2.5 text-xs font-medium leading-relaxed text-emerald-900/70 dark:bg-white/5 dark:text-emerald-100/60">
+                      Pendaftaran akun baru sedang ditutup admin — masuk dengan
+                      akun yang sudah ada, atau pakai tautan khusus dari admin.
+                    </p>
                   ) : null}
                   {needsPin ? (
                     <div className="space-y-2">
@@ -2434,10 +2479,19 @@ export function Messenger() {
                     )}
                   </Button>
                   {!lastName ? (
-                    <p className="text-center text-xs text-emerald-900/55 dark:text-emerald-100/45">
-                      1 orang 1 akun — akun lama masuk dengan password, akun
-                      baru daftar dengan kode undangan dari admin
-                    </p>
+                    // v65 — footer ikut jujur: saat pendaftaran ditutup, tak ada
+                    // lagi imbauan "daftar dengan kode undangan".
+                    registrationOpen ? (
+                      <p className="text-center text-xs text-emerald-900/55 dark:text-emerald-100/45">
+                        1 orang 1 akun — akun lama masuk dengan password, akun
+                        baru daftar dengan kode undangan dari admin
+                      </p>
+                    ) : (
+                      <p className="text-center text-xs text-emerald-900/55 dark:text-emerald-100/45">
+                        Pendaftaran akun baru sedang ditutup admin — butuh akses
+                        baru? Minta admin mengirim tautan masuk untuk Anda.
+                      </p>
+                    )
                   ) : (
                     <Button
                       type="button"

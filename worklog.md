@@ -1640,3 +1640,23 @@ Work Log:
 Stage Summary:
 - v64: SATU AKUN BANYAK PERANGKAT + SATU PERANGKAT BANYAK AKUN — error "Perangkat ini terikat ke akun lain" pada sesi tersimpan hilang; password cukup SEKALI per perangkat; anti-abuse pendaftaran (1 perangkat 1 pendaftaran) & anti-pembajakan akun warisan tetap utuh; magic link kini bisa dipakai di perangkat bersama.
 - Commit + tag rescue-v64.
+
+---
+Task ID: 81
+Agent: Z.ai Code (utama)
+Task: "buat admin bisa setting/sembunyikan form daftar. buat sekarang aplikasi hanya ada form login / login dari link, form daftarnya/masuk dengan nama lain di setting sembunyi dulu saat ini" — sembunyikan form pendaftaran saat ditutup admin (v65).
+
+Work Log:
+- Investigasi: saklar admin SUDAH ADA sejak v10/v13 — Dashboard → Pengaturan → "Akses & pendaftaran" → Buka pendaftaran (settings.allowRegistration, server REGISTRATION_CLOSED di user:auth, broadcast app:settings:update, public:settings pre-login). DB belum punya barisnya → default TERBUKA. Yang hilang hanya UI klien: form daftar tetap tampil lalu ditolak saat submit.
+- Desain v65: derivasi registrationOpen = appSettings?.allowRegistration ?? false (default tutup bila settings belum termuat — aman & sesuai keadaan sekarang); saat tutup → sembunyikan kolom kode undangan (diganti catatan tutup), tombol "Masuk dengan nama lain", tombol saran "Daftar sebagai …", sesuaikan label nama/footer/copy error ACCOUNT_UNCLAIMED & PASSWORD_REQUIRED; keadaan awal DB ditutup (allowRegistration='0' diset saat service berhenti via bun:sqlite).
+- Server: hanya bump SERVICE_VERSION 'v65' + blok komentar v65 (logika sudah lengkap sejak lama).
+- Klien: Messenger.tsx 6 titik edit (derivasi, wrapper kondisional divider+tombol, label, kotak amber copy+tombol kondisional, kondisi kolom undangan + catatan pengganti, footer kondisional, 2 copy error); admin-dashboard.tsx: deskripsi toggle diperbarui; instrumentation void-0 v65 + RESCUE_TAG rescue-v65.
+- Insiden alat (pola berulang): MultiEdit "No replacement" ternyata aplikasi PARSIAL — edit pertama sudah masuk padahal lapor gagal; dideteksi via Read ulang, sisa edit diselesaikan Edit anchor persis (hitung spasi via sed cat -A: PASSWORD_REQUIRED 20/22/22).
+- Prosedur wajib: pkill → port 3003 BEBAS → edit → nohup bun --hot → banner "ChatKita chat-service v65 listening on port 3003" ✓.
+- verify-integrity: 2 cek literal v64 (SERVICE_VERSION/rescue-v64) dikonversi penanda historis ("anti-abuse kode undangan" di service, "v64 — akses multi-perangkat" di Messenger); seksi v65 +10 cek; chmod 644 → 467/467; lint 0/0.
+- E2E agent-browser 2 sesi (gateway :81): t81a peramban segar saat ditutup → tanpa kolom undangan/tombol daftar, catatan tutup tampil, label "Nama akun"; login UjiV49/uji49 tetap sukses → Keluar → kartu lanjut TANPA tombol daftar; t81b admin (admin123) → Dashboard "Dashboard Aplikasi v65" → Pengaturan → switch "Buka pendaftaran" false → klik ON → DB '1' + t81a LIVE (tanpa reload) menampilkan tombol+kolom lagi; klik "Masuk dengan nama lain" → kolom undangan muncul, label "Nama baru", catatan tutup hilang; OFF lagi → semua tersembunyi live; konsol kedua sesi bersih (hanya Fast Refresh); screenshot /tmp/t81-closed-fresh.png, /tmp/t81-closed-continue.png, /tmp/t81-open-form.png, /tmp/t81-final-closed.png.
+
+Stage Summary:
+- v65: admin kini benar-benar mengendalikan VISIBILITAS form pendaftaran — menutup pendaftaran menyembunyikan seluruh jalur daftar dari UI login (kolom undangan, "Masuk dengan nama lain", saran daftar), bukan sekadar menolak saat submit; aplikasi tampil sebagai "hanya form login / login dari link" sesuai permintaan, dan admin bisa membukanya kapan saja lewat Dashboard → Pengaturan.
+- Keadaan saat ini: PENDAFTARAN DITUTUP (settings.allowRegistration='0'); login akun lama + kartu lanjut + magic link tetap berfungsi penuh.
+- Commit + tag rescue-v65.

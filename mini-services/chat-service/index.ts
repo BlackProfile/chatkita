@@ -236,7 +236,12 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * (pasangan perangkat↔akun yang pernah membuktikan kredensial) membolehkan
  * satu akun dipakai di banyak perangkat DAN satu perangkat menampung banyak
  * akun; devices tetap penanda pendaftaran (anti-abuse kode undangan). */
-const SERVICE_VERSION = 'v64'
+/* v65 (Task 81) — sembunyikan form pendaftaran saat admin menutupnya:
+ * setting allowRegistration (sudah ada sejak v10/v13) kini ikut mengatur UI
+ * login lewat public:settings + broadcast app:settings:update — kolom kode
+ * undangan, tombol "Masuk dengan nama lain", dan saran daftar disembunyikan
+ * klien; keadaan awal ditutup (settings.allowRegistration='0'). */
+const SERVICE_VERSION = 'v65'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'

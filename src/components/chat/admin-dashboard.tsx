@@ -1822,8 +1822,12 @@ export function AdminDashboard({
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <p className="text-sm font-medium">Buka pendaftaran</p>
+                    {/* v65 — deskripsi jujur: menutup pendaftaran kini juga
+                        menyembunyikan seluruh form daftar di halaman login. */}
                     <p className="text-[11px] text-muted-foreground">
-                      Bila dimatikan, nama baru tidak bisa masuk — akun lama tetap bisa.
+                      Bila dimatikan, pendaftaran ditutup & form daftar
+                      (kode undangan, “Masuk dengan nama lain”) disembunyikan
+                      dari halaman login — akun lama tetap bisa masuk.
                     </p>
                   </div>
                   <Switch

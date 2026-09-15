@@ -647,3 +647,25 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser, 1 browser = 1 perangkat):** login UjiV49/uji49 → keluar → login UjiV64/uji64 (password; pendaftaran perangkat tetap milik UjiV49, pasangan UjiV64 dibuat) → **reload → sesi UjiV64 langsung terbuka tanpa password, tanpa pesan perangkat** (localStorage `chatkita:user` = UjiV64, tak ada form login); DB memuat pasangan UjiV64 + backfill ikatan lama (ASU, UjiV49 multi-perangkat); konsol bersih. Verify **457/457**; lint 0/0.
 
 **File kunci:** `mini-services/chat-service/index.ts`, `src/components/chat/Messenger.tsx`, `src/instrumentation.ts` (rescue-v64), `scripts/verify-integrity.sh` (+10 cek).
+
+## v65 — Sembunyikan Form Pendaftaran saat Ditutup Admin (Task 81)
+
+**Permintaan:** "buat admin bisa setting/sembunyikan form daftar. buat sekarang aplikasi hanya ada form login / login dari link, form daftarnya/masuk dengan nama lain di setting sembunyi dulu saat ini."
+
+**Fakta penting:** saklar admin **sudah ada sejak v10/v13** — Dashboard → Pengaturan → "Akses & pendaftaran" → *Buka pendaftaran* (setting `allowRegistration`, server menolak daftar dengan `REGISTRATION_CLOSED`). Yang belum ada: UI login **masih menampilkan** form daftar lalu menolak saat submit — jelek UX-nya.
+
+**Perubahan v65 (klien + keadaan awal):**
+- Derivasi `registrationOpen = appSettings?.allowRegistration ?? false` — termuat lewat `public:settings` (pre-login) & **live** lewat broadcast `app:settings:update`; default *tutup* bila settings belum termuat (aman, sesuai keadaan sekarang).
+- Saat ditutup, seluruh jalur pendaftaran disembunyikan dari UI login:
+  - kolom **Kode undangan** diganti catatan "Pendaftaran akun baru sedang ditutup admin — masuk dengan akun yang sudah ada, atau pakai tautan khusus dari admin."
+  - tombol **"Masuk dengan nama lain"** (pembuka form daftar) hilang total di kartu lanjut.
+  - tombol saran **"Daftar sebagai …"** di kotak amber hilang; copy diganti pemberitahuan tutup (hint reset v63 tetap).
+  - label nama → "Nama akun"; footer → "…butuh akses baru? Minta admin mengirim tautan masuk."
+  - pesan error `ACCOUNT_UNCLAIMED`/`PASSWORD_REQUIRED` tak lagi mengarahkan "daftar dengan nama lain" saat ditutup.
+- Keadaan awal ditutup: `settings.allowRegistration='0'` di chat.db (sesuai permintaan "saat ini").
+- Jalur yang tetap hidup saat ditutup: login akun lama (nama+password/PIN), kartu lanjut, dan **login dari link** (?masuk=…) — persis "hanya form login / login dari link".
+- Dashboard: deskripsi toggle diperbarui (menutup pendaftaran kini juga menyembunyikan form daftar).
+
+**E2E terverifikasi (agent-browser, 2 sesi):** peramban segar saat ditutup → tanpa kolom undangan/tombol daftar, catatan tutup tampil; login UjiV49/uji49 tetap sukses → keluar → kartu lanjut tanpa tombol daftar; admin Dashboard v65 → Pengaturan → nyalakan *Buka pendaftaran* → DB jadi '1' & sesi user **live** (tanpa reload) menampilkan kembali tombol + kolom undangan; matikan lagi → semua tersembunyi live; konsol kedua sesi bersih. Verify **467/467**; lint 0/0.
+
+**File kunci:** `src/components/chat/Messenger.tsx`, `src/components/chat/admin-dashboard.tsx`, `mini-services/chat-service/index.ts` (bump + blok komentar), `src/instrumentation.ts` (rescue-v65), `scripts/verify-integrity.sh` (+10 cek; 2 cek literal v64 → penanda historis), chat.db (settings.allowRegistration='0').
