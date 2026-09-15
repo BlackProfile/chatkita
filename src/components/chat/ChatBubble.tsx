@@ -222,6 +222,10 @@ export function ChatBubble({
   const [mediaRevealed, setMediaRevealed] = useState(false);
   /* v48 — blur sensitif: sembunyi lagi tiap pesan diperbarui (remount). */
   const [sensitiveRevealed, setSensitiveRevealed] = useState(false);
+  /* v56 — media gagal dimuat (file hilang/404, mis. media terhapus di luar
+   * aplikasi) → kartu ramah "Media tidak tersedia", bukan gambar rusak. */
+  const [imgFailed, setImgFailed] = useState(false);
+  const [vidFailed, setVidFailed] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(
@@ -260,6 +264,12 @@ export function ChatBubble({
   /* file messages: kategori dari mimeType (+ fallback ekstensi nama). */
   const fileKind = type === "file" ? resolveFileKind(mimeType, fileName) : null;
   const isFileImage = type === "image" || (type === "file" && fileKind === "image");
+  /* v56 — gelembung foto/video dibatasi juga di WRAPPER-nya (bukan hanya di
+   * <img>): browser menghitung lebar gelembung dari ukuran intrinsik media
+   * (persentase di dalam max-width diabaikan saat intrinsic sizing), sehingga
+   * tanpa cap ini gelembung bisa jauh lebih lebar dari media 20rem — ada
+   * ruang kosong besar di sisi gambar (bug "kenapa jadi gini?"). */
+  const isMediaBubble = isFileImage || (type === "file" && fileKind === "video");
   /* v8 — sumber gambar di bubble: thumbnail bila ada (ringan); tanpa
    * thumbnail, mode hemat data menunda pemuatan full sampai diketuk. */
   const imageSrc = mediaExpired
@@ -290,7 +300,14 @@ export function ChatBubble({
       className={cn("flex w-full flex-col", isRight ? "items-end" : "items-start")}
       data-mid={messageId}
     >
-      <div className="group relative max-w-[85%] sm:max-w-[75%] md:max-w-[65%]">
+      <div
+        className={cn(
+          "group relative",
+          isMediaBubble
+            ? "max-w-[min(85%,21rem)] sm:max-w-[min(75%,21rem)] md:max-w-[min(65%,21rem)]"
+            : "max-w-[85%] sm:max-w-[75%] md:max-w-[65%]"
+        )}
+      >
         <div
           role={actionsOpen ? "button" : undefined}
           tabIndex={actionsOpen ? 0 : undefined}
@@ -388,6 +405,31 @@ export function ChatBubble({
           ) : type === "sticker" ? (
             /* v48 — stiker: karakter SVG besar tanpa background bubble. */
             <StickerSvg id={content} className="block size-28" />
+          ) : isFileImage && imgFailed ? (
+            /* v56 — file gambar hilang (404) → kartu jelas, bukan gambar rusak. */
+            <div
+              className={cn(
+                "flex w-72 max-w-full items-center gap-2.5 rounded-xl p-2.5",
+                isRight ? "bg-white/15" : "bg-muted/70"
+              )}
+            >
+              <span
+                className={cn(
+                  "flex size-10 shrink-0 items-center justify-center rounded-lg",
+                  isRight ? "bg-white/20 text-white" : "bg-background text-muted-foreground"
+                )}
+              >
+                <ImageIcon className="size-5" aria-hidden="true" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="line-clamp-2 block break-words text-sm font-medium leading-snug">
+                  {fileName ?? "Foto"}
+                </span>
+                <span className={cn("block text-xs", isRight ? "text-white/70" : "text-muted-foreground")}>
+                  Media tidak tersedia
+                </span>
+              </span>
+            </div>
           ) : isFileImage && !imageSrc ? (
             /* v8 — hemat data: foto tanpa thumbnail menunggu ketukan. */
             <button
@@ -418,6 +460,7 @@ export function ChatBubble({
                   sensitive && !sensitiveRevealed && "blur-lg"
                 )}
                 loading="lazy"
+                onError={() => setImgFailed(true)}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (sensitive && !sensitiveRevealed) {
@@ -612,6 +655,32 @@ export function ChatBubble({
                 </p>
               ) : null}
             </div>
+          ) : type === "file" && fileKind === "video" && vidFailed ? (
+            /* v56 — file video hilang (404) → kartu jelas, bukan pemutar kosong. */
+            <div
+              className={cn(
+                "flex w-72 max-w-full items-center gap-2.5 rounded-xl p-2.5",
+                isRight ? "bg-white/15" : "bg-muted/70"
+              )}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <span
+                className={cn(
+                  "flex size-10 shrink-0 items-center justify-center rounded-lg",
+                  isRight ? "bg-white/20 text-white" : "bg-background text-muted-foreground"
+                )}
+              >
+                <FileKindIcon mimeType={mimeType} fileName={fileName} className="size-5" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="line-clamp-2 block break-words text-sm font-medium leading-snug">
+                  {fileName ?? "Video"}
+                </span>
+                <span className={cn("block text-xs", isRight ? "text-white/70" : "text-muted-foreground")}>
+                  Media tidak tersedia
+                </span>
+              </span>
+            </div>
           ) : type === "file" && fileKind === "video" ? (
             /* Permukaan video tidak men-toggle baris aksi (stopPropagation).
              * v8 — poster thumbnail + preload hemat (none saat data saver).
@@ -622,6 +691,7 @@ export function ChatBubble({
                 poster={thumbUrl}
                 controls
                 preload={dataSaver ? "none" : "metadata"}
+                onError={() => setVidFailed(true)}
                 className={cn(
                   // v55 — batas lebar video sama dgn foto (20rem, anti-luber).
                   "max-h-64 w-auto max-w-[min(100%,20rem)] rounded-xl",

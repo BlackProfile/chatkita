@@ -470,6 +470,14 @@ chk_grep "Foto: batas lebar 20rem + anti-luber" "src/components/chat/ChatBubble.
 chk_grep "Video: batas lebar 20rem + anti-luber" "src/components/chat/ChatBubble.tsx" "max-h-64 w-auto max-w-\[min(100%,20rem)\] rounded-xl"
 chk_grep "Penanda komentar v55 (foto)"          "src/components/chat/ChatBubble.tsx" "v55 — lebar foto dibatasi 20rem"
 chk_grep "Penanda komentar v55 (video)"         "src/components/chat/ChatBubble.tsx" "v55 — batas lebar video sama dgn foto"
+
+# ── v56 (Task 72) — gelembung media merangkul isi + kartu media tak tersedia ──
+chk_grep "Wrapper media di-cap 21rem"           "src/components/chat/ChatBubble.tsx" "max-w-\[min(85%,21rem)\] sm:max-w-\[min(75%,21rem)\] md:max-w-\[min(65%,21rem)\]"
+chk_grep "Flag gelembung media (isMediaBubble)" "src/components/chat/ChatBubble.tsx" "const isMediaBubble = isFileImage"
+chk_grep "img onError → kartu tak tersedia"     "src/components/chat/ChatBubble.tsx" "onError={() => setImgFailed(true)}"
+chk_grep "video onError → kartu tak tersedia"   "src/components/chat/ChatBubble.tsx" "onError={() => setVidFailed(true)}"
+chk_grep "Kartu media tak tersedia (teks)"      "src/components/chat/ChatBubble.tsx" "Media tidak tersedia"
+chk_file  "Skrip uji image tanpa thumb v56"     ".zscripts/t72-notumb.ts"
 echo ""
 echo "== Versi server terdaftar =="
 grep -m1 "SERVICE_VERSION = " mini-services/chat-service/index.ts || echo "  ❌ SERVICE_VERSION tidak ditemukan"

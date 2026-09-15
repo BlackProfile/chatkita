@@ -463,3 +463,21 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E:** foto lebar (rasio ~1.9:1) dikirim di chat UjiV49↔admin; lebar `img` terukur ≤320px di viewport mobile 390×844 & desktop 1440×900; gelembung tidak meluber; konsol 0 error.
 
 **File kunci:** `src/components/chat/ChatBubble.tsx`.
+
+
+## v56 — Gelembung Media Merangkul Isi + Kartu "Media Tidak Tersedia" (Task 72)
+
+**Permintaan:** "kenapa jadi gini?" + screenshot gelembung foto hijau yang lebar (~460px) dengan **ruang kosong besar** di sisi gambar yang hanya 320px (v55).
+
+**Akar bug:** v55 membatasi lebar `<img>` (`max-w-[min(100%,20rem)]`), tapi lebar GELEMBUNG dihitung browser dari **ukuran intrinsik media** — persentase `100%` di dalam `max-width` diabaikan saat intrinsic sizing — sehingga gambar 1200px tanpa thumbnail tetap "mengklaim" ~492px lebar: gambar dirender 320px, gelembung tetap ~504px → 170px ruang kosong. Terlihat pada pesan lama pra-v8 (tanpa thumbnail) dan pesan gambar besar mana pun.
+
+**Perbaikan** (`src/components/chat/ChatBubble.tsx`, berlaku user & admin):
+
+- **Cap di WRAPPER gelembung** khusus foto/video: `max-w-[min(85%,21rem)] sm:min(75%,21rem) md:min(65%,21rem)` via flag `isMediaBubble` — gelembung maks 336px, merangkul img 320px (sisa 2px padding). Diukur E2E: bubble 504→**336px**.
+- **Kartu "Media tidak tersedia"** — `onError` pada `<img>` & `<video>`: bila file media hilang (404, mis. terhapus di luar aplikasi), tampil kartu ikon + nama file + label "Media tidak tersedia" (bukan gambar rusak/pemutar kosong).
+
+**Temuan opsional terkait (bukan bug kode):** file media lama di `db/media/` hilang akibat rollback checkpoint sandbox (folder tidak di-track git sesuai desain commit 2157ee4; backup harian via `make-backup.sh` memang menyertakan tar media, tetapi rollback terjadi SEBELUM tar media pertama dibuat). Pesan lama yang medianya 404 kini tampil rapi sebagai kartu di atas. Tindakan: backup manual dijalankan ulang (tar media kembali aktif begitu ada file di `db/media`).
+
+**E2E:** pesan image tanpa thumbnail dikirim via socket (`.zscripts/t72-notumb.ts`, gambar 1200×625) → sebelum fix bubble 504px (170px kosong), sesudah fix **336px merangkul img 320px**; pesan lama 404 → kartu "Media tidak tersedia" 302px; konsol 0 error.
+
+**File kunci:** `src/components/chat/ChatBubble.tsx`, `.zscripts/t72-notumb.ts`.

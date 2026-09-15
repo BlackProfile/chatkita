@@ -1458,3 +1458,22 @@ Stage Summary:
 - v55 = pesan media kini berukuran konsisten: foto & video maks 320px di SEMUA viewport (sejajar kartu file/audio 288px, poll 256px), dan tidak mungkin meluber keluar gelembung di layar sempit — akar masalah screenshot user.
 - Satu perubahan komponen bersama (ChatBubble) otomatis berlaku di panel user & admin.
 - Integritas: verify 385/385, lint 0/0; commit + tag rescue-v55 (anti-rollback).
+
+---
+Task ID: 72
+Agent: Z.ai Code (main)
+Task: v56 — "kenapa jadi gini?": gelembung foto lebar dengan ruang kosong (lanjutan ukuran media v55)
+
+Work Log:
+- LAPORAN USER: screenshot gelembung hijau foto ~460px tapi gambar hanya 320px — ruang kosong besar; chat rvg (pesan 19.57 lama).
+- REPRODUKSI: buka chat rvg sebagai admin (TOTP dari DB, totp_enabled=1) → foto bendera (mid 319) ternyata 404 (naturalWidth=0) → tak bisa direproduksi via pesan itu; buat pesan uji image TANPA thumbUrl via socket `.zscripts/t72-notumb.ts` (admin:auth + TOTP dihitung bun; TOTP_REQUIRED ditangani) ke conv UjiV49 → terukur natW=1200, imgW=320, **bubbleW=504, kosong=170px** — bug persis seperti screenshot.
+- AKAR: v55 mencap `<img>` (`max-w-[min(100%,20rem)]`), tapi lebar GELEMBUNG dihitung browser dari kontribusi intrinsik media — persentase di dalam max-width diabaikan saat intrinsic sizing → gambar 1200px tanpa thumb "mengklaim" ~492px; img dirender 320px, gelembung tetap 504px.
+- FIX ChatBubble.tsx: (1) flag `isMediaBubble` (foto/video) → wrapper gelembung di-cap `max-w-[min(85%,21rem)] sm:min(75%,21rem) md:min(65%,21rem)` = 336px; (2) `onError` img/video → state imgFailed/vidFailed → kartu "Media tidak tersedia" (ikon + nama file, w-72) menggantikan gambar rusak/pemutar kosong.
+- HASIL UKUR: bubble 504 → **336px** (kosong 2px), img 320px; mid 319 (404) → kartu rapi 302px; screenshot /tmp/t72-placeholder.png & /tmp/t72-fixed-bubble.png; konsol 0 error.
+- TEMUAN OPS: db/media lama HILANG akibat rollback checkpoint sandbox (folder tak di-track git sesuai desain 2157ee4; tar media make-backup.sh baru kini dibuat — sebelumnya belum pernah ada karena rollback terjadi sebelum backup pertama). Pesan lama bermMedia-404 kini tampil kartu "Media tidak tersedia" (bukan gambar rusak). Backup manual dijalankan: bundle + chatkita-media-*.tar.gz ✓.
+- Versi v56: pkill → SERVICE_VERSION 'v56' → spawn (banner v56 :3003); instrumentation rescue-v56 + void 0 Task 72; verify-integrity segmen v56 +6 cek → **391/391, 0 gagal** (chmod 644); FEATURES.md segmen v56 (chmod 644); lint 0/0.
+
+Stage Summary:
+- v56 = gelembung foto/video SELALU merangkul media (maks 336px, tak ada lagi ruang kosong) dan media yang filenya hilang tampil sebagai kartu jelas "Media tidak tersedia" — di panel user & admin sekaligus.
+- Media sandbox-loss terdokumentasi + jalur backup media terbukti berjalan (tar media ada di /home/z/backups).
+- Integritas: verify 391/391, lint 0/0; commit + tag rescue-v56 (anti-rollback).
