@@ -35,7 +35,7 @@ chk_file "admin-pusat.tsx (tab Pusat)"       "src/components/chat/admin-pusat.ts
 chk_grep "admin:reset_all (reset total)"     "mini-services/chat-service/index.ts" "admin:reset_all"
 chk_grep "admin:restore (pulihkan JSON)"     "mini-services/chat-service/index.ts" "admin:restore"
 chk_grep "Progres unggah (XHR onProgress)"   "src/lib/chat-utils.ts" "onProgress"
-chk_grep "Viewer panggung 72vh"              "src/components/chat/media-viewer.tsx" "72vh"
+chk_grep "Viewer panggung memenuhi panel (v58)" "src/components/chat/media-viewer.tsx" "min-h-0 w-full flex-1"
 
 echo "[v21 — Caption media]"
 chk_grep "Kolom caption (migrasi)"           "mini-services/chat-service/index.ts" "addColumn('messages', 'caption'"
@@ -485,6 +485,11 @@ chk_grep "Tombol tutup kustom viewer"           "src/components/chat/media-viewe
 chk_grep "Slideshow tetap ada (label)"          "src/components/chat/media-viewer.tsx" 'aria-label={playing ? "Hentikan slideshow" : "Putar slideshow"}'
 chk_grep "X bawaan dialog dimatikan di viewer"  "src/components/chat/media-viewer.tsx" "showCloseButton={false}"
 chk_grep "Penanda komentar v57 (viewer)"        "src/components/chat/media-viewer.tsx" "v57 — digabung dgn tombol tutup"
+
+# ── v58 (Task 74) — panel dialog menumpuk dari atas (anti baris terentang) + viewer isi penuh ──
+chk_grep "Panel dialog: content-start (anti celah)" "src/components/ui/dialog.tsx" "grid w-full content-start gap-4"
+chk_grep "Penanda komentar v58 (dialog)"        "src/components/ui/dialog.tsx" "v58 (Task 74)"
+chk_grep "Penanda komentar v58 (viewer panggung)" "src/components/chat/media-viewer.tsx" "v58 — panggung FLEX-1"
 echo ""
 echo "== Versi server terdaftar =="
 grep -m1 "SERVICE_VERSION = " mini-services/chat-service/index.ts || echo "  ❌ SERVICE_VERSION tidak ditemukan"

@@ -497,3 +497,17 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 - Grup kanan-atas baru `absolute right-3 top-3 flex gap-2` berisi: tombol slideshow (perilaku & gaya tetap) + tombol tutup kustom `aria-label="Tutup pratinjau"` — dua lingkaran gelap 36px seragam berdampingan rapi; target sentuh × naik dari 16px → 36px.
 
 **File kunci:** `src/components/chat/media-viewer.tsx`.
+
+
+## v58 — Panel Dialog Menumpuk dari Atas (Anti Celah Raksasa) + Viewer Isi Penuh (Task 74)
+
+**Permintaan:** "kenapa ini berjarak begini?" + 5 screenshot: Audit log, Kata terlarang, Ganti nama saya, Keamanan 2FA (semuanya panel admin dengan celah kosong raksasa antara judul/deskripsi/isi/footer), plus viewer media yang menyisakan ruang kosong di bawah bar Unduh.
+
+**Akar bug:** sejak v54, `DialogContent` = panel kanan SETINGGI LAYAR (`inset-y-0`) dengan display **grid**. Default `align-content` grid = **stretch** → baris-baris auto DIRENTANGKAN untuk mengisi tinggi panel, sisa ruang vertikal dibagi rata ke semua baris → tiap elemen "melayang" dengan celah besar di panel pendek. (Viewer media lolos karena override display jadi flex — tapi ia punya masalah sendiri: panggung 72vh tetap menyisakan ruang kosong di bawah footer.)
+
+**Perbaikan:**
+
+- `src/components/ui/dialog.tsx` — base panel ditambah **`content-start`**: baris menumpuk dari ATAS, sisa ruang tinggal rapi di dasar panel (pola drawer standar). Satu perubahan base memperbaiki SEMUA dialog panel (user + admin) sekaligus. Overflow-y-auto tetap untuk konten panjang.
+- `src/components/chat/media-viewer.tsx` — panggung foto/video/PDF dari `h-[72vh]` tetap → **`min-h-0 w-full flex-1`**: panggung mengisi seluruh sisa panel, bar footer (nama/reaksi/Unduh) kini nempel di dasar; media tetap object-contain (justru tampil lebih besar di layar tinggi).
+
+**File kunci:** `src/components/ui/dialog.tsx`, `src/components/chat/media-viewer.tsx`.

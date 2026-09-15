@@ -32,6 +32,10 @@ function DialogClose({
 
 // v54 (Task 70): dialog bukan lagi popup melayang —
 // konten tampil sebagai panel kanan (desktop) / halaman penuh (mobile), overlay transparan.
+// v58 (Task 74): panel grid SETINGGI LAYAR + default align-content stretch membuat
+// baris-baris auto TERENTANG mengisi tinggi panel → celah raksasa antar-elemen
+// (judul↔isi↔footer) pada dialog pendek — persis laporan screenshot.
+// Perbaikan: `content-start` → baris menumpuk dari ATAS, sisa ruang tinggal di dasar.
 function DialogOverlay({
   className,
   ...props
@@ -62,7 +66,7 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right fixed inset-y-0 right-0 z-50 grid w-full gap-4 overflow-y-auto border-l p-6 shadow-2xl duration-200 sm:w-[640px] sm:rounded-l-2xl",
+          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right fixed inset-y-0 right-0 z-50 grid w-full content-start gap-4 overflow-y-auto border-l p-6 shadow-2xl duration-200 sm:w-[640px] sm:rounded-l-2xl",
           className
         )}
         {...props}

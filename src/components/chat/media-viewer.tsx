@@ -387,14 +387,15 @@ function ViewerDialog({
           </button>
         </div>
 
-        {/* Isi pratinjau per jenis. v20 — panggung TETAP tinggi (72vh):
-            media kecil pun dirender BESAR memenuhi panggung (object-contain),
-            tidak lagi mengikuti dimensi asli file. */}
+        {/* Isi pratinjau per jenis. v20 — media kecil pun dirender BESAR
+            memenuhi panggung (object-contain), tidak mengikuti dimensi asli file.
+            v58 — panggung FLEX-1 mengisi panel (bukan 72vh tetap): footer
+            nempel di dasar panel, tak ada lagi ruang kosong di bawahnya. */}
         {isImage ? (
           <div
             {...swipeProps}
             className={cn(
-              "flex h-[72vh] w-full shrink-0 items-center justify-center overflow-hidden rounded-lg bg-black",
+              "flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden rounded-lg bg-black",
               zoomed && "items-start justify-start overflow-auto"
             )}
           >
@@ -414,7 +415,7 @@ function ViewerDialog({
         ) : kind === "video" ? (
           <div
             {...swipeProps}
-            className="flex h-[72vh] w-full shrink-0 items-center justify-center"
+            className="flex min-h-0 w-full flex-1 items-center justify-center"
           >
             {/* key=url: elemen lama benar-benar di-unmount saat navigasi
                 (tidak ada audio/video "hantu" yang terus berjalan). */}
@@ -438,7 +439,7 @@ function ViewerDialog({
           <iframe
             src={current.url}
             title={displayName}
-            className="h-[72vh] w-full rounded-lg bg-white"
+            className="min-h-0 w-full flex-1 rounded-lg bg-white"
           />
         ) : (
           <div
