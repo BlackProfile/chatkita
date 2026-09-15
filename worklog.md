@@ -1499,3 +1499,28 @@ Stage Summary:
 - Tombol ▶ di viewer = slideshow otomatis (3 dtk/media); kini ▶ dan × tampil sebagai dua tombol seragam berdampingan tanpa tumpang tindih, di panel user & admin sekaligus (komponen bersama).
 - Bonus aksesibilitas: target sentuh × viewer 16px → 36px.
 - Integritas: verify 396/396, lint 0/0; commit + tag rescue-v57 (anti-rollback).
+
+---
+Task ID: 74
+Agent: Z.ai Code (main)
+Task: v58 — "kenapa ini berjarak begini?": celah raksasa di panel dialog (Audit log, Kata terlarang, Ganti nama, 2FA) + ruang kosong di bawah footer viewer
+
+Work Log:
+- LAPORAN USER: 5 screenshot — 4 panel admin (Audit log, Kata terlarang, Ganti nama saya, Keamanan 2FA) dengan celah kosong raksasa antara judul/deskripsi/isi/footer, + viewer media dengan ruang kosong di bawah bar Unduh.
+- AKAR (dialog): sejak v54 DialogContent = panel kanan setinggi layar (inset-y-0) dengan display GRID. Default align-content grid = stretch → baris auto DIRENTANGKAN mengisi tinggi panel, sisa ruang dibagi rata ke semua baris → elemen "melayang" dengan celah besar pada dialog pendek. Viewer lolos (override display flex) tapi punya masalah sendiri: panggung h-72vh tetap → sisa panel kosong di bawah footer.
+- FIX dialog.tsx (base, memperbaiki SEMUA dialog panel user+admin sekaligus): tambah `content-start` → baris menumpuk dari ATAS, sisa ruang rapi di dasar (pola drawer standar). Audit: 0 pemanggil DialogContent yang bergantung pada stretch/flex-1/grid-cols; alert-dialog (sheet bawah, tinggi alami) tak terdampak.
+- FIX media-viewer.tsx: panggung foto/video/PDF `h-[72vh] shrink-0` → `min-h-0 w-full flex-1` → panggung mengisi panel, footer (nama/reaksi/Unduh) nempel dasar; media tetap object-contain (tampil lebih besar di layar tinggi).
+- Versi v58: pkill (port FREE) → SERVICE_VERSION 'v58' → spawn → banner v58 :3003; instrumentation rescue-v58 + void 0 (Task 74).
+- verify-integrity: cek lama "Viewer panggung 72vh" diganti "Viewer panggung memenuhi panel (v58)" (min-h-0 w-full flex-1); segmen v58 +3 cek → **399/399, 0 gagal** (chmod 644). FEATURES.md segmen v58 (chmod 644). Lint 0/0.
+- E2E gateway :81, session t74a desktop 1440×900 (login admin123 + TOTP fresh dari /tmp/totp.mjs):
+  - Ganti nama saya: desc→input gap **16px** (= gap-4; sebelumnya ~250px); panelH 900.
+  - Audit log: desc→"Bersihkan log" gap **16px**; list ol max-h-96 internal scroll utuh (scrollH 5809).
+  - Kata terlarang: input→"Belum ada kata" gap **16px**.
+  - Keamanan 2FA: desc→status gap **16px**; QR/blok nonaktif menumpuk rapi.
+  - Viewer (conv UjiV49, chip "2 / 2"): footerBottom 884 dari panel 900 → sisa 16px = persis padding sm:p-4 — footer di dasar sempurna; screenshot /tmp/t74-rename.png, t74-audit.png, t74-keywords.png, t74-totp.png, t74-viewer.png.
+  - Konsol & page errors: 0. Catatan teknis: klik menuitem Radix via el.click() TIDAK memicu menu — harus via agent-browser click @ref (dialami saat uji Kata terlarang).
+- Commit 4e84373 + tag rescue-v58 di-push.
+
+Stage Summary:
+- v58 = panel dialog kini menumpuk konten dari atas tanpa baris terentang (semua dialog user+admin sekali fix dari base), dan viewer media mengisi penuh panel dengan footer di dasar.
+- Integritas: verify 399/399, lint 0/0; commit + tag rescue-v58 (anti-rollback).
