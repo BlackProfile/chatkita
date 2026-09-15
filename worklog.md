@@ -1602,3 +1602,22 @@ Work Log:
 Stage Summary:
 - v62: user bisa login via tautan khusus buatan admin tanpa password; kode link 256-bit hash-only, sekali pakai, anti brute-force, tidak pernah terekspos ke publik (DB/log/list/user lain); admin punya kendali penuh (buat/cabut/hapus + status).
 - Commit + tag rescue-v62.
+
+---
+Task ID: 79
+Agent: Z.ai Code (utama)
+Task: "bagusnya dibuat kayak mana ya jika ada nama yang sama? apa mainkan dipassword?" — analisis desain anti-nama-sama + tambal celah jalur pemulihan lupa password (v63).
+
+Work Log:
+- Investigasi model terpasang: nama = identitas unik case-insensitive (findUserByRoleAndName), password = bukti kepemilikan (v27: Bun.password.verify + rate-limit per nama), cek nama live pre-login (v28 public:check_name), saran nama bebas "rvg (2)" (v51 suggestFreeName loop i=2..99), anti-pembajakan akun warisan tanpa kredensial (v51), 1-perangkat-1-akun; jalur admin user_reset_password / user_rename / user_delete sudah ada sejak lama.
+- Analisis 3 model: (1) nama unik + password (sekarang) — ambigu nol, anti-penyaruhan; (2) nama sama diperbolehkan + password menentukan akun — daftar chat ambigu, butuh lencana pembeda di banyak UI, rawan rekayasa sosial; (3) nama bebas + @handle unik (Telegram/Discord) — rapi tapi menambah konsep baru, overkill. Keputusan: pertahankan (1).
+- Celah ditemukan: pemilik asli yang lupa password tidak pernah diarahkan ke admin (reset via admin:user_reset_password sudah ada) — justru didorong daftar duplikat "rvg (2)".
+- v63 (klien saja): kotak amber v51 + pesan INVALID_PASSWORD kini menambahkan "Lupa password? Minta admin me-reset akunmu."; server bump SERVICE_VERSION 'v63' (blok komentar v60–v62 dipertahankan sebagai penanda historis); instrumentation void-0 komentar v63 + RESCUE_TAG rescue-v63.
+- verify-integrity: run pertama 445/2 — lupa mengkonversi 2 cek literal v62 (SERVICE_VERSION/rescue-v62) mengikuti pola "cek nilai live" → diganti penanda historis tetap (blok komentar v62 di service, indikator "Memverifikasi tautan masuk" di Messenger); seksi v63 +7 cek; chmod 644 → 447/447.
+- Prosedur wajib: pkill → port 3003 BEBAS → edit → nohup bun --hot → banner "ChatKita chat-service v63 listening on port 3003" ✓.
+- E2E agent-browser (sesi t79, gateway :81): ketik "rvg" (akun existing di DB) → label "Nama akun" + kode undangan disembunyikan + kotak amber dgn hint reset + tombol "Daftar sebagai 'rvg (2)'"; submit password salah → "Nama atau password salah. Lupa password? Minta admin me-reset akunmu." (verbatim via eval DOM); konsol bersih, 0 error; screenshot /tmp/t79-login-hint.png & /tmp/t79-final.png; lint 0/0.
+
+Stage Summary:
+- Keputusan desain: nama tetap unik + password sebagai kunci kepemilikan — pertanyaan "apa mainkan dipassword?" terjawab: memang sudah; melarang nama sama justru melindungi (daftar chat tak ambigu, anti-penyaruhan).
+- v63: dua titik UI (kotak amber + pesan password salah) kini menuntun pemilik lupa-password ke admin (reset), bukan ke fragmentasi akun.
+- Commit + tag rescue-v63.

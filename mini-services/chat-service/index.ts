@@ -229,7 +229,10 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * tile OSM zoom 15 tanpa API key); server hanya bump versi. */
 /* v62 (Task 78) — tautan masuk (magic link) buatan admin: token acak 256-bit,
  * DB hanya menyimpan hash SHA-256, sekali pakai, rate-limit penukaran. */
-const SERVICE_VERSION = 'v62'
+/* v63 (Task 79) — anti-nama-sama: pemilik yang lupa password diarahkan minta
+ * admin reset (admin:user_reset_password), bukan didorong daftar nama
+ * duplikat; server hanya bump versi. */
+const SERVICE_VERSION = 'v63'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'

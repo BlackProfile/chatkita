@@ -1250,6 +1250,8 @@ export function Messenger() {
             }
             // v28 — password salah berarti akunnya ada → pastikan kolom kode
             // undangan tersembunyi (cek debounce mungkin belum sempat jalan).
+            // v63 — jalur pemulihan: pesan error ikut mengarahkan pemilik
+            // yang lupa password minta admin reset (bukan daftar nama baru).
             if (res.error === "INVALID_PASSWORD") setNameExists(true);
             // v27 — sesi lanjutan ditolak server (perangkat terikat akun lain)
             // → pindah ke mode isi nama dan minta password.
@@ -1286,7 +1288,7 @@ export function Messenger() {
                     : res.error === "PASSWORD_REQUIRED"
                       ? "Akun ini memakai password — masukkan password Anda. Bukan akun Anda? Chat pemiliknya tidak bisa dibuka; daftar dengan nama lain."
                       : res.error === "INVALID_PASSWORD"
-                        ? "Nama atau password salah."
+                        ? "Nama atau password salah. Lupa password? Minta admin me-reset akunmu."
                         : res.error === "TOO_MANY_ATTEMPTS"
                           ? "Terlalu banyak percobaan gagal — tunggu ±1 menit."
                           : res.error === "WEAK_PASSWORD"
@@ -2317,13 +2319,16 @@ export function Messenger() {
                       </p>
                     ) : null}
                     {/* v51 — anti-dupe nama: nama ini milik akun orang lain.
+                        v63 — pemilik yang lupa password diarahkan minta admin
+                        reset, bukan didorong mendaftar nama duplikat.
                         Peringatkan + tawarkan daftar dengan nama alternatif
                         supaya chat pemilik nama pertama tidak bisa dibuka. */}
                     {nameExists === true && nameSuggestion ? (
                       <div className="space-y-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 dark:border-amber-400/25 dark:bg-amber-400/10">
                         <p className="text-xs font-medium leading-relaxed text-amber-900 dark:text-amber-200">
                           Nama ini sudah dipakai akun lain. Punya akunnya?
-                          Masukkan password di atas. Bukan kamu? Chat pemilik
+                          Masukkan password di atas — lupa password? Minta
+                          admin me-reset akunmu. Bukan kamu? Chat pemilik
                           akun tidak bisa dibuka orang lain — daftar sebagai
                           akun baru dengan nama berbeda.
                         </p>

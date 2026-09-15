@@ -613,3 +613,17 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser, 3 sesi):** admin buat tautan UjiV49 → URL `ckl_…` 43 char tampil sekali; DB berisi hash-only (hex 64, preview 10 char); sesi baru buka tautan → **auto-login UjiV49**, URL bersih jadi `/`, sesi tersimpan, chat tampil; DB: used=1 + used_device terisi; log server tanpa token; sesi ketiga buka tautan sama → ditolak "Tautan ini sudah pernah digunakan di perangkat lain." + kembali ke form login; konsol bersih. Verify **440/440**; lint 0/0.
 
 **File kunci:** `mini-services/chat-service/index.ts`, `src/components/chat/Messenger.tsx`, `src/components/chat/admin-dashboard.tsx`, `src/lib/chat-types.ts`.
+
+## v63 — Anti-Nama-Sama: Jalur Pemulihan "Lupa Password" (Task 79)
+
+**Konteks:** pertanyaan desain "bagusnya dibuat kayak mana ya jika ada nama yang sama? apa mainkan dipassword?" — Model terpasang (v27/v51) **sudah memainkan password**: nama = identitas unik (case-insensitive), password = bukti kepemilikan; nama ganda tidak dibiarkan — cek live saat mengetik (`public:check_name`) + saran "rvg (2)" (`suggestFreeName`). Dianalisis tiga model: (1) **nama unik + password** (sekarang) — daftar chat & riwayat selalu tak ambigu, anti-penyaruhan; (2) nama sama diperbolehkan, password menentukan akun — daftar chat ambigu, butuh lencana pembeda di banyak UI, membuka rekayasa sosial; (3) nama bebas + @handle unik ala Telegram/Discord — rapi tapi menambah konsep baru, overkill untuk skala aplikasi. Keputusan: pertahankan model (1), tutup celah informasinya.
+
+**Celah yang ditambal:** pemilik asli yang **lupa password** tidak pernah diberi tahu jalur pemulihan (admin bisa reset via `admin:user_reset_password` sejak v27) — kotak peringatan malah mendorongnya mendaftar "rvg (2)" → fragmentasi akun & chat lama tak tersentuh.
+
+**Perubahan (klien saja; server hanya bump versi):**
+- Kotak peringatan nama-dipakai: "…Masukkan password di atas — **lupa password? Minta admin me-reset akunmu.** Bukan kamu? …"
+- Pesan `INVALID_PASSWORD`: "Nama atau password salah. **Lupa password? Minta admin me-reset akunmu.**"
+
+**E2E terverifikasi (agent-browser):** ketik "rvg" (akun existing di DB) → label berubah "Nama akun", kode undangan disembunyikan, kotak amber + saran "rvg (2)" + hint reset tampil; submit password salah → "Nama atau password salah. Lupa password? Minta admin me-reset akunmu." (verbatim via DOM); konsol bersih. Verify **447/447**; lint 0/0.
+
+**File kunci:** `src/components/chat/Messenger.tsx`, `mini-services/chat-service/index.ts` (bump), `src/instrumentation.ts` (rescue-v63), `scripts/verify-integrity.sh` (+7 cek; 2 cek literal v62 → penanda historis).
