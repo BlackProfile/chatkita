@@ -1565,3 +1565,22 @@ Work Log:
 Stage Summary:
 - v60: fitur game DIHAPUS seluruhnya (server + klien + migrasi data); terjemahan & transkrip VN kini fitur ADMIN — on-demand, ter-cache di DB, tidak pernah sampai ke user (riwayat maupun live).
 - Commit + tag rescue-v60.
+
+---
+Task ID: 77
+Agent: Z.ai Code (utama)
+Task: "apakah ini bisa dibuat previewnya mapnya langsung diaplikasi?" — pratinjau peta langsung di bubble pesan lokasi (v61).
+
+Work Log:
+- Konteks: Task 76 (v60) ternyata sudah rampung & ter-commit di sesi sebelumnya (e7cd2c8, hapus game + terjemahan & transkrip VN khusus admin, verify 417/417) — ringkasan sesi ternyata basi. Tugas aktif tinggal preview peta.
+- Investigasi: pesan lokasi = type 'location', content JSON {lat,lng,label}; render tunggal di ChatBubble.tsx (dipakai user + admin); TIDAK ada CSP di proyek; tile.openstreetmap.org terjangkau dari sandbox (curl 200, PNG 256px); 5 pesan lokasi ada di chat.db (id 329 = koordinat screenshot user).
+- Komponen baru src/components/chat/mini-map.tsx: peta statis dari tile OSM resmi zoom 15 (256px, tanpa API key); grid dihitung proyeksi Web Mercator; titik lokasi anchor pusat kontainer via calc(50% + offset) → pin selalu persis di koordinat walau lebar kontainer berubah; pin MapPin fill merah + atribusi © OpenStreetMap (kepatuhan kebijakan tile); onError satu tile saja → setFailed → seluruh peta disembunyikan (kartu jatuh ke layout lama — degradasi anggun); seluruh peta = <a> ke Google Maps (aria-label deskriptif, tab baru); offset tile Math.round agar antar-tile rapat (fix celah subpiksel).
+- Integrasi 1 titik: blok type === "location" di ChatBubble.tsx → <MiniMap> antara header label dan baris koordinat; server hanya bump versi (SERVICE_VERSION 'v61').
+- Prosedur wajib dijalankan: pkill chat-service (3 pola) → port 3003 BEBAS → edit → nohup bun --hot → banner "ChatKita chat-service v61 listening on port 3003" ✓.
+- E2E agent-browser (login UjiV49 via gateway :81): pesan lokasi 329 & 309 merender peta; 8/8 tile loaded, 0 broken (naturalWidth 256); href peta benar (maps.google.com/?q=...); konsol bersih; setelah reload pasca-fix rounding tetap 8/8; screenshot /tmp/t77-map-final.png.
+- verify-integrity.sh: cek "Versi service v60" (literal lama) diganti cek blok komentar v60; seksi v61 +8 cek (MiniMap tile/Mercator/fallback/atribusi/zoom/pemasangan + SERVICE_VERSION v61 + rescue-v61); chmod 644 → 425/425.
+- Lint 0/0; instrumentation rescue-v61; FEATURES.md §v61.
+
+Stage Summary:
+- v61: pesan lokasi kini menampilkan peta OSM statis langsung di bubble (user & admin), pin tepat di titik, klik peta/tombol → Google Maps, fallback anggun bila tile gagal. Tanpa perubahan perilaku server.
+- Commit + tag rescue-v61.

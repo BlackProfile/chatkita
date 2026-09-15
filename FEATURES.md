@@ -562,3 +562,23 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi:** menu "Main game" hilang di kedua sisi; pesan game legacy termigrasi (0 tersisa); admin mengetuk pesan Inggris → 🌐 "Halo admin, ini adalah pesan bahasa Inggris untuk tes terjemahan v60."; admin mengetuk VN → 📝 transkrip tampil; setelah reload panel, keduanya langsung tampil dari riwayat; sesi user TIDAK menampilkan 🌐/📝 sama sekali; konsol bersih; verify 417/417; lint 0/0.
 
 **File kunci:** `mini-services/chat-service/index.ts`, `src/components/chat/{ChatBubble,Messenger,AdminPanel}.tsx`, `src/lib/{chat-types,chat-utils}.ts`.
+
+## v61 — Pratinjau Peta Statis di Kartu Lokasi (Task 77)
+
+**Permintaan:** "apakah ini bisa dibuat previewnya mapnya langsung diaplikasi?" (screenshot kartu lokasi "Lokasi saya" dengan koordinat -5.42118, 105.27967)
+
+**Jawaban: bisa — sekarang peta tampil langsung di bubble.** Sebelumnya kartu lokasi hanya menampilkan label + koordinat + tombol "Buka di Google Maps" (peta baru terlihat setelah keluar aplikasi). Kini setiap pesan `type: 'location'` merender **peta statis sungguhan di dalam bubble**.
+
+**Implementasi — komponen `MiniMap` (`src/components/chat/mini-map.tsx`):**
+
+- Peta dirakit langsung di klien dari **tile resmi OpenStreetMap zoom 15** (256 px, tanpa API key, tanpa layanan pihak ketiga berbayar). Grid tile dihitung via proyeksi Web Mercator; titik lokasi **selalu tepat di pusat kontainer** (anchor `calc(50% + offset)`), sehingga pin menunjuk koordinat yang persis — aman untuk kontainer ≤ 240×128 (kartu `w-60`).
+- **Pin merah** (ikon `MapPin` fill) menandai titik; **atribusi "© OpenStreetMap"** wajib tampil di pojok (kepatuhan kebijakan tile).
+- **Degradasi anggun:** satu tile saja gagal dimuat (offline/timeout) → `onError` menyembunyikan seluruh peta dan kartu jatuh kembali ke tata letak lama (label + koordinat + tombol) — tidak pernah ada peta setengah jadi.
+- Seluruh peta adalah **tautan ke Google Maps** (`https://maps.google.com/?q=lat,lng`, tab baru) dengan `aria-label` deskriptif; tombol teks tetap ada di bawahnya. Offset tile dibulatkan (`Math.round`) agar antar-tile selalu rapat tanpa celah subpiksel.
+- Tidak ada CSP di proyek → `img-src` eksternal aman; tile di-`loading="lazy"` sehingga hanya dimuat saat kartu terlihat.
+
+**Integrasi:** satu titik — kartu lokasi di `ChatBubble.tsx` (baris blok `type === "location"`), yang dipakai bersama oleh **Messenger (user) dan AdminPanel (admin)**, jadi pratinjau langsung muncul di kedua sisi tanpa perubahan server. Perubahan chat-service hanya bump versi.
+
+**E2E terverifikasi (agent-browser, login UjiV49):** pesan lokasi id 329 (-5.42119, 105.27967 — persis screenshot permintaan) dan id 309 (Jakarta) keduanya merender peta; **8/8 tile termuat, 0 gagal** (`naturalWidth === 256`); pin & atribusi tampak; href peta → `https://maps.google.com/?q=-5.4211857939110075,105.2796700953496`; konsol bersih; tetap 8/8 setelah reload (post-fix rounding). Verify **425/425**; lint 0/0.
+
+**File kunci:** `src/components/chat/mini-map.tsx` (baru), `src/components/chat/ChatBubble.tsx`, `mini-services/chat-service/index.ts` (bump), `src/instrumentation.ts` (rescue-v61).

@@ -33,6 +33,7 @@ import { cn } from "@/lib/utils";
 import { FileKindIcon } from "@/components/chat/media-viewer";
 import { firstUrlInText, LinkifiedText, LinkPreviewCard } from "@/components/chat/link-preview";
 import { StickerSvg } from "@/lib/stickers";
+import { MiniMap } from "@/components/chat/mini-map";
 import { VoicePlayer } from "@/components/chat/voice-player";
 import { Eye, Flame, FolderPlus, BarChart3, MapPin, UserRound } from "lucide-react";
 
@@ -541,7 +542,7 @@ export function ChatBubble({
               </p>
             </div>
           ) : type === "location" && locationData ? (
-            /* v52 — kartu lokasi: koordinat + buka di peta. */
+            /* v61 — kartu lokasi: pratinjau peta statis (tile OSM) + koordinat + buka di peta. */
             <div
               className="w-60 min-w-52 px-1.5 py-1"
               onClick={(e) => e.stopPropagation()}
@@ -550,7 +551,13 @@ export function ChatBubble({
                 <MapPin className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
                 <span className="break-words">{locationData.label || "Lokasi"}</span>
               </p>
-              <p className="mt-0.5 text-xs tabular-nums opacity-80">
+              <MiniMap
+                lat={locationData.lat}
+                lng={locationData.lng}
+                href={`https://maps.google.com/?q=${locationData.lat},${locationData.lng}`}
+                className="mt-1.5"
+              />
+              <p className="mt-1.5 text-xs tabular-nums opacity-80">
                 {locationData.lat.toFixed(5)}, {locationData.lng.toFixed(5)}
               </p>
               <a

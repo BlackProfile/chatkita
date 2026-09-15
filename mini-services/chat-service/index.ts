@@ -225,7 +225,9 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * /api/media diminta (fallback /http/media_blob). Retensi tetap 0 hari. */
 /* v60 — fitur mini-game DIHAPUS seluruhnya; terjemahan + transkrip VN kini
  * ON-DEMAND dan KHUSUS ADMIN (user tidak lagi menerima keduanya). */
-const SERVICE_VERSION = 'v60'
+/* v61 (Task 77) — pratinjau peta statis pesan lokasi di klien (MiniMap,
+ * tile OSM zoom 15 tanpa API key); server hanya bump versi. */
+const SERVICE_VERSION = 'v61'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'

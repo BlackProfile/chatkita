@@ -501,7 +501,7 @@ chk_grep "Fallback Next: restoreFromBlob"       "src/app/api/media/[name]/route.
 chk_grep "Fallback Next: URL blob service"      "src/app/api/media/[name]/route.ts" "http://127.0.0.1:3003/http/media_blob"
 
 # ── v60 (Task 76) — fitur game dihapus; terjemahan & transkrip VN khusus admin ──
-chk_grep "Versi service v60"                    "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v60'"
+chk_grep "Blok komentar v60 di service"        "mini-services/chat-service/index.ts" "v60 — fitur mini-game DIHAPUS"
 chk_grep "Migrasi pesan game legacy"            "mini-services/chat-service/index.ts" "Mini-game (fitur dihapus)"
 chk_grep "Event transkrip VN (service)"         "mini-services/chat-service/index.ts" "message:transcribe"
 chk_grep "Terjemahan khusus admin (service)"    "mini-services/chat-service/index.ts" "v60 — terjemahan AI KHUSUS ADMIN"
@@ -512,6 +512,16 @@ chk_grep "Tombol transkrip di bubble"           "src/components/chat/ChatBubble.
 chk_grep "Indikator transkrip berjalan"         "src/components/chat/ChatBubble.tsx" "Mentranskripsikan…"
 chk_grep "Wiring transkrip admin"               "src/components/chat/AdminPanel.tsx" "message:transcribe"
 chk_grep "Penanda sisi user v60"                "src/components/chat/Messenger.tsx" "v60 — terjemahan & transkrip kini KHUSUS ADMIN"
+
+# ── v61 (Task 77) — pratinjau peta statis pesan lokasi (MiniMap, tile OSM) ──
+chk_grep "Komponen MiniMap (tile OSM)"          "src/components/chat/mini-map.tsx" "tile.openstreetmap.org"
+chk_grep "Proyeksi Web Mercator MiniMap"        "src/components/chat/mini-map.tsx" "Math.PI"
+chk_grep "Fallback gagal-muat MiniMap"          "src/components/chat/mini-map.tsx" "setFailed"
+chk_grep "Atribusi OpenStreetMap MiniMap"       "src/components/chat/mini-map.tsx" "© OpenStreetMap"
+chk_grep "Zoom 15 MiniMap"                      "src/components/chat/mini-map.tsx" "ZOOM = 15"
+chk_grep "MiniMap terpasang di kartu lokasi"    "src/components/chat/ChatBubble.tsx" "<MiniMap"
+chk_grep "Versi service v61"                    "mini-services/chat-service/index.ts" "SERVICE_VERSION = 'v61'"
+chk_grep "Penanda rescue v61"                   "src/instrumentation.ts" "rescue-v61"
 echo ""
 echo "== Versi server terdaftar =="
 grep -m1 "SERVICE_VERSION = " mini-services/chat-service/index.ts || echo "  ❌ SERVICE_VERSION tidak ditemukan"
