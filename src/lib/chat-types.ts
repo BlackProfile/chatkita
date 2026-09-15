@@ -97,7 +97,7 @@ export interface ChatUser {
   hasPin?: boolean;
 }
 
-export type MessageContentType = "text" | "image" | "voice" | "file" | "system" | "sticker" | "poll" | "game" | "location" | "contact";
+export type MessageContentType = "text" | "image" | "voice" | "file" | "system" | "sticker" | "poll" | "location" | "contact";
 
 /** Grouped emoji reactions on one message. */
 export interface MessageReaction {
@@ -393,6 +393,12 @@ export interface SetPinAck {
 export interface TranslateAck {
   ok: true;
   translation: string | null;
+}
+
+/** v60 — hasil transkrip VN on-demand (khusus admin). */
+export interface TranscribeAck {
+  ok: true;
+  transcript: string | null;
 }
 
 export interface PinUpdatePayload {

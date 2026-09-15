@@ -8,6 +8,7 @@ import {
   Clock,
   Copy,
   Download,
+  AudioLines,
   History,
   Hourglass,
   Image as ImageIcon,
@@ -51,7 +52,7 @@ interface ChatBubbleProps {
   createdAt: string;
   /** left = received (partner), right = sent by current user */
   side: "left" | "right";
-  type?: "text" | "image" | "voice" | "file" | "system" | "sticker" | "poll" | "game" | "location" | "contact";
+  type?: "text" | "image" | "voice" | "file" | "system" | "sticker" | "poll" | "location" | "contact";
   /** file messages: metadata tampilan (ikon, ukuran, nama). */
   fileName?: string;
   fileSize?: number;
@@ -87,6 +88,10 @@ interface ChatBubbleProps {
   translation?: string;
   /** v5 — translation request in flight. */
   translating?: boolean;
+  /** v60 — transkrip VN on-demand (khusus admin): tombol aksi di bubble. */
+  onTranscribe?: () => void;
+  /** v60 — permintaan transkrip sedang berjalan. */
+  transcribing?: boolean;
   /** v5 — this message is pinned in the conversation. */
   pinned?: boolean;
   /** v5 — can the user edit this message now (own text < window). */
@@ -115,8 +120,7 @@ interface ChatBubbleProps {
   myPollChoice?: number | null;
   /** v52 — beri/ganti suara pada opsi polling. */
   onPollVote?: (optionIndex: number) => void;
-  /* v52 — kartu game (dadu/koin/RPS) & lokasi/kontak di-parse dari content. */
-  gameData?: { game: string; pick: string | number | null; server: string | number; outcome: "menang" | "kalah" | "seri" | null } | null;
+  /* v52 — kartu lokasi/kontak di-parse dari content (v60: game dihapus). */
   locationData?: { lat: number; lng: number; label: string } | null;
   contactData?: { name: string; phone: string; note: string } | null;
   /** v48 — teruskan pesan ini ke percakapan lain (pemilih di induk). */
@@ -180,6 +184,8 @@ export function ChatBubble({
   edited = false,
   translation,
   translating = false,
+  onTranscribe,
+  transcribing = false,
   pinned = false,
   canEdit = false,
   canPin = false,
@@ -196,7 +202,6 @@ export function ChatBubble({
   pollResults,
   myPollChoice,
   onPollVote,
-  gameData,
   locationData,
   contactData,
   linkPreviewEnabled = true,
@@ -535,40 +540,6 @@ export function ChatBubble({
                 {pollResults?.total ?? 0} suara · ketuk opsi untuk memilih / mengganti
               </p>
             </div>
-          ) : type === "game" && gameData ? (
-            /* v52 — mini-game: kartu hasil dadu/koin/batu-gunting-kertas. */
-            <div
-              className="w-56 min-w-48 px-1.5 py-1 text-center"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <p className="text-[11px] font-semibold uppercase tracking-wider opacity-75">
-                {gameData.game === "dice"
-                  ? "🎲 Dadu"
-                  : gameData.game === "coin"
-                    ? "🪙 Koin"
-                    : "✊✋✌️ Batu-Gunting-Kertas"}
-              </p>
-              <p className="my-2 text-4xl leading-none">
-                {gameData.game === "dice"
-                  ? (["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"][Number(gameData.server) - 1] ?? "🎲")
-                  : gameData.game === "coin"
-                    ? gameData.server === "kepala"
-                      ? "🪙"
-                      : "💰"
-                    : gameData.server === "batu"
-                      ? "✊"
-                      : gameData.server === "gunting"
-                        ? "✌️"
-                        : "✋"}
-              </p>
-              <p className="text-xs font-medium leading-snug">
-                {gameData.game === "dice"
-                  ? `Hasil: angka ${gameData.server}`
-                  : gameData.game === "coin"
-                    ? `Hasil: sisi ${gameData.server}`
-                    : `Kamu ${gameData.pick ?? "?"} vs server ${gameData.server} — ${gameData.outcome ?? "?"}`}
-              </p>
-            </div>
           ) : type === "location" && locationData ? (
             /* v52 — kartu lokasi: koordinat + buka di peta. */
             <div
@@ -886,6 +857,17 @@ export function ChatBubble({
               🌐 Menerjemahkan…
             </p>
           ) : null}
+          {/* v60 — indikator transkrip sedang diproses (khusus admin). */}
+          {!deleted && transcribing ? (
+            <p
+              className={cn(
+                "mt-1.5 border-t pt-1.5 text-xs italic",
+                isRight ? "border-white/50" : "border-border text-muted-foreground"
+              )}
+            >
+              📝 Mentranskripsikan…
+            </p>
+          ) : null}
 
           {/* Time + read receipts */}
           <span
@@ -1055,6 +1037,20 @@ export function ChatBubble({
             >
               <Languages className="size-3.5" aria-hidden="true" />
               {translation ? "Terjemahan" : "Terjemahkan"}
+            </button>
+          ) : null}
+          {/* v60 — transkrip VN on-demand (khusus admin). */}
+          {type === "voice" && !deleted && onTranscribe ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
+              onClick={() => {
+                closeActions();
+                onTranscribe();
+              }}
+            >
+              <AudioLines className="size-3.5" aria-hidden="true" />
+              {transcript ? "Transkrip" : "Transkripsikan"}
             </button>
           ) : null}
           {canPin && onPin ? (

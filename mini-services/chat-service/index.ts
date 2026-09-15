@@ -37,8 +37,8 @@
  *   - Typing relay between the two participants
  *   - Pin a message per conversation (banner on both sides)
  *   - Archive / unarchive conversations (a new user message auto-unarchives)
- *   - Voice-note transcription (z-ai-web-dev-sdk ASR → message:updated)
- *   - On-demand AI translation (messages.translation, cached)
+ *   - v60 — voice-note transcription ON-DEMAND (ASR) — KHUSUS ADMIN
+ *   - On-demand AI translation (messages.translation, cached) — KHUSUS ADMIN
  *   - Web Push notifications when the recipient has no live socket
  *     (VAPID keys generated once, stored in settings; subscriptions in
  *     push_subscriptions; dead endpoints pruned on 404/410)
@@ -223,7 +223,9 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * disk db/media menjadi cache tulis-lulus. File yang hilang karena reset
  * lingkungan dipulihkan otomatis: saat boot (restore massal) dan saat
  * /api/media diminta (fallback /http/media_blob). Retensi tetap 0 hari. */
-const SERVICE_VERSION = 'v59'
+/* v60 — fitur mini-game DIHAPUS seluruhnya; terjemahan + transkrip VN kini
+ * ON-DEMAND dan KHUSUS ADMIN (user tidak lagi menerima keduanya). */
+const SERVICE_VERSION = 'v60'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -434,6 +436,10 @@ db.run(`
     created_at INTEGER NOT NULL
   )
 `)
+/* v60 — hapus fitur mini-game: pesan game legacy diturunkan jadi teks. */
+db.run(
+  "UPDATE messages SET type = 'text', content = '🎮 Mini-game (fitur dihapus)' WHERE type = 'game'"
+)
 db.run(`
   CREATE TABLE IF NOT EXISTS login_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -624,7 +630,7 @@ interface ChatMessageApi {
   senderId: string
   content: string
   createdAt: string
-  type: 'text' | 'image' | 'voice' | 'file' | 'system' | 'sticker' | 'poll' | 'game' | 'location' | 'contact'
+  type: 'text' | 'image' | 'voice' | 'file' | 'system' | 'sticker' | 'poll' | 'location' | 'contact'
   replyToId?: number
   replyTo?: { id: number; senderId: string; snippet: string; type: string }
   durationMs?: number
@@ -1370,7 +1376,12 @@ const starredByOf = (raw: string | null | undefined): string[] => {
   }
 }
 
-const toChatMessage = (row: MessageRow): ChatMessageApi => ({
+/**
+ * v60 — serializer baris → payload klien. `viewerAdmin` menentukan apakah
+ * transkrip VN & terjemahan AI ikut disertakan (KHUSUS admin; user tidak
+ * pernah menerima keduanya, baik di riwayat maupun pembaruan live).
+ */
+const toChatMessage = (row: MessageRow, viewerAdmin = false): ChatMessageApi => ({
   id: row.id,
   conversationId: row.conversation_id,
   senderId: row.sender_id,
@@ -1379,10 +1390,10 @@ const toChatMessage = (row: MessageRow): ChatMessageApi => ({
   type: (row.type as ChatMessageApi['type']) ?? 'text',
   ...(row.reply_to_id ? { replyToId: row.reply_to_id } : {}),
   ...(row.duration_ms ? { durationMs: row.duration_ms } : {}),
-  ...(row.transcript ? { transcript: row.transcript } : {}),
+  ...(viewerAdmin && row.transcript ? { transcript: row.transcript } : {}),
   ...(row.deleted_at ? { deletedAt: new Date(row.deleted_at).toISOString() } : {}),
   ...(row.edited_at ? { editedAt: new Date(row.edited_at).toISOString() } : {}),
-  ...(row.translation && !row.deleted_at ? { translation: row.translation } : {}),
+  ...(viewerAdmin && row.translation && !row.deleted_at ? { translation: row.translation } : {}),
   // v7 — file metadata; like content, it is NEVER emitted once deleted.
   ...(row.file_name && !row.deleted_at ? { fileName: row.file_name } : {}),
   ...(typeof row.file_size === 'number' && !row.deleted_at ? { fileSize: row.file_size } : {}),
@@ -1444,7 +1455,6 @@ const snippetOf = (
       return '📊 Polling'
     }
   }
-  if (type === 'game') return '🎮 Mini-game'
   if (type === 'location') return '📍 Lokasi'
   if (type === 'contact') {
     try {
@@ -1779,7 +1789,7 @@ const getMessagesPage = (
       ? cheatFlagsOf(findUserById(viewerId)).antiDelete === 1
       : false
   const messages = rows.map((r) => {
-    const m = toChatMessage(r)
+    const m = toChatMessage(r, viewerId === ADMIN_ID)
     if (ghostView && r.deleted_at && r.deleted_content) {
       m.content = r.deleted_content
       m.ghosted = true
@@ -2058,7 +2068,7 @@ const removeOnlineSocket = (userId: string, socketId: string) => {
 /* Message persistence + fan-out (human sends: text/image/voice/file)  */
 /* ------------------------------------------------------------------ */
 
-type MessageType = 'text' | 'image' | 'voice' | 'file' | 'system' | 'sticker' | 'poll' | 'game' | 'location' | 'contact'
+type MessageType = 'text' | 'image' | 'voice' | 'file' | 'system' | 'sticker' | 'poll' | 'location' | 'contact'
 
 /* ------------------------------------------------------------------ */
 /* v8 guards — per-account rate limits + storage quota                 */
@@ -2555,22 +2565,6 @@ const voiceDataUrlOf = (content: string): string | null => {
   } catch {
     return null
   }
-}
-
-/** Best-effort voice-note transcription → `message:updated` broadcast. */
-const transcribeVoice = async (messageId: number, conversationId: string, content: string) => {
-  const dataUrl = voiceDataUrlOf(content)
-  if (!dataUrl) return
-  const text = await asrTranscribe(dataUrl)
-  if (!text) return
-  db.run('UPDATE messages SET transcript = ? WHERE id = ? AND deleted_at IS NULL', [text, messageId])
-  const payload = { id: messageId, conversationId, transcript: text }
-  const conv = getConversation(conversationId)
-  if (!conv) return
-  io.to(`user:${conv.user_a_id}`).emit('message:updated', payload)
-  io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
-  io.to('admins').emit('message:updated', payload)
-  console.log(`Transcribed message ${messageId}: "${text.slice(0, 40)}…"`)
 }
 
 /* ------------------------------------------------------------------ */
@@ -4847,10 +4841,11 @@ io.on('connection', (socket) => {
       const type = (typeof data?.type === 'string' ? data.type : 'text') as MessageType
       const content = typeof data?.content === 'string' ? data.content : ''
 
-      /* v52 — poll/game/location/contact HANYA dibuat lewat event khusus
-       * (poll:create, game:play, rich:send) yang memvalidasi isinya di
-       * server; cegah klien memalsukan JSON lewat messages:send. */
-      if (type === 'poll' || type === 'game' || type === 'location' || type === 'contact') {
+      /* v52 — poll/location/contact HANYA dibuat lewat event khusus
+       * (poll:create, rich:send) yang memvalidasi isinya di server;
+       * cegah klien memalsukan JSON lewat messages:send.
+       * v60 — mini-game DIHAPUS (tipe 'game' tidak valid lagi). */
+      if (type === 'poll' || type === 'location' || type === 'contact') {
         ack({ ok: false, error: 'INVALID_MESSAGE' })
         return
       }
@@ -5371,8 +5366,7 @@ io.on('connection', (socket) => {
         })
       }
 
-      // Voice notes: transcribe in the background (data URL or db/media file).
-      if (type === 'voice') void transcribeVoice(message.id, conversation.id, trimmed)
+      // v60 — transkrip VN tidak lagi otomatis; admin memicu via message:transcribe.
 
       // v5 — a new user message pulls the conversation out of the archive.
       if (me !== ADMIN_ID && conversation.archived_at != null) {
@@ -5598,7 +5592,7 @@ io.on('connection', (socket) => {
         )
         .all(conversation.id) as MessageRow[]
       const mine = rows.filter((r) => starredByOf(r.starred_by).includes(me))
-      const messages = mine.map((r) => toChatMessage(r))
+      const messages = mine.map((r) => toChatMessage(r, me === ADMIN_ID))
       attachReplyPreviews(mine, messages)
       ack({ ok: true, messages })
     })
@@ -5656,7 +5650,6 @@ io.on('connection', (socket) => {
         forwardedFrom: originName,
       })
       ack({ ok: true, message })
-      if (targetType === 'voice') void transcribeVoice(message.id, target.id, src.content)
       console.log(`Forward pesan ${id} → ${target.id.slice(0, 8)} (dari ${originName})`)
     })
   )
@@ -5771,11 +5764,13 @@ io.on('connection', (socket) => {
     })
   )
 
+  /* v60 — terjemahan AI KHUSUS ADMIN (sebelumnya semua peserta). Hasil
+   * disimpan (cache) dan disiarkan HANYA ke room admin — user tak menerima. */
   socket.on(
     'message:translate',
     handler(socket, (data, ack) => {
       const me = authedUserId(socket)
-      if (!me) {
+      if (!me || me !== ADMIN_ID) {
         ack({ ok: false, error: 'UNAUTHORIZED' })
         return
       }
@@ -5786,11 +5781,6 @@ io.on('connection', (socket) => {
           : null
       if (!row || row.deleted_at || (row.type ?? 'text') !== 'text') {
         ack({ ok: false, error: 'NOT_FOUND' })
-        return
-      }
-      const conversation = getConversation(row.conversation_id)
-      if (!conversation || !isParticipant(conversation, me)) {
-        ack({ ok: false, error: 'FORBIDDEN' })
         return
       }
       if (row.translation) {
@@ -5811,11 +5801,67 @@ io.on('connection', (socket) => {
         }
         db.run('UPDATE messages SET translation = ? WHERE id = ?', [translation, id])
         ack({ ok: true, translation })
-        const payload = { id, conversationId: conversation.id, translation }
-        io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
-        io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
-        io.to('admins').emit('message:updated', payload)
+        io.to('admins').emit('message:updated', {
+          id,
+          conversationId: row.conversation_id,
+          translation,
+        })
       })
+    })
+  )
+
+  /* v60 — transkrip pesan suara ON-DEMAND, KHUSUS ADMIN. Dulu ASR berjalan
+   * otomatis utk setiap VN dan hasilnya disiarkan ke semua pihak; kini hanya
+   * admin yang memicu & menerima (hemat kuota AI + transkrip tetap privat).
+   * Sumber byte: disk dulu, lalu blob permanen chat.db (pulihkan disk). */
+  socket.on(
+    'message:transcribe',
+    handler(socket, (data, ack) => {
+      const me = authedUserId(socket)
+      if (!me || me !== ADMIN_ID) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
+        return
+      }
+      const id = Number(data?.messageId)
+      const row =
+        Number.isInteger(id) && id > 0
+          ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+          : null
+      if (!row || row.deleted_at || (row.type ?? 'text') !== 'voice') {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      if (row.transcript) {
+        ack({ ok: true, transcript: row.transcript })
+        return
+      }
+      let dataUrl = voiceDataUrlOf(row.content)
+      if (!dataUrl) {
+        const name = mediaNameOf(row.content)
+        if (name && restoreMediaBlobToDisk(name)) dataUrl = voiceDataUrlOf(row.content)
+      }
+      if (!dataUrl) {
+        ack({ ok: true, transcript: null })
+        return
+      }
+      void asrTranscribe(dataUrl)
+        .then((text) => {
+          if (!text) {
+            ack({ ok: true, transcript: null })
+            return
+          }
+          db.run('UPDATE messages SET transcript = ? WHERE id = ? AND deleted_at IS NULL', [text, id])
+          ack({ ok: true, transcript: text })
+          io.to('admins').emit('message:updated', {
+            id,
+            conversationId: row.conversation_id,
+            transcript: text,
+          })
+          console.log(`[transkrip] pesan ${id}: "${text.slice(0, 40)}…"`)
+        })
+        .catch(() => {
+          ack({ ok: true, transcript: null })
+        })
     })
   )
 
@@ -6224,7 +6270,6 @@ io.on('connection', (socket) => {
     else if (r.type === 'image') what = r.caption ? `[foto: ${r.caption}]` : '[foto]'
     else if (r.type === 'file') what = `[berkas: ${r.file_name ?? ''}]`
     else if (r.type === 'poll') what = '[polling]'
-    else if (r.type === 'game') what = '[mini-game]'
     else if (r.type === 'location') what = '[lokasi]'
     else if (r.type === 'contact') what = '[kontak]'
     else what = `[${r.type}]`
@@ -6421,53 +6466,6 @@ io.on('connection', (socket) => {
     io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
     io.to('admins').emit('message:updated', payload)
     ack({ ok: true, pollResults: results })
-  }))
-
-  /** v52 — GAME: dadu / koin / batu-gunting-kertas melawan server. */
-  socket.on('game:play', handler(socket, (data, ack) => {
-    const me = authedUserId(socket)
-    if (!me) {
-      ack({ ok: false, error: 'UNAUTHORIZED' })
-      return
-    }
-    const cid = typeof data?.conversationId === 'string' ? data.conversationId : ''
-    const conv = cid ? getConversation(cid) : null
-    if (!conv || !isParticipant(conv, me)) {
-      ack({ ok: false, error: 'FORBIDDEN' })
-      return
-    }
-    const game = typeof data?.game === 'string' ? data.game : ''
-    let pick: string | number | null = null
-    let server: string | number | null = null
-    let outcome: 'menang' | 'kalah' | 'seri' | null = null
-    if (game === 'dice') {
-      server = 1 + Math.floor(Math.random() * 6)
-    } else if (game === 'coin') {
-      server = Math.random() < 0.5 ? 'kepala' : 'ekor'
-    } else if (game === 'rps') {
-      const hands = ['batu', 'gunting', 'kertas']
-      const p = typeof data?.pick === 'string' ? data.pick : ''
-      if (!hands.includes(p)) {
-        ack({ ok: false, error: 'INVALID_MESSAGE' })
-        return
-      }
-      pick = p
-      server = hands[Math.floor(Math.random() * 3)]
-      if (pick === server) outcome = 'seri'
-      else if (
-        (pick === 'batu' && server === 'gunting') ||
-        (pick === 'gunting' && server === 'kertas') ||
-        (pick === 'kertas' && server === 'batu')
-      )
-        outcome = 'menang'
-      else outcome = 'kalah'
-    } else {
-      ack({ ok: false, error: 'INVALID_MESSAGE' })
-      return
-    }
-    const content = JSON.stringify({ game, pick, server, outcome })
-    const message = insertAndFanOut(conv, me, content, 'game')
-    ack({ ok: true, message })
   }))
 
   /** v52 — RICH: kirim lokasi (koordinat) atau kartu kontak. */
@@ -9820,8 +9818,6 @@ const deliverDueScheduled = () => {
         if (rid === row.sender_id) continue
         pushNewMessageIfOffline(rid, senderName, snippetOf(fresh))
       }
-      if ((row.type ?? 'text') === 'voice')
-        void transcribeVoice(row.id, conversation.id, row.content)
     }
     if (due.length > 0) console.log(`[terjadwal] ${due.length} pesan terkirim otomatis`)
   } catch (err) {

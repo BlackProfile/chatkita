@@ -129,7 +129,6 @@ import {
   type PublicSettingsAck,
   type ScheduleCancelAllAck,
   type SetPinAck,
-  type TranslateAck,
   type UnstarAllAck,
   type UserAuthAck,
   type UserRestrictedPayload,
@@ -143,7 +142,6 @@ import {
   canEditMessage,
   compressImageToBlobs,
   contactDataOf,
-  gameDataOf,
   locationDataOf,
   pollDataOf,
   FONT_SCALES,
@@ -678,7 +676,7 @@ export function Messenger() {
       typeof window !== "undefined" &&
       new URLSearchParams(window.location.search).get("embed") === "1"
   );
-  const [translatingId, setTranslatingId] = useState<number | null>(null);
+  /* v60 — terjemahan & transkrip kini KHUSUS ADMIN (di sisi user dihapus). */
   // v22 — unread (pesan masuk saat tab tersembunyi) untuk badge judul tab.
   const [unread, setUnread] = useState(0);
   // v22 — panel pesan berbintang (fetch ulang tiap kali dibuka).
@@ -702,7 +700,6 @@ export function Messenger() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const atBottomRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const translatingIdRef = useRef<number | null>(null);
   // v28 — penanda urutan respons cek nama (buang respons kedaluwarsa).
   const nameCheckSeqRef = useRef(0);
 
@@ -960,7 +957,6 @@ export function Messenger() {
                 deletedAt: u.deletedAt ?? m.deletedAt,
                 transcript: u.transcript ?? m.transcript,
                 editedAt: u.editedAt ?? m.editedAt,
-                translation: u.translation ?? m.translation,
                 reactions: u.reactions ?? m.reactions,
                 starredBy: u.starredBy ?? m.starredBy,
                 /* v25 — Pusat Cheat: waktu pesan diubah admin. */
@@ -977,10 +973,6 @@ export function Messenger() {
             : m
         )
       );
-      if (u.translation && u.id === translatingIdRef.current) {
-        translatingIdRef.current = null;
-        setTranslatingId(null);
-      }
       // v48 — burn-on-view: tutup viewer bila media yang terbuka habis terbakar.
       if (u.mediaExpiredAt) {
         setViewer((prev) => (prev && prev.media.sourceId === u.id ? null : prev));
@@ -1440,12 +1432,6 @@ export function Messenger() {
     );
   };
 
-  const handlePlayGame = (game: "dice" | "coin" | "rps", pick?: string) => {
-    const socket = socketRef.current;
-    if (!socket || !connected || !conversationId) return;
-    socket.emit("game:play", { conversationId, game, pick });
-  };
-
   /* v53 — paritas: user membuat polling/kuis (server membatasi peserta +
    * cooldown 15 dtk; hasil live tampil di kedua sisi). */
   const handlePollCreate = () => {
@@ -1532,23 +1518,6 @@ export function Messenger() {
   const handleEditCancel = () => {
     setEditing(null);
     setInput("");
-  };
-
-  const handleTranslate = (msg: ChatMessage) => {
-    if (translatingIdRef.current) return;
-    if (msg.translation) return;
-    translatingIdRef.current = msg.id;
-    setTranslatingId(msg.id);
-    socketRef.current?.emit(
-      "message:translate",
-      { messageId: msg.id },
-      (res: AckOf<TranslateAck>) => {
-        if (!res.ok) {
-          translatingIdRef.current = null;
-          setTranslatingId(null);
-        }
-      }
-    );
   };
 
   const scrollToMessage = (id: number) => {
@@ -2801,8 +2770,6 @@ export function Messenger() {
                   reactions={m.reactions}
                   myUserId={me.userId}
                   edited={!!m.editedAt}
-                  translation={m.translation}
-                  translating={translatingId === m.id}
                   pinned={pinnedMsg?.id === m.id}
                   starred={!!m.starredBy?.includes(me.userId)}
                   scheduledAt={m.scheduledAt}
@@ -2839,12 +2806,7 @@ export function Messenger() {
                   }}
                   onReact={(emoji) => handleReact(m, emoji)}
                   onEdit={() => handleEditStart(m)}
-                  onTranslate={
-                    m.senderId !== me.userId && m.type === "text" && !m.deletedAt
-                      ? () => handleTranslate(m)
-                      : undefined
-                  }
-                  /* v52 — polling, mini-game, lokasi & kontak. */
+                  /* v52 — polling, lokasi & kontak (v60: game dihapus). */
                   pollData={m.type === "poll" && !m.deletedAt ? pollDataOf(m.content) : null}
                   pollResults={m.pollResults ?? null}
                   myPollChoice={myPollVotes[m.id] ?? null}
@@ -2853,7 +2815,6 @@ export function Messenger() {
                       ? (idx) => handlePollVote(m.id, idx)
                       : undefined
                   }
-                  gameData={m.type === "game" && !m.deletedAt ? gameDataOf(m.content) : null}
                   locationData={
                     m.type === "location" && !m.deletedAt ? locationDataOf(m.content) : null
                   }
@@ -3364,30 +3325,7 @@ export function Messenger() {
                       <span className="mr-2">📊</span>
                       Buat polling / kuis
                     </DropdownMenuItem>
-                    {/* v52 — mainan & info: game, lokasi, kontak. */}
-                    <DropdownMenuSub>
-                      <DropdownMenuSubTrigger disabled={!connected || sendBlocked}>
-                        <span className="mr-2">🎮</span>
-                        Main game
-                      </DropdownMenuSubTrigger>
-                      <DropdownMenuSubContent>
-                        <DropdownMenuItem onClick={() => handlePlayGame("dice")}>
-                          🎲 Lempar dadu
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => handlePlayGame("coin")}>
-                          🪙 Lempar koin
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => handlePlayGame("rps", "batu")}>
-                          ✊ Batu
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => handlePlayGame("rps", "gunting")}>
-                          ✌️ Gunting
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => handlePlayGame("rps", "kertas")}>
-                          🖐 Kertas
-                        </DropdownMenuItem>
-                      </DropdownMenuSubContent>
-                    </DropdownMenuSub>
+                    {/* v52 — info: lokasi & kontak (v60: game dihapus). */}
                     <DropdownMenuItem
                       disabled={!connected || sendBlocked}
                       onClick={handleSendLocation}

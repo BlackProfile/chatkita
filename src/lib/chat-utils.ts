@@ -219,16 +219,6 @@ export function messagePreview(
     const p = pollDataOf(content);
     return p ? `📊 ${p.question}` : "📊 Polling";
   }
-  if (type === "game") {
-    const g = gameDataOf(content);
-    return g
-      ? g.game === "dice"
-        ? "🎲 Lempar dadu"
-        : g.game === "coin"
-          ? "🪙 Lempar koin"
-          : "🎮 Batu-gunting-kertas"
-      : "🎮 Mini-game";
-  }
   if (type === "location") {
     const l = locationDataOf(content);
     return l ? `📍 ${l.label || "Lokasi"}` : "📍 Lokasi";
@@ -390,29 +380,6 @@ export function pollDataOf(content: string): PollContent | null {
     const options = d.options.filter((o): o is string => typeof o === "string" && o.length > 0);
     if (options.length < 2) return null;
     return { question: d.question, options };
-  } catch {
-    return null;
-  }
-}
-
-export interface GameContent {
-  game: "dice" | "coin" | "rps";
-  pick: string | number | null;
-  server: string | number;
-  outcome: "menang" | "kalah" | "seri" | null;
-}
-
-export function gameDataOf(content: string): GameContent | null {
-  try {
-    const d = JSON.parse(content) as Partial<GameContent>;
-    if (d.game !== "dice" && d.game !== "coin" && d.game !== "rps") return null;
-    if (typeof d.server !== "string" && typeof d.server !== "number") return null;
-    return {
-      game: d.game,
-      pick: (d.pick as string | number | null) ?? null,
-      server: d.server,
-      outcome: d.outcome ?? null,
-    };
   } catch {
     return null;
   }

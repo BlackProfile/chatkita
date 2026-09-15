@@ -188,6 +188,7 @@ import {
   type QuickRepliesAck,
   type ResetConversationAck,
   type TranslateAck,
+  type TranscribeAck,
   type UserToastPayload,
   type VacuumAck,
 } from "@/lib/chat-types";
@@ -209,7 +210,6 @@ import {
   uploadMedia,
   videoPosterBlob,
   contactDataOf,
-  gameDataOf,
   locationDataOf,
   pollDataOf,
   type FontScale,
@@ -391,6 +391,8 @@ export function AdminPanel() {
   >({});
   const [editing, setEditing] = useState<ChatMessage | null>(null);
   const [translatingId, setTranslatingId] = useState<number | null>(null);
+  /* v60 — transkrip VN on-demand (khusus admin). */
+  const [transcribingId, setTranscribingId] = useState<number | null>(null);
   const [qrOpen, setQrOpen] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [qrUrl, setQrUrl] = useState("");
@@ -493,6 +495,7 @@ export function AdminPanel() {
   const atBottomRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const translatingIdRef = useRef<number | null>(null);
+  const transcribingIdRef = useRef<number | null>(null);
   const filterInputRef = useRef<HTMLInputElement | null>(null);
   const menuNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -943,6 +946,11 @@ export function AdminPanel() {
       if (u.translation && u.id === translatingIdRef.current) {
         translatingIdRef.current = null;
         setTranslatingId(null);
+      }
+      /* v60 — transkrip VN masuk: matikan indikator memproses. */
+      if (u.transcript && u.id === transcribingIdRef.current) {
+        transcribingIdRef.current = null;
+        setTranscribingId(null);
       }
     });
 
@@ -1543,11 +1551,22 @@ export function AdminPanel() {
     );
   };
 
-  const handlePlayGame = (game: "dice" | "coin" | "rps", pick?: string) => {
-    const socket = socketRef.current;
-    const cid = convIdForAi();
-    if (!socket || !cid) return;
-    socket.emit("game:play", { conversationId: cid, game, pick });
+  /* v60 — transkrip VN on-demand (khusus admin; server membatasi ke admin). */
+  const handleTranscribe = (msg: ChatMessage) => {
+    if (transcribingIdRef.current) return;
+    if (msg.transcript) return;
+    transcribingIdRef.current = msg.id;
+    setTranscribingId(msg.id);
+    socketRef.current?.emit(
+      "message:transcribe",
+      { messageId: msg.id },
+      (res: AckOf<TranscribeAck>) => {
+        if (!res.ok || res.transcript === null) {
+          transcribingIdRef.current = null;
+          setTranscribingId(null);
+        }
+      }
+    );
   };
 
   const handleSendLocation = () => {
@@ -3186,6 +3205,11 @@ export function AdminPanel() {
                           edited={!!m.editedAt}
                           translation={m.translation}
                           translating={translatingId === m.id}
+                          /* v60 — transkrip VN on-demand (khusus admin). */
+                          transcribing={transcribingId === m.id}
+                          onTranscribe={
+                            m.type === "voice" && !m.deletedAt ? () => handleTranscribe(m) : undefined
+                          }
                           pinned={pinnedMap[activeConversation.id]?.id === m.id}
                           canEdit={canEditMessage(m, ADMIN_ID)}
                           canPin
@@ -3233,7 +3257,6 @@ export function AdminPanel() {
                               ? (idx) => handlePollVote(m.id, idx)
                               : undefined
                           }
-                          gameData={m.type === "game" && !m.deletedAt ? gameDataOf(m.content) : null}
                           locationData={
                             m.type === "location" && !m.deletedAt ? locationDataOf(m.content) : null
                           }
@@ -3814,29 +3837,6 @@ export function AdminPanel() {
                             >
                               📊 Buat polling / kuis
                             </DropdownMenuItem>
-                            <DropdownMenuSub>
-                              <DropdownMenuSubTrigger disabled={!connected}>
-                                <span className="mr-2">🎮</span>
-                                Main game
-                              </DropdownMenuSubTrigger>
-                              <DropdownMenuSubContent>
-                                <DropdownMenuItem onClick={() => handlePlayGame("dice")}>
-                                  🎲 Lempar dadu
-                                </DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => handlePlayGame("coin")}>
-                                  🪙 Lempar koin
-                                </DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => handlePlayGame("rps", "batu")}>
-                                  ✊ Batu
-                                </DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => handlePlayGame("rps", "gunting")}>
-                                  ✌️ Gunting
-                                </DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => handlePlayGame("rps", "kertas")}>
-                                  🖐 Kertas
-                                </DropdownMenuItem>
-                              </DropdownMenuSubContent>
-                            </DropdownMenuSub>
                             <DropdownMenuItem disabled={!connected} onClick={handleSendLocation}>
                               <MapPin className="mr-2 size-4" aria-hidden="true" />
                               Kirim lokasi

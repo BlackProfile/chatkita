@@ -1545,3 +1545,23 @@ Stage Summary:
 - Retensi tetap 0 hari; tombol hapus manual admin tetap berfungsi (blob ikut terhapus).
 - 16 file korban reset lama tidak dapat dipulihkan (belum pernah masuk blob/backup) — tampil kartu "Media tidak tersedia" (v56); media baru dijamin selamat.
 - Service v59 jalan di :3003 (banner terkonfirmasi); commit + tag rescue-v59.
+
+---
+Task ID: 76
+Agent: Z.ai Code (utama)
+Task: Hapus fitur game keseluruhan + buat terjemahan & transkrip VN (khusus admin) — v60.
+
+Work Log:
+- Pemetaan fitur game: game:play (service, dice/coin/rps), menu "Main game" (Messenger + AdminPanel), gameDataOf/GameContent (chat-utils), kartu game (ChatBubble), tipe "game" (chat-types + 2 union service).
+- Prosedur wajib: pkill chat-service + port bebas sebelum edit. Catatan: proses bun --hot lama hot-reload saat file berubah → bersihkan dua proses, start satu instance segar (banner v60 tunggal).
+- Service v60: game:play dihapus; union MessageType dibersihkan; migrasi 3 pesan game legacy → teks '🎮 Mini-game (fitur dihapus)' (0 baris type='game' tersisa); blokir pemalsuan tipe disesuaikan; label preview + aiLineOf dibersihkan.
+- Terjemahan (sudah ada sejak v5, dibatasi): message:translate kini admin-only; broadcast message:updated HANYA ke room admins; toChatMessage(row, viewerAdmin) — transcript/translation hanya untuk viewer admin di riwayat (2 call site sadar-viewer: getMessagesPage + starred).
+- Transkrip VN baru: event message:transcribe (admin-only) menggantikan ASR otomatis (kirim/forward/terjadwal dihapus, transcribeVoice dibuang); sumber audio disk → fallback blob v59 (restoreMediaBlobToDisk); hasil cache kolom transcript + broadcast admins-only.
+- Klien: ChatBubble + props onTranscribe/transcribing + tombol "Transkripsikan/Transkrip" (ikon AudioLines) + indikator "Mentranskripsikan…"; AdminPanel + state/ref/handleTranscribe + wiring; Messenger: seluruh wiring translate user dihapus (+ TranslateAck/gameDataOf import); game menu kedua sisi dihapus; chat-types +TranscribeAck, tipe "game" dihapus; onPin admin sempat tercecer karena anchor edit — dipulihkan.
+- Insiden alat: MultiEdit terbukti tidak benar-benar atomik di beberapa kasus (edit parsial diterima meski laporan gagal) → setiap batch di-audit dengan rg dan dibereskan dengan edit tunggal.
+- E2E (agent-browser 2 sesi): menu lampiran user & admin tanpa "Main game"; UjiV49 kirim teks EN; admin klik bubble → "Terjemahkan" → 🌐 "Halo admin, ini adalah pesan bahasa Inggris untuk tes terjemahan v60."; admin klik VN (injeksi uji tts wav via DB, id 328) → "Transkripsikan" → 📝 transkrip ASR tampil; reload panel → keduanya tampil dari riwayat (viewerAdmin serializer ✓); sesi user: 0 🌐/📝 (tidak bocor); konsol bersih.
+- verify-integrity: 4 cek game v52 dihapus + seksi v60 (11 cek) → 417/417; chmod 644; lint 0/0; instrumentation rescue-v60; FEATURES.md v60.
+
+Stage Summary:
+- v60: fitur game DIHAPUS seluruhnya (server + klien + migrasi data); terjemahan & transkrip VN kini fitur ADMIN — on-demand, ter-cache di DB, tidak pernah sampai ke user (riwayat maupun live).
+- Commit + tag rescue-v60.

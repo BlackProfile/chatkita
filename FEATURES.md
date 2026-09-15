@@ -538,3 +538,27 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **Batas yang jujur:** 16 file korban reset LAMA tidak bisa dipulihkan (belum pernah masuk blob/backup) — pesannya tampil kartu "Media tidak tersedia" (v56). Mulai v59, media baru dijamin selamat.
 
 **File kunci:** `mini-services/chat-service/index.ts`, `src/app/api/media/[name]/route.ts`, `scripts/verify-integrity.sh`.
+
+## v60 — Fitur Game Dihapus + Terjemahan & Transkrip VN Khusus Admin (Task 76)
+
+**Permintaan:** "hapus fitur game keseluruhan. buat fitur terjemahan, dan transkip vn, untuk saat ini hanya pada admin"
+
+**Penghapusan fitur game (dadu/koin/batu-gunting-kertas):**
+
+- Server: event `game:play` dihapus; tipe `'game'` dibuang dari union MessageType; blokir pemalsuan tipe di `messages:send` disesuaikan; label preview & baris konteks AI dibersihkan. Migrasi sekali-jalan: 3 pesan game legacy diturunkan jadi teks `🎮 Mini-game (fitur dihapus)`.
+- Klien: menu "🎮 Main game" (user + admin) dihapus; `gameDataOf`/`GameContent` dibuang dari chat-utils; kartu game & tipe di ChatBubble dibersihkan; tipe `"game"` dihapus dari MessageContentType.
+
+**Terjemahan AI — kini KHUSUS ADMIN:**
+
+- Sebelumnya `message:translate` terbuka untuk semua peserta dan hasilnya disiarkan ke kedua sisi. Kini: hanya admin (`me === ADMIN_ID`); hasil disimpan (cache kolom `messages.translation`); `message:updated` HANYA ke room `admins`.
+- Serializer riwayat `toChatMessage(row, viewerAdmin)` — transkrip & terjemahan HANYA disertakan untuk viewer admin (user tidak pernah menerimanya, di riwayat maupun live).
+- Sisi user: tombol "Terjemahkan", state, dan wiring dihapus dari Messenger.
+
+**Transkrip VN — ON-DEMAND, KHUSUS ADMIN (baru):**
+
+- Dulu ASR berjalan OTOMATIS untuk setiap pesan suara dan hasilnya disiarkan ke semua pihak (boros kuota AI + bocor ke user). Kini event baru `message:transcribe` (admin-only): admin mengetuk bubble suara → tombol "Transkripsikan" → ASR (`zai.audio.asr`) → hasil tampil inline `📝` di bubble + tersimpan (kolom `messages.transcript`) + disiarkan hanya ke admin. Sumber byte: disk dulu, fallback blob permanen chat.db (v59).
+- ChatBubble: tombol aksi "Transkripsikan/Transkrip" + indikator "Mentranskripsikan…"; pemanggilan & indikator di AdminPanel (TranscribeAck). Panggilan transkrip otomatis (kirim, forward, terjadwal) dihapus.
+
+**E2E terverifikasi:** menu "Main game" hilang di kedua sisi; pesan game legacy termigrasi (0 tersisa); admin mengetuk pesan Inggris → 🌐 "Halo admin, ini adalah pesan bahasa Inggris untuk tes terjemahan v60."; admin mengetuk VN → 📝 transkrip tampil; setelah reload panel, keduanya langsung tampil dari riwayat; sesi user TIDAK menampilkan 🌐/📝 sama sekali; konsol bersih; verify 417/417; lint 0/0.
+
+**File kunci:** `mini-services/chat-service/index.ts`, `src/components/chat/{ChatBubble,Messenger,AdminPanel}.tsx`, `src/lib/{chat-types,chat-utils}.ts`.
