@@ -464,6 +464,12 @@ chk_grep "Safe-area sheet bawah (alert)"      "src/components/ui/alert-dialog.ts
 chk_grep "Penanda panel v54 (dialog)"         "src/components/ui/dialog.tsx" "v54 (Task 70)"
 chk_grep "Penanda panel v54 (alert)"          "src/components/ui/alert-dialog.tsx" "v54 (Task 70)"
 chk_file  "Skrip sweep panel v54"             ".zscripts/t70-sweep-panel.ts"
+
+# ── v55 (Task 71) — ukuran pesan media: foto/video dibatasi 20rem, anti-luber ──
+chk_grep "Foto: batas lebar 20rem + anti-luber" "src/components/chat/ChatBubble.tsx" "max-w-\[min(100%,20rem)\] cursor-zoom-in"
+chk_grep "Video: batas lebar 20rem + anti-luber" "src/components/chat/ChatBubble.tsx" "max-h-64 w-auto max-w-\[min(100%,20rem)\] rounded-xl"
+chk_grep "Penanda komentar v55 (foto)"          "src/components/chat/ChatBubble.tsx" "v55 — lebar foto dibatasi 20rem"
+chk_grep "Penanda komentar v55 (video)"         "src/components/chat/ChatBubble.tsx" "v55 — batas lebar video sama dgn foto"
 echo ""
 echo "== Versi server terdaftar =="
 grep -m1 "SERVICE_VERSION = " mini-services/chat-service/index.ts || echo "  ❌ SERVICE_VERSION tidak ditemukan"

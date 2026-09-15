@@ -412,7 +412,9 @@ export function ChatBubble({
                 src={imageSrc}
                 alt={fileName ?? "Foto yang dikirim"}
                 className={cn(
-                  "max-h-64 w-auto cursor-zoom-in rounded-xl object-cover",
+                  // v55 — lebar foto dibatasi 20rem (konsisten dgn kartu file/audio
+                  // 18rem) dan tak pernah meluber dari gelembung di layar sempit.
+                  "max-h-64 w-auto max-w-[min(100%,20rem)] cursor-zoom-in rounded-xl object-cover",
                   sensitive && !sensitiveRevealed && "blur-lg"
                 )}
                 loading="lazy"
@@ -621,7 +623,8 @@ export function ChatBubble({
                 controls
                 preload={dataSaver ? "none" : "metadata"}
                 className={cn(
-                  "max-h-64 w-auto rounded-xl",
+                  // v55 — batas lebar video sama dgn foto (20rem, anti-luber).
+                  "max-h-64 w-auto max-w-[min(100%,20rem)] rounded-xl",
                   sensitive && !sensitiveRevealed && "pointer-events-none blur-lg"
                 )}
                 onClick={(e) => e.stopPropagation()}

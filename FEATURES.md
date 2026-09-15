@@ -447,3 +447,19 @@ Perubahan **satu pintu** pada komponen dasar — seluruh ~40 popup di aplikasi (
 **E2E (gateway :81, agent-browser):** admin desktop 1440×900 — dialog ganti-nama & Media & konfirmasi reset terukur panel kanan `x=800, w=640, h=900`, overlay `rgba(0,0,0,0)`; user mobile 390×844 (UjiV49) — panel media & link-viewer jadi **halaman penuh (0,0,390×844)**; AlertDialog "Batalkan pesan terjadwal?" jadi sheet bawah: mobile `w=390, bottomGap=0`, desktop `x=400, w=640, bottomGap=24`, tinggi alami; alur jadwal→batal dua arah lulus; konsol 0 error dua sesi.
 
 **File kunci:** `src/components/ui/dialog.tsx`, `src/components/ui/alert-dialog.tsx`, `.zscripts/t70-sweep-panel.ts`, sweep 12 file komponen chat.
+
+
+## v55 — Ukuran Pesan Media Diperbaiki (Task 71)
+
+**Permintaan:** "perbaiki ukuran ini" + screenshot gelembung media (kartu file, kartu audio, foto) di mana foto melebar hampir selebar area chat (~490px, mengikuti batas gelembung 65–85%) sementara kartu file/audio hanya 224–288px — dan di layar lebih sempit foto berpotensi **meluber keluar gelembung** karena `img`/`video` hanya dibatasi `max-h-64 w-auto` tanpa batas lebar.
+
+Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berlaku di panel user & admin):
+
+- **Foto** (`type === "image"` & file gambar): tambah `max-w-[min(100%,20rem)]` — lebar maksimum **320px** (konsisten dengan keluarga kartu media; sebelumnya tak berbatas) dan `100%` mencegah luber di viewport sempit.
+- **Video** (`fileKind === "video"`): batas yang sama `max-w-[min(100%,20rem)]`.
+- Tinggi tetap `max-h-64` (256px); foto lanskap kini ~320×167, foto potret tetap ~170×256 — proporsi terjaga, klik masih membuka media-viewer layar penuh.
+- Kartu file, kartu audio, voice note, polling, game, lokasi, kontak tidak berubah (memang sudah 224–288px).
+
+**E2E:** foto lebar (rasio ~1.9:1) dikirim di chat UjiV49↔admin; lebar `img` terukur ≤320px di viewport mobile 390×844 & desktop 1440×900; gelembung tidak meluber; konsol 0 error.
+
+**File kunci:** `src/components/chat/ChatBubble.tsx`.

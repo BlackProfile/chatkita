@@ -1437,3 +1437,24 @@ Stage Summary:
 - Satu perubahan komponen dasar mengubah ~40 popup sekaligus; konten & perilaku (klik luar, Escape, X) dipertahankan.
 - Repo dipulihkan ke lini v53 sebelum mengerjakan v54 (v51/v52/v53 kembali lengkap).
 - Artefak: .zscripts/t70-sweep-panel.ts, segmen v54 di FEATURES.md/verify-integrity.sh (381 cek), screenshot /tmp/t70-*.png.
+
+---
+Task ID: 71
+Agent: Z.ai Code (main)
+Task: v55 — "perbaiki ukuran ini": gelembung pesan media terlalu lebar (foto ~490px hampir selebar chat)
+
+Work Log:
+- KONTEKS: sesi lanjutan — worklog menunjukkan Task 68–70 (v52–v54: paket 11 fitur, paritas user↔admin, popup→panel) SUDAH selesai & ter-push (HEAD fb6e12a di atas 9fed9b5 v54). Permintaan aktif tinggal screenshot "perbaiki ukuran ini": kartu file (255px) & kartu audio (215px) wajar, tapi FOTO melebar ~490px (mengikuti cap gelembung 65–85%) — dan `img`/`video` hanya dibatasi `max-h-64 w-auto` TANPA batas lebar → di layar sempit (mis. 390px) foto lanskap meluber keluar gelembung.
+- FIX (satu komponen bersama, berlaku user & admin): `src/components/chat/ChatBubble.tsx` — img foto + video tambah `max-w-[min(100%,20rem)]`: lebar maks 320px (konsisten keluarga kartu media) DAN tak pernah melebihi lebar gelembung (anti-luber). Tinggi tetap max-h-64; klik foto tetap buka viewer layar penuh. Kartu file/audio/poll/game/lokasi/kontak tidak disentuh (memang sudah 224–288px).
+- Versi v55: pkill chat-service (iron rule) → SERVICE_VERSION 'v55' → spawn manual nohup → banner "chat-service v55 listening on port 3003"; instrumentation `rescue-v55` + penanda `void 0` v55 (Task 71).
+- verify-integrity.sh: segmen v55 +4 cek (pola grep BRE dengan `\[` di-escape) disisipkan SEBELUM blok hasil → **385/385, 0 gagal**; chmod 644. FEATURES.md segmen "v55 — Ukuran Pesan Media Diperbaiki (Task 71)"; chmod 644. Lint 0/0.
+- E2E gateway :81: foto uji lebar 1200×625 (rasio 1.92 seperti laporan user, dibuat via PIL) dikirim dari akun UjiV49 (input file di-reveal via eval → upload → pratinjau → Kirim):
+  - Mobile 390×844 (t71u): img terukur **299×156** (mengejar batas 85% gelembung; < 320), img tepat di dalam gelembung visual 311px (luber=false), bubble kanan rapi.
+  - Desktop 1440×900 (t71a, login admin123 + TOTP dari DB — totp_enabled=1, kode dihitung via bun): img terukur **320×167** = tepat cap 20rem (sebelumnya bisa ~490px), bubble 334px, luber=false; screenshot /tmp/t71-mobile-2.png & /tmp/t71-admin.png.
+  - Konsol & page-errors: 0 kedua sesi (hanya info React DevTools/HMR/Fast Refresh). Warning Edge-Runtime instrumentation di dev.log = warisan lama sejak v49 (benign, tercatat di Task 70).
+- Browser ditutup; foto uji dibiarkan di chat UjiV49 (data uji, tidak mengganggu akun asli).
+
+Stage Summary:
+- v55 = pesan media kini berukuran konsisten: foto & video maks 320px di SEMUA viewport (sejajar kartu file/audio 288px, poll 256px), dan tidak mungkin meluber keluar gelembung di layar sempit — akar masalah screenshot user.
+- Satu perubahan komponen bersama (ChatBubble) otomatis berlaku di panel user & admin.
+- Integritas: verify 385/385, lint 0/0; commit + tag rescue-v55 (anti-rollback).
