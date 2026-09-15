@@ -481,3 +481,19 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E:** pesan image tanpa thumbnail dikirim via socket (`.zscripts/t72-notumb.ts`, gambar 1200×625) → sebelum fix bubble 504px (170px kosong), sesudah fix **336px merangkul img 320px**; pesan lama 404 → kartu "Media tidak tersedia" 302px; konsol 0 error.
 
 **File kunci:** `src/components/chat/ChatBubble.tsx`, `.zscripts/t72-notumb.ts`.
+
+
+## v57 — Tombol Play Slideshow & Tutup Viewer Tidak Bertumpuk (Task 73)
+
+**Permintaan:** "ini fungsi tombol play untuk apa?" + screenshot lingkaran gelap berikon ▶ di pojok kanan-atas viewer media, dengan ikon × menempel di tepinya.
+
+**Jawaban fungsi:** tombol ▶ = **slideshow** (v48) — memutar otomatis semua foto/video dalam percakapan, maju ke media berikutnya tiap 3 detik; muncul hanya bila percakapan punya ≥2 media (bersama chip "3 / 12"). Ikon × di sebelahnya = tombol tutup viewer.
+
+**Bug yang ditemukan dari screenshot:** tombol slideshow (`right-3 top-3`, 36px) BERTUMPUK dengan × bawaan DialogContent (`top-4 right-4`, ikon 16px) — keduanya di pojok kanan-atas sehingga tampak seperti satu tombol aneh dengan "tanduk" ×.
+
+**Perbaikan** (`src/components/chat/media-viewer.tsx`):
+
+- `showCloseButton={false}` pada DialogContent viewer — × bawaan 16px dilepas.
+- Grup kanan-atas baru `absolute right-3 top-3 flex gap-2` berisi: tombol slideshow (perilaku & gaya tetap) + tombol tutup kustom `aria-label="Tutup pratinjau"` — dua lingkaran gelap 36px seragam berdampingan rapi; target sentuh × naik dari 16px → 36px.
+
+**File kunci:** `src/components/chat/media-viewer.tsx`.

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Pause, Play } from "lucide-react";
+import { ChevronLeft, ChevronRight, Pause, Play, X } from "lucide-react";
 import {
   Download,
   File,
@@ -338,7 +338,13 @@ function ViewerDialog({
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="flex flex-col gap-3 border-white/10 bg-black p-3 text-white sm:p-4">
+      {/* v57 — showCloseButton=false: × bawaan dialog (top-4 right-4, 16px)
+          dulu BERTUMPUK dgn tombol slideshow (right-3 top-3) — persis seperti
+          screenshot user. Kini keduanya satu grup rapi kanan-atas. */}
+      <DialogContent
+        showCloseButton={false}
+        className="flex flex-col gap-3 border-white/10 bg-black p-3 text-white sm:p-4"
+      >
         <DialogTitle className="sr-only">Pratinjau {displayName}</DialogTitle>
         <DialogDescription className="sr-only">
           Pratinjau lampiran yang dikirim di chat. Tutup dengan tombol silang atau tekan Escape.
@@ -352,21 +358,34 @@ function ViewerDialog({
           </div>
         ) : null}
 
-        {/* v48 — tombol slideshow play/pause (maju otomatis 3 detik/media). */}
-        {canNavigate ? (
+        {/* v48 — tombol slideshow play/pause (maju otomatis 3 detik/media).
+            v57 — digabung dgn tombol tutup dalam SATU grup kanan-atas agar
+            tidak lagi bertumpuk; gaya seragam (lingkaran gelap 36px) dan
+            target sentuh × ikut jadi 36px (sebelumnya ikon 16px). */}
+        <div className="absolute right-3 top-3 z-10 flex items-center gap-2">
+          {canNavigate ? (
+            <button
+              type="button"
+              aria-label={playing ? "Hentikan slideshow" : "Putar slideshow"}
+              onClick={() => setPlaying((v) => !v)}
+              className="flex size-9 items-center justify-center rounded-full border border-white/15 bg-black/60 text-white transition hover:bg-black/80"
+            >
+              {playing ? (
+                <Pause className="size-4" aria-hidden="true" />
+              ) : (
+                <Play className="size-4" aria-hidden="true" />
+              )}
+            </button>
+          ) : null}
           <button
             type="button"
-            aria-label={playing ? "Hentikan slideshow" : "Putar slideshow"}
-            onClick={() => setPlaying((v) => !v)}
-            className="absolute right-3 top-3 z-10 flex size-9 items-center justify-center rounded-full border border-white/15 bg-black/60 text-white transition hover:bg-black/80"
+            aria-label="Tutup pratinjau"
+            onClick={onClose}
+            className="flex size-9 items-center justify-center rounded-full border border-white/15 bg-black/60 text-white transition hover:bg-black/80"
           >
-            {playing ? (
-              <Pause className="size-4" aria-hidden="true" />
-            ) : (
-              <Play className="size-4" aria-hidden="true" />
-            )}
+            <X className="size-4" aria-hidden="true" />
           </button>
-        ) : null}
+        </div>
 
         {/* Isi pratinjau per jenis. v20 — panggung TETAP tinggi (72vh):
             media kecil pun dirender BESAR memenuhi panggung (object-contain),

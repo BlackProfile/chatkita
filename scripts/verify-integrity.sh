@@ -478,6 +478,13 @@ chk_grep "img onError → kartu tak tersedia"     "src/components/chat/ChatBubbl
 chk_grep "video onError → kartu tak tersedia"   "src/components/chat/ChatBubble.tsx" "onError={() => setVidFailed(true)}"
 chk_grep "Kartu media tak tersedia (teks)"      "src/components/chat/ChatBubble.tsx" "Media tidak tersedia"
 chk_file  "Skrip uji image tanpa thumb v56"     ".zscripts/t72-notumb.ts"
+
+# ── v57 (Task 73) — grup tombol kanan-atas viewer: slideshow + tutup tak bertumpuk ──
+chk_grep "Grup kanan-atas viewer (wrapper)"     "src/components/chat/media-viewer.tsx" "absolute right-3 top-3 z-10 flex items-center gap-2"
+chk_grep "Tombol tutup kustom viewer"           "src/components/chat/media-viewer.tsx" 'aria-label="Tutup pratinjau"'
+chk_grep "Slideshow tetap ada (label)"          "src/components/chat/media-viewer.tsx" 'aria-label={playing ? "Hentikan slideshow" : "Putar slideshow"}'
+chk_grep "X bawaan dialog dimatikan di viewer"  "src/components/chat/media-viewer.tsx" "showCloseButton={false}"
+chk_grep "Penanda komentar v57 (viewer)"        "src/components/chat/media-viewer.tsx" "v57 — digabung dgn tombol tutup"
 echo ""
 echo "== Versi server terdaftar =="
 grep -m1 "SERVICE_VERSION = " mini-services/chat-service/index.ts || echo "  ❌ SERVICE_VERSION tidak ditemukan"
