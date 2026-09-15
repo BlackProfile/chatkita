@@ -60,3 +60,6 @@ server.log
 mini-services/chat-service/chat.db-wal
 mini-services/chat-service/chat.db-shm
 tool-results/
+
+# cadangan DB fisik (dbconsole-*.db / chatkita-db-*.db) — jangan blokir repo
+backups/
