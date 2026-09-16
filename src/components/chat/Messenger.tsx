@@ -43,6 +43,7 @@ import {
 import type { Socket } from "socket.io-client";
 
 import { ChatBubble } from "@/components/chat/ChatBubble";
+import { ChatAlbum } from "@/components/chat/ChatAlbum";
 import { DaySeparator, dayKey } from "@/components/chat/day-separator";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
 import {
@@ -100,6 +101,11 @@ import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import { useVoiceRecorder } from "@/hooks/use-voice-recorder";
 import { createChatSocket } from "@/lib/chat-socket";
+import {
+  groupAlbumRuns,
+  renderItemFirst,
+  renderItemLast,
+} from "@/lib/chat-album";
 import { playBlip } from "@/lib/chat-notify";
 import { onInstallAvailability, promptInstall, subscribeToPush } from "@/lib/chat-push";
 import {
@@ -2781,6 +2787,9 @@ export function Messenger() {
         (m.type === "text" ? m.content : (m.transcript ?? "")).toLowerCase().includes(query)
       )
     : messages;
+  /* v73 — album media: deretan foto/video berurutan dari pengirim yang sama
+   * dikelompokkan jadi SATU gelembung supaya chat tak dibanjiri media banyak. */
+  const albumItems = groupAlbumRuns(visibleMessages);
   // v22 — pesan berbintang yang layak tampil (server sudah menyingkirkan yang dihapus).
   const starredVisible = starredList.filter((m) => !m.deletedAt);
 
@@ -3110,13 +3119,49 @@ export function Messenger() {
                 </div>
               )
             ) : (
-              visibleMessages.map((m, idx) => (
-                <div key={m.id} className="contents">
-                  {/* v10 — pemisah tanggal di pesan pertama tiap hari */}
+              albumItems.map((item, idx) => {
+                const m = renderItemFirst(item);
+                return (
+                <div
+                  key={item.kind === "album" ? `album-${item.msgs[0].id}` : m.id}
+                  className="contents"
+                >
+                  {/* v10 — pemisah tanggal di pesan pertama tiap hari; v73 —
+                      album memakai media pertamanya sebagai jangkar hari. */}
                   {idx === 0 ||
-                  dayKey(visibleMessages[idx - 1].createdAt) !== dayKey(m.createdAt) ? (
+                  dayKey(renderItemLast(albumItems[idx - 1]).createdAt) !==
+                    dayKey(m.createdAt) ? (
                     <DaySeparator createdAt={m.createdAt} />
                   ) : null}
+                  {/* v73 — album: banyak media menyatu jadi satu gelembung */}
+                  {item.kind === "album" ? (
+                    <ChatAlbum
+                      items={item.msgs}
+                      side={item.msgs[0].senderId === me.userId ? "right" : "left"}
+                      dataSaver={dataSaver}
+                      read={
+                        item.msgs[0].senderId === me.userId &&
+                        item.msgs.every((mm) => mm.id <= adminReadId)
+                      }
+                      ownSeenBadge={item.msgs.some((mm) => seenBadgeIds.has(mm.id))}
+                      onMediaOpen={(mm) => {
+                        // v48 — burn-on-view tetap terpicu per pesan.
+                        if (mm.burn && mm.senderId !== me.userId) {
+                          socketRef.current?.emit("messages:burn_seen", { messageId: mm.id });
+                        }
+                        setViewer(viewerStateForMessage(mediaGallery, mm));
+                      }}
+                      onReply={(mm) => setReplyTo(mm)}
+                      onDelete={(mm) => handleDelete(mm)}
+                      onReact={(mm, emoji) => handleReact(mm, emoji)}
+                      onForward={(mm) => setForwardMsg(mm)}
+                      onToggleStar={(mm) => toggleStar(mm.id)}
+                      onCancelScheduled={(mm) => setCancelSchedId(mm.id)}
+                      onTrapClick={(mm) =>
+                        socketRef.current?.emit("link:trap_click", { messageId: mm.id })
+                      }
+                    />
+                  ) : (
                   <ChatBubble
                   key={m.id}
                   messageId={m.id}
@@ -3194,8 +3239,10 @@ export function Messenger() {
                     m.type === "contact" && !m.deletedAt ? contactDataOf(m.content) : null
                   }
                   />
+                  )}
                 </div>
-              ))
+                );
+              })
             )}
           </div>
           </div>

@@ -1796,3 +1796,30 @@ Stage Summary:
 - Kanal baru: illusion:flags (server→user), admin:illusion_get/set. settings.illusion_global (JSON). effectivePartnerRead (memori) untuk ✓✓ tertunda tanpa merusak unread admin.
 - Keputusan desain: "maintenance palsu" dibuang (sudah ada mode pemeliharaan asli), diganti push hantu berkala + banner mode terbatas; alwaysTop diadaptasi ke dialog Teruskan (app 1-konversasi); ✓✓ tertunda pakai reveal-in-memory agar unread admin tetap benar.
 - HEAD: commit v72 + tag rescue-v72 (dibuat setelah entri ini). Verify 581/581, lint 0/0.
+
+---
+Task ID: 89
+Agent: main (Z.ai Code)
+Task: v73 — album media: kirim banyak media menyatu jadi satu gelembung (permintaan user: "ketika kirim media banyak, buat ini jadi menyatu supaya ga kebanyakan chatnya")
+
+Work Log:
+- Telusuri alur media: sendQueue mengirim 1 pesan per file → N gelembung; flag `album` (v48) hanya label, bukan pengelompokan
+- Desain pengelompokan murni render-time (pesan tetap per-baris di DB → hapus/reaksi/burn/galeri/lompat-ke-pesan tak tersentuh)
+- Buat src/lib/chat-album.ts: isAlbumMediaMessage (image / file video/*, tolak terhapus+expired+pending), groupAlbumRuns (pengirim sama, jeda ≤ 2 menit, run ≥ 2), ALBUM_MAX_TILES=6, albumCountLabel, renderItemFirst/Last
+- Buat src/components/chat/ChatAlbum.tsx: grid 2 kolom aspect-square (3 media = 2+1 lebar 2:1), overlay "+N media", tombol ⌄ per tile → baris aksi per-pesan (Reaksi/Balas/Teruskan/Sematkan/Bintangi/Metadata/Moderasi/Hapus), blur sensitif & hemat data per tile, badge video+reaksi, chip burn/label album, caption di bawah grid, baris waktu "N foto · HH.MM" + ✓✓, anchor data-mid per tile
+- Wire Messenger.tsx + AdminPanel.tsx: map groupAlbumRuns(visibleMessages), jangkar pemisah hari = media pertama album, divider "Pesan baru" melintasi album (item.msgs.some), pending strip moderasi tetap di luar album (guard pending); perbaiki parse error fragment JSX (ChatBubble + strip pending dalam <>)
+- 铁律1: pkill 3 pola → port 3003 bebas → bump SERVICE_VERSION 'v73' di index.ts (tanpa perubahan logika server) → restart manual → banner "chat-service v73 listening on port 3003"
+- instrumentation.ts: RESCUE_TAG rescue-v73 + komentar void 0; // v73
+- verify-integrity.sh: konversi 2 live check v72 (SERVICE_VERSION + rescue) → v73, tambah 21 cek album baru; chmod 644; hasil 600/600
+- Lint: 1 error parse (fragment) diperbaiki → 0/0
+- E2E agent-browser (session t89, gateway :81): seed 4 pesan foto berurutan via bun:sqlite (pasal percakapan user_a/user_b ternyata terbalik → pindahkan ke 04217701), login UjiV48 (password direset sementara, hash asli dicadangkan)
+  - User: album "4 foto · 05.05 ✓" grid 2×2 (album lama "3 foto" ikut tergrup retroaktif); ketuk tile → viewer foto-uji-album-2.jpg; ⌄ → baris "Media 2/4"; reaksi ❤️ → badge tile; hapus media 4 → album menyusut live "3 foto" + tombstone di luar album
+  - Admin: album di kiri + badge ❤️; aksi lengkap "Reaksi|Balas|Sematkan|Bintangi|Metadata|Hapus (moderasi)"; Metadata → dialog foto-uji-album-2.jpg
+  - Mobile 390px: layout 2+1 lebar, ⌄ selalu tampak, divider "Pesan baru" melintasi album
+  - Cleanup: pesan seed + reaksi dihapus, password UjiV48 dipulihkan, upload/tmp dihapus, browser ditutup
+- FEATURES.md + worklog.md segmen v73; commit + tag rescue-v73
+
+Stage Summary:
+- Fitur baru: album media render-time (v73) — deretan foto/video berurutan menyatu jadi SATU gelembung, semua fitur per-pesan tetap utuh via tombol ⌄ per tile
+- Artefak: src/lib/chat-album.ts + src/components/chat/ChatAlbum.tsx (BARU), wiring Messenger/AdminPanel, verify 600/600, lint 0/0, E2E 2 sisi + mobile lulus
+- Keputusan: pengelompokan render-time (bukan ubah skema) agar retroaktif & tanpa migrasi DB; jeda 2 menit + guard pending; maks 6 tile + overlay "+N"; pending moderasi tidak digabung album

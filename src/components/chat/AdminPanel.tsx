@@ -65,6 +65,7 @@ import type { Socket } from "socket.io-client";
 import { toast } from "sonner";
 
 import { ChatBubble } from "@/components/chat/ChatBubble";
+import { ChatAlbum } from "@/components/chat/ChatAlbum";
 import { AdminDashboard, type DashboardTab } from "@/components/chat/admin-dashboard";
 import { CameraCapture } from "@/components/chat/Messenger";
 import { GIF_PACK, STICKER_KEYS, STICKER_LABELS, StickerSvg, type StickerKey } from "@/lib/stickers";
@@ -196,6 +197,11 @@ import {
   type UserToastPayload,
   type VacuumAck,
 } from "@/lib/chat-types";
+import {
+  groupAlbumRuns,
+  renderItemFirst,
+  renderItemLast,
+} from "@/lib/chat-album";
 import {
   avatarColorClass,
   canEditMessage,
@@ -1073,6 +1079,9 @@ export function AdminPanel() {
         (m.type === "text" ? m.content : (m.transcript ?? "")).toLowerCase().includes(query)
       )
     : activeMessages;
+  /* v73 — album media: deretan foto/video berurutan dari pengirim yang sama
+   * dikelompokkan jadi SATU gelembung supaya chat tak dibanjiri media banyak. */
+  const albumItems = groupAlbumRuns(visibleMessages);
 
   const unreadCount = useMemo(
     () => conversations.reduce((sum, c) => sum + c.unread, 0),
@@ -3185,15 +3194,23 @@ export function AdminPanel() {
                         </p>
                       )
                     ) : (
-                      visibleMessages.map((m, idx) => (
-                        <div key={m.id} className="contents">
-                          {/* v10 — pemisah tanggal di pesan pertama tiap hari */}
+                      albumItems.map((item, idx) => {
+                        const m = renderItemFirst(item);
+                        return (
+                        <div
+                          key={item.kind === "album" ? `album-${item.msgs[0].id}` : m.id}
+                          className="contents"
+                        >
+                          {/* v10 — pemisah tanggal di pesan pertama tiap hari; v73 —
+                              album memakai media pertamanya sebagai jangkar hari. */}
                           {idx === 0 ||
-                          dayKey(visibleMessages[idx - 1].createdAt) !==
+                          dayKey(renderItemLast(albumItems[idx - 1]).createdAt) !==
                             dayKey(m.createdAt) ? (
                             <DaySeparator createdAt={m.createdAt} />
                           ) : null}
-                          {m.id === unreadDividerId ? (
+                          {(item.kind === "album"
+                            ? item.msgs.some((mm) => mm.id === unreadDividerId)
+                            : m.id === unreadDividerId) ? (
                             <div
                               className="my-1 flex items-center gap-2"
                               role="separator"
@@ -3206,6 +3223,36 @@ export function AdminPanel() {
                               <span className="h-px flex-1 bg-rose-500/40" aria-hidden="true" />
                             </div>
                           ) : null}
+                          {/* v73 — album: banyak media menyatu jadi satu gelembung */}
+                          {item.kind === "album" ? (
+                            <ChatAlbum
+                              items={item.msgs}
+                              side={item.msgs[0].senderId === ADMIN_ID ? "right" : "left"}
+                              dataSaver={dataSaver}
+                              read={
+                                item.msgs[0].senderId === ADMIN_ID &&
+                                item.msgs.every((mm) => mm.id <= activeConversation.partnerLastReadId)
+                              }
+                              onMediaOpen={(mm) =>
+                                setViewer(viewerStateForMessage(mediaGallery, mm))
+                              }
+                              onReply={(mm) => setReplyTo(mm)}
+                              onDelete={(mm) => handleDelete(mm)}
+                              onReact={(mm, emoji) => handleReact(mm, emoji)}
+                              onPin={(mm) => togglePin(mm)}
+                              onToggleStar={(mm) => toggleStar(mm.id)}
+                              onCancelScheduled={(mm) => setCancelSchedId(mm.id)}
+                              onModerate={
+                                item.msgs[0].senderId !== ADMIN_ID
+                                  ? (mm) => setModTarget(mm)
+                                  : undefined
+                              }
+                              onShowMeta={(mm) =>
+                                setMetaTarget({ messageId: mm.id, label: mm.fileName ?? undefined })
+                              }
+                            />
+                          ) : (
+                          <>
                           <ChatBubble
                             key={m.id}
                             messageId={m.id}
@@ -3313,8 +3360,11 @@ export function AdminPanel() {
                               </Button>
                             </div>
                           ) : null}
+                          </>
+                          )}
                         </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
                   </div>

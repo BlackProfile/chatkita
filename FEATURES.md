@@ -824,3 +824,28 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser, 2 sesi gateway :81):** tab "Ilusi Global" tampil + simpan (`settings.illusion_global` terisi + audit `[ilusi-global]`); adminInvisible ON → user melihat Admin offline; alias "Timo Verifikasi" muncul di sidebar admin (kembali "rvg" setelah dihapus); phantomUnread → judul "(1) ChatKita"; limitedBanner → banner tampil live + persisten; tsShift +60 → pesan 04.15 tampil 05.15; seenBadge → chip "· Dilihat" (tak bocor ke admin); weakSignal 5 dtk + sendFailEvery 2 → "Mengirim…" lalu banner gagal, pesan tetap sampai ke admin; hapus semu → user "Pesan ini dihapus", admin tetap melihat isi (bug fanout tombstone ke admins ditemukan & diperbaiki saat E2E); state uji dibersihkan (flags rvg di-null-kan, 3 pesan uji dihapus, global dikosongkan). Verify **581/581**; lint 0/0.
 
 **File kunci:** `mini-services/chat-service/index.ts` (GlobalIllusions + 14 bendera + 2 handler + efek di isOnline/lastSeenFor/insertAndFanOut/tombstone/getMessagesPage/messages:read + bump v72), `src/components/chat/admin-ilusi-global.tsx` (BARU), `admin-dashboard.tsx` (tab "ilusiglobal"), `account-control-dialog.tsx` (blok Ilusi II), `Messenger.tsx` (listener illusion:flags + shift + banner + status kirim + badge judul + sort teruskan), `ChatBubble.tsx` (prop ownSeenBadge), `src/lib/chat-types.ts` (14 tipe bendera + GlobalIllusions + ack + payload + MessageAck/ConversationOverview), `src/instrumentation.ts` (rescue-v72), `scripts/verify-integrity.sh` (+29 cek; cek literal v71 → penanda historis).
+
+---
+
+## v73 (Task 89) — Album media: kirim banyak media menyatu satu gelembung
+
+**Masalah:** mengirim banyak foto/video sekaligus membanjiri chat dengan banyak gelembung tunggal (satu media = satu bubble).
+
+**Solusi:** deretan media berurutan dari pengirim yang sama dikelompokkan menjadi SATU gelembung album (gaya WhatsApp) — murni di lapisan render, pesan tetap tersimpan & ditangani server satu-per-satu sehingga hapus/reaksi/burn/galeri/lompat-ke-pesan tetap per pesan.
+
+**Aturan pengelompokan** (`src/lib/chat-album.ts` — BARU):
+- Layak album: `type:image` atau `type:file` bermime `video/*`; bukan pesan terhapus, media kedaluwarsa, maupun pending moderasi.
+- Harus berurutan: pengirim sama, jeda antar pesan ≤ `ALBUM_GAP_MS` (2 menit), tak terputus pesan jenis lain; run ≥ 2 → album, sisanya bubble tunggal.
+
+**Render album** (`src/components/chat/ChatAlbum.tsx` — BARU):
+- Grid 2 kolom `aspect-square`; komposisi 3 media = 2 atas + 1 lebar (2:1); maks `ALBUM_MAX_TILES` (6) tile — sisanya overlay "+N media" yang membuka media ke-7 di viewer.
+- Ketuk tile → viewer media penuh (burn-on-view tetap terpicu per pesan); anchor `data-mid` per tile → lompat-ke-pesan tetap akurat.
+- Tombol ⌄ per tile (selalu terlihat di sentuh, hover di desktop) → baris aksi pesan itu: Reaksi, Balas, Teruskan, Sematkan, Bintangi, Metadata, Hapus (moderasi), Hapus — semua fitur per-pesan tetap utuh.
+- Blur sensitif, hemat data ("ketuk untuk memuat"), blur-up, badge video, badge reaksi ringkas, chip "Hancur setelah dilihat", label album (v48) tetap berfungsi per tile.
+- Baris waktu: "N foto / N video / N foto · M video · HH.MM" (`albumCountLabel`) + ✓✓ bila semua sudah dibaca; caption media ikut tampil di bawah grid; konteks balasan jadi chip ringkas.
+
+**Wiring:** `Messenger.tsx` & `AdminPanel.tsx` memetakan `groupAlbumRuns(visibleMessages)`; pemisah hari memakai jangkar album; divider "Pesan baru" admin melintasi album (`item.msgs.some(...unreadDividerId)`); pesan yang dihapus lewat album keluar dari grup live (regresi aman).
+
+**E2E terverifikasi (agent-browser, gateway :81):** 4 foto seed → 1 album "4 foto · 05.05 ✓" grid 2×2 (user kanan, admin kiri); ketuk tile → viewer "foto-uji-album-2.jpg"; ⌄ → "Media 2/4 · Reaksi/Balas/Bintangi/Hapus"; reaksi ❤️ → badge di tile; hapus media 4 → album menyusut live jadi "3 foto" (tombstone di luar album); admin: aksi Metadata → dialog "foto-uji-album-2.jpg" (Pengirim UjiV48); mobile 390px: layout 2+1 lebar, ⌄ selalu tampak, divider "Pesan baru" melintasi album. State uji dibersihkan (pesan seed dihapus, hash password uji dipulihkan). Verify **600/600**; lint 0/0.
+
+**File kunci:** `src/lib/chat-album.ts` (BARU), `src/components/chat/ChatAlbum.tsx` (BARU), `Messenger.tsx` + `AdminPanel.tsx` (wiring album), `mini-services/chat-service/index.ts` (bump v73), `src/instrumentation.ts` (rescue-v73), `scripts/verify-integrity.sh` (+21 cek; cek literal v72 versi → konversi v73).

@@ -302,7 +302,7 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * Klien user menerima bendera efektif via illusion:flags. Prinsip tetap:
  * hanya mengubah PERSEPSI user — data asli tak tersentuh, admin melihat
  * kebenaran, semua perubahan masuk jejak audit (account_set/illusion_set). */
-const SERVICE_VERSION = 'v72'
+const SERVICE_VERSION = 'v73'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
