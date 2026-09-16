@@ -1773,3 +1773,26 @@ Work Log:
 Stage Summary:
 - v71: seluruh ide animasi yang bisa diterapkan KINI HIDUP — masuk elemen berjenjang & halus, feedback micro (press/pop/crossfade/shake ringan), FLIP daftar percakapan, skeleton, blur-up foto, dan hormat prefers-reduced-motion; tanpa animasi layout-reflow (anti-jank), tanpa bounce lebay. Item sengaja TIDAK diimplementasi: shared-element fullscreen panel (butuh Task konsol baru; v70 sudah fade/zoom), drag-to-dismiss drawer (komponen drawer tak terpakai), highlight pulse pesan-edit (butuh pelacakan just-edited; chip fade sudah ada), crossfade tema (berbenturan disableTransitionOnChange next-themes).
 - Commit + tag rescue-v71.
+
+---
+Task ID: 88 (v72)
+Agent: Z.ai Code (main)
+Task: Implementasikan SEMUA ide fitur ilusi yang sudah disepakati, dipisah menjadi ilusi GLOBAL (semua user) dan ilusi PER-USER.
+
+Work Log:
+- Eksplorasi: CheatFlags (users.cheat_json), isOnline/lastSeenFor, broadcastRead, insertAndFanOut, tombstoneMessage, getMessagesPage, getConversationsFor, admin:account_set, dashboardStats; sisi klien Messenger.tsx (message:new, loadHistory, emitMessage ack, title badge, forward dialog), AdminPanel, chat-types.
+- Iron Rule 1: pkill 3 pola + verifikasi port 3003 bebas sebelum edit index.ts.
+- Server: interface GlobalIllusions + settings.illusion_global (getSetting/setSetting), helper globalIllusions/setGlobalIllusions/adminAliasOf/pulsingOnline/effectiveIllusionFor/sendIllusionFlags/rebroadcastIllusionFlags/schedulePhantomPush/failCounter/delayedReveals (registerDelayedRead/effectivePartnerRead/checksDelayMsFor).
+- Server: 14 bendera baru di CheatFlags + parsing di admin:account_set (boolean loop, numerik clamp, alias trim) + sendIllusionFlags(target).
+- Server: event admin:illusion_get/set (adminGuard + audit illusion_set + rebroadcast + reschedule push hantu); push illusion:flags saat user:auth sukses.
+- Server efek: isOnline (adminInvisible, pulsingPresence), lastSeenFor (stale global, frozen/recently per-user), adminPartnerPresence di getConversationsFor + alias + viewerFlags (phantomUnread/forceTop) + clamp partnerLastReadId; broadcastRead gate adminInvisible; messages:read jalur pengungkapan tertunda; typing gate admin; insertAndFanOut (senderEchoDelayMs, incomingDelayMs per-penerima, suppressSelfEcho); messages:send (fakeSendingMs/fakeFail/ownSeenBadge di ack, failCounter sebelum insert); messages:delete actorId + tombstoneMessage mirage; getMessagesPage restore mirage; dashboardStats alias+lastSeenFor.
+- Klien: chat-types (14 tipe, GlobalIllusions, AdminIllusionGet/SetAck, IllusionFlagsPayload, MessageAck+, ConversationOverview+); admin-ilusi-global.tsx BARU + tab "ilusiglobal" di dashboard; blok "Ilusi II — v72" (14 kontrol) di tab Ilusi Kendali Akun; Messenger (listener illusion:flags + illusionRef, shiftIso/shiftMessages di 5 titik ingest, sendingHold, fakeFail banner, seenBadgeIds, phantomUnread di title/favicon effect, banner mode terbatas, forceTop sort dialog teruskan, reset saat session:revoked); ChatBubble prop ownSeenBadge (chip "· Dilihat").
+- v72: SERVICE_VERSION 'v72' + blok komentar; instrumentation rescue-v72 + void 0 v72; verify-integrity +29 cek v72, konversi cek literal v71 (SERVICE_VERSION→anchor "LAPIS ANIMASI HALUS", rescue→anchor "anim-fade-in" globals.css) + perbaiki cek applyAppBadge(eff); chmod 644.
+- Lint 0/0; verify 581/581.
+- E2E agent-browser (t88 admin, t88u user rvg via magic link): Ilusi Global render+simpan+audit; adminInvisible → Admin offline di user; alias sidebar; phantom badge "(1)"; banner terbatas live+persisten; tsShift +60 (04.15→05.15); seenBadge "· Dilihat" tanpa bocor; weakSignal 5 dtk + sendFailEvery 2 (gagal palsu, pesan tetap sampai admin); hapus semu (user tombstone, admin tetap lihat) — bug fanout tombstone ke admins ditemukan di E2E → diperbaiki (mirage hanya emit ke pengirim; restore utk semua viewer ≠ pengirim) + restart service + re-verify; cleanup penuh (flags rvg null, 3 pesan uji DELETE, illusion_global {}), reload 2 sesi bersih.
+
+Stage Summary:
+- v72 dirilis: 6 ilusi global (tab "Ilusi Global" dashboard) + 14 ilusi II per-user (tab Ilusi Kendali Akun), semua ter-audit, admin selalu melihat kebenaran.
+- Kanal baru: illusion:flags (server→user), admin:illusion_get/set. settings.illusion_global (JSON). effectivePartnerRead (memori) untuk ✓✓ tertunda tanpa merusak unread admin.
+- Keputusan desain: "maintenance palsu" dibuang (sudah ada mode pemeliharaan asli), diganti push hantu berkala + banner mode terbatas; alwaysTop diadaptasi ke dialog Teruskan (app 1-konversasi); ✓✓ tertunda pakai reveal-in-memory agar unread admin tetap benar.
+- HEAD: commit v72 + tag rescue-v72 (dibuat setelah entri ini). Verify 581/581, lint 0/0.

@@ -137,6 +137,7 @@ import {
   type UserSetPasswordAck,
   type GhostMessagePayload,
   type LinkLoginAck,
+  type IllusionFlagsPayload,
 } from "@/lib/chat-types";
 import { applyAppBadge } from "@/lib/app-badge";
 import {
@@ -650,6 +651,16 @@ export function Messenger() {
   /* v48 — media/file/tautan: panel, antrian multi-lampiran, stiker/GIF,
    * kamera, flag sensitif/album, forward. */
   const [convList, setConvList] = useState<ConversationOverview[]>([]);
+  // v72 — ilusi efektif milik user ini (server-push via illusion:flags):
+  // geser waktu pesan, badge belum-baca hantu, banner "mode terbatas".
+  const ILLUSION_OFF: IllusionFlagsPayload = { tsShiftMin: 0, phantomUnread: false, limitedBanner: false };
+  const [illusion, setIllusion] = useState<IllusionFlagsPayload>(ILLUSION_OFF);
+  const illusionRef = useRef<IllusionFlagsPayload>(ILLUSION_OFF);
+  // v72 — ilusi sinyal lemah: status "mengirim…" di composer.
+  const [sendingHold, setSendingHold] = useState(false);
+  // v72 — ilusi badge "Dilihat ✓": id pesan sendiri yang berlabel.
+  const [seenBadgeIds, setSeenBadgeIds] = useState<Set<number>>(() => new Set());
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [queue, setQueue] = useState<{ file: File; previewUrl?: string }[]>([]);
   const [queueBusy, setQueueBusy] = useState(false);
@@ -768,6 +779,24 @@ export function Messenger() {
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
   }, []);
 
+  /**
+   * v72 — ilusi zona waktu: geser createdAt pesan sesuai bendera efektif
+   * dari server (global + per-user, dijumlahkan di server). 0 = apa adanya.
+   * Diterapkan saat pesan MASUK ke state sehingga bubble, pemisah tanggal,
+   * dan pratinjau semuanya konsisten memakai waktu yang "dilihat" user.
+   */
+  const shiftIso = (iso: string): string => {
+    const min = illusionRef.current.tsShiftMin;
+    if (!min) return iso;
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return new Date(d.getTime() + min * 60_000).toISOString();
+  };
+  const shiftMessages = (list: ChatMessage[]): ChatMessage[] =>
+    illusionRef.current.tsShiftMin
+      ? list.map((m) => ({ ...m, createdAt: shiftIso(m.createdAt) }))
+      : list;
+
   /* ---------------------------------------------------------------- */
   /* Socket lifecycle (recreated on logout via `epoch`)                */
   /* ---------------------------------------------------------------- */
@@ -786,7 +815,7 @@ export function Messenger() {
         (res: AckOf<HistoryAck>) => {
           if (res.ok) {
             setPartner(res.partner);
-            setMessages(res.messages);
+            setMessages(shiftMessages(res.messages));
             setHasMore(res.hasMore);
             setAdminReadId(res.partnerLastReadId);
             setPinnedMsg(res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null);
@@ -831,7 +860,7 @@ export function Messenger() {
             if (res.mustSetPassword) setPwModalOpen(true);
             setConversationId(res.conversationId);
             setPartner(res.partner);
-            setMessages(res.messages);
+            setMessages(shiftMessages(res.messages));
             setHasMore(res.hasMore);
             setAdminReadId(res.partnerLastReadId);
             // Push opt-in + pinned banner + draft (the ack carries the
@@ -1058,6 +1087,13 @@ export function Messenger() {
       setPartnerTyping(false);
       setSendError(false);
       setSendErrorDetail(null);
+      // v72 — bendera ilusi ikut direset supaya sesi berikutnya mulai bersih
+      // (server akan mengirim ulang saat login berhasil).
+      illusionRef.current = ILLUSION_OFF;
+      setIllusion(ILLUSION_OFF);
+      setSendingHold(false);
+      setSeenBadgeIds(new Set());
+      setBannerDismissed(false);
       setAuthError(
         deleted
           ? "Akun ini telah dihapus oleh admin — silakan masuk dengan akun lain."
@@ -1088,24 +1124,26 @@ export function Messenger() {
     // v22 — Upsert: umumnya append; pesan terjadwal yang jatuh tempo di-emit
     // ulang server dengan ID yang SAMA (chip ⏰ → pesan final) → ganti, bukan skip.
     socket.on("message:new", (msg: ChatMessage) => {
+      // v72 — ilusi zona waktu: pesan masuk langsung digeser waktunya.
+      const shifted: ChatMessage = { ...msg, createdAt: shiftIso(msg.createdAt) };
       setMessages((prev) => {
-        const idx = prev.findIndex((m) => m.id === msg.id);
-        if (idx === -1) return [...prev, msg];
+        const idx = prev.findIndex((m) => m.id === shifted.id);
+        if (idx === -1) return [...prev, shifted];
         const next = prev.slice();
-        next[idx] = msg;
+        next[idx] = shifted;
         return next;
       });
       // The user's single conversation is always the visible one.
       socketRef.current?.emit("messages:read", {
-        conversationId: msg.conversationId,
+        conversationId: shifted.conversationId,
       });
       if (atBottomRef.current) {
         requestAnimationFrame(() => scrollToBottom(true));
-      } else if (msg.senderId !== meRef.current?.userId) {
+      } else if (shifted.senderId !== meRef.current?.userId) {
         setNewCount((c) => c + 1);
       }
       // Pesan sendiri (termasuk echo terjadwal yang dikirim) tidak dihitung unread.
-      if (document.hidden && msg.senderId !== meRef.current?.userId) {
+      if (document.hidden && shifted.senderId !== meRef.current?.userId) {
         setUnread((c) => c + 1);
         playBlip();
       }
@@ -1209,6 +1247,18 @@ export function Messenger() {
       }
     );
 
+    // v72 — bendera ilusi efektif milik user ini (dikirim saat login & saat
+    // admin mengubah ilusi global/per-user): geser waktu, badge hantu, banner.
+    socket.on("illusion:flags", (p: IllusionFlagsPayload) => {
+      const next: IllusionFlagsPayload = {
+        tsShiftMin: typeof p?.tsShiftMin === "number" ? p.tsShiftMin : 0,
+        phantomUnread: p?.phantomUnread === true,
+        limitedBanner: p?.limitedBanner === true,
+      };
+      illusionRef.current = next;
+      setIllusion(next);
+    });
+
     // Returning to the tab clears the unread title badge.
     const onVisible = () => {
       if (!document.hidden) setUnread(0);
@@ -1254,10 +1304,12 @@ export function Messenger() {
 
   /* v22 — badge unread di judul tab: "(n) ChatKita" selama ada backlog. */
   useEffect(() => {
-    document.title = unread > 0 ? `(${unread}) ChatKita` : "ChatKita — Chat Sederhana";
+    // v72 — ilusi badge belum-baca hantu: +1 yang tidak pernah habis.
+    const eff = unread + (illusion.phantomUnread ? 1 : 0);
+    document.title = eff > 0 ? `(${eff}) ChatKita` : "ChatKita — Chat Sederhana";
     // v47 — badge notifikasi di ikon aplikasi (favicon + App Badging API).
-    applyAppBadge(unread);
-  }, [unread]);
+    applyAppBadge(eff);
+  }, [unread, illusion.phantomUnread]);
 
   /* v28 — cek nama pre-login (debounce 300 ms): akun sudah ada → sembunyikan
    * kolom kode undangan (kode hanya utk pendaftaran akun baru). Nama kosong
@@ -1371,7 +1423,7 @@ export function Messenger() {
             if (res.mustSetPassword) setPwModalOpen(true);
             setConversationId(res.conversationId);
             setPartner(res.partner);
-            setMessages(res.messages);
+            setMessages(shiftMessages(res.messages));
             setAdminReadId(res.partnerLastReadId);
             setPushPublicKey(res.pushPublicKey || null);
             setPinnedMsg(res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null);
@@ -1567,6 +1619,23 @@ export function Messenger() {
         } else if (res.pending) {
           // v40 — mode persetujuan: pesan tampil setelah admin menyetujui.
           toast.info("⏳ Pesan menunggu persetujuan admin.");
+        }
+        // v72 — ilusi pengiriman (sisi pengirim saja, semua kosmetik).
+        if (res.ok && res.fakeSendingMs) {
+          // Sinyal lemah: composer menampilkan "mengirim…" selama jeda;
+          // server menahan echo pesan dengan durasi yang sama.
+          setSendingHold(true);
+          const ms = res.fakeSendingMs;
+          window.setTimeout(() => setSendingHold(false), ms);
+        }
+        if (res.ok && res.fakeFail) {
+          // Gagal palsu: pesan sebenarnya sudah terkirim ke lawan, tapi
+          // layar pengirim menampilkan kegagalan (echo ditahan server).
+          setSendError(true);
+          setSendErrorDetail("Pesan gagal terkirim — coba kirim ulang.");
+        }
+        if (res.ok && res.ownSeenBadge) {
+          setSeenBadgeIds((prev) => new Set(prev).add(res.message.id));
         }
       }
     );
@@ -1917,7 +1986,8 @@ export function Messenger() {
         setHasMore(res.hasMore);
         setMessages((prev) => {
           const seen = new Set(prev.map((m) => m.id));
-          const older = res.messages.filter((m) => !seen.has(m.id));
+          // v72 — halaman lama ikut digeser waktunya (ilusi zona waktu).
+          const older = shiftMessages(res.messages).filter((m) => !seen.has(m.id));
           return older.length > 0 ? [...older, ...prev] : prev;
         });
         requestAnimationFrame(() => {
@@ -2951,6 +3021,29 @@ export function Messenger() {
           </div>
         ) : null}
 
+        {/* v72 — ilusi banner "mode terbatas": murni psikologis, tanpa efek
+            fungsional. Bisa ditutup user (hilang sampai sesi berikutnya). */}
+        {me && illusion.limitedBanner && !bannerDismissed ? (
+          <div
+            className="anim-fade-in mx-3 mt-2 flex items-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+            role="status"
+          >
+            <span aria-hidden="true" className="text-base leading-none">⚠️</span>
+            <p className="min-w-0 flex-1">
+              Akun Anda sedang dalam <span className="font-semibold">mode terbatas</span>. Beberapa
+              fitur mungkin tidak tersedia sementara waktu.
+            </p>
+            <button
+              type="button"
+              aria-label="Tutup banner"
+              className="shrink-0 text-amber-700/70 hover:text-amber-700 dark:text-amber-400/70 dark:hover:text-amber-400"
+              onClick={() => setBannerDismissed(true)}
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+        ) : null}
+
         {/* Messages — wrapper relative: tombol jump melayang tetap di viewport
             chat (absolute di dalam scroll container ikut ter-scroll). */}
         <div className="relative min-h-0 flex-1">
@@ -3033,6 +3126,7 @@ export function Messenger() {
                   type={m.type}
                   deleted={!!m.deletedAt}
                   ghosted={!!m.ghosted}
+                  ownSeenBadge={seenBadgeIds.has(m.id)}
                   fileName={m.fileName}
                   fileSize={m.fileSize}
                   mimeType={m.mimeType}
@@ -3135,6 +3229,13 @@ export function Messenger() {
           <div className="anim-fade-in px-4 pb-1">
             <TypingDots label="sedang mengetik…" />
           </div>
+        ) : null}
+
+        {/* v72 — ilusi sinyal lemah: status "mengirim…" selama pesan ditahan. */}
+        {sendingHold ? (
+          <p className="anim-fade-in px-4 pb-1 text-xs text-muted-foreground" role="status">
+            ⏳ Mengirim…
+          </p>
         ) : null}
 
         {/* Send / image / file errors */}
@@ -4030,6 +4131,9 @@ export function Messenger() {
               </p>
             ) : (
               convList
+                // v72 — ilusi "selalu di atas": percakapan forceTop naik ke urutan pertama.
+                .slice()
+                .sort((a, b) => Number(b.forceTop ?? false) - Number(a.forceTop ?? false))
                 .filter((c) => c.id !== conversationId)
                 .map((c) => (
                   <button

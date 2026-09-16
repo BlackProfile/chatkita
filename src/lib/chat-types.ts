@@ -186,6 +186,12 @@ export interface ChatMessage {
   trapClicks?: number;
   /* v52 — hasil voting polling (datang via message:updated / ack vote). */
   pollResults?: { counts: number[]; total: number } | null;
+  /**
+   * v72 — badge "Dilihat ✓" ilusi: hanya dilampirkan klien ke pesan sendiri
+   * ketika ack `messages:send` membawa ownSeenBadge (cheat ilusi per-user).
+   * Tidak pernah dikirim server ke pihak lain.
+   */
+  ownSeenBadge?: boolean;
 }
 
 /** v47 — isi asli pesan yang dihapus, dikirim ke penonton "kebal hapus". */
@@ -241,6 +247,10 @@ export interface ConversationOverview {
    * (admin can pin any message; both sides see this in the overview).
    */
   pinnedMessage?: PinnedMessageInfo | null;
+  /** v72 — ilusi: badge belum-baca hantu (judul tab/aplikasi tak pernah bersih). */
+  phantomUnread?: boolean;
+  /** v72 — ilusi: percakapan ini selalu diurutkan paling atas (dialog teruskan). */
+  forceTop?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -375,6 +385,22 @@ export interface MessageAck {
   message: ChatMessage;
   /** v40 — true saat pesan masuk antrean moderasi (approval mode). */
   pending?: boolean;
+  /** v72 — ilusi sinyal lemah: tahan status "mengirim…" selama N ms. */
+  fakeSendingMs?: number;
+  /** v72 — ilusi gagal kirim sesekali: pesan sebenarnya sudah terkirim. */
+  fakeFail?: boolean;
+  /** v72 — ilusi: tempelkan badge "Dilihat ✓" palsu ke pesan sendiri. */
+  ownSeenBadge?: boolean;
+}
+
+/** v72 — bendera ilusi efektif untuk satu user (dikirim via `illusion:flags`). */
+export interface IllusionFlagsPayload {
+  /** Semua timestamp yang dilihat user digeser N menit (-720..720, 0 = mati). */
+  tsShiftMin: number;
+  /** Badge belum-baca hantu: judul tab/aplikasi selalu memuat ≥1. */
+  phantomUnread: boolean;
+  /** Banner palsu "akun dalam mode terbatas". */
+  limitedBanner: boolean;
 }
 
 /** Ack payload returned by `messages:older` (v8 pagination). */
@@ -532,6 +558,24 @@ export interface AdminCheatFlags {
   delayMs?: number;
   multiplier?: number;
   textMutator?: string;
+  /* v72 — ILUSI II: kehadiran (di mata admin). */
+  lastSeenFrozen?: number;
+  pulsingPresence?: number;
+  recentlyActive?: number;
+  /* v72 — centang tertunda (menit setelah admin membaca). */
+  delayedChecksMin?: number;
+  /* v72 — pengiriman. */
+  deletionMirage?: number;
+  seenBadge?: number;
+  weakSignalMs?: number;
+  sendFailEvery?: number;
+  incomingDelayMs?: number;
+  /* v72 — tampilan (di layar user). */
+  phantomUnread?: number;
+  alwaysTop?: number;
+  limitedBanner?: number;
+  adminAlias?: string;
+  tsShiftMin?: number;
 }
 
 /** Profil akun penuh satu user (admin:account_get). */
@@ -601,12 +645,56 @@ export interface AdminAccountSetPayload {
   delayMs?: number;
   multiplier?: number;
   textMutator?: string;
+  /* v72 — ILUSI II (per-user). */
+  lastSeenFrozen?: boolean;
+  pulsingPresence?: boolean;
+  recentlyActive?: boolean;
+  delayedChecksMin?: number;
+  deletionMirage?: boolean;
+  seenBadge?: boolean;
+  weakSignalMs?: number;
+  sendFailEvery?: number;
+  incomingDelayMs?: number;
+  phantomUnread?: boolean;
+  alwaysTop?: boolean;
+  limitedBanner?: boolean;
+  adminAlias?: string;
+  tsShiftMin?: number;
 }
 
 export interface AdminAccountSetAck {
   ok: true;
   touched: string[];
   flags: AdminCheatFlags;
+}
+
+/* v72 — ILUSI GLOBAL: saklar ilusi untuk SEMUA user (tab "Ilusi Global"
+ * di dashboard). Efeknya hanya pada persepsi user; admin melihat kebenaran. */
+export interface GlobalIllusions {
+  /** Last seen Admin yang dilihat user tampak N menit lebih tua (0–1440). */
+  presenceStaleMin?: number;
+  /** ✓✓ semua user tertunda N menit setelah Admin membaca (0–720). */
+  checksDelayMin?: number;
+  /** Pesan user menggantung "mengirim…" N ms di layar mereka (500–60000). */
+  sendDelayMs?: number;
+  /** Admin tak terlihat: offline total, tanpa last seen/typing/✓✓. */
+  adminInvisible?: number;
+  /** Semua timestamp yang dilihat user digeser N menit (-720..720). */
+  tsShiftMin?: number;
+  /** Push hantu berkala "1 pesan baru" tiap N menit (1–720). */
+  phantomPushMin?: number;
+}
+
+/** Ack `admin:illusion_get`. */
+export interface AdminIllusionGetAck {
+  ok: true;
+  illusions: GlobalIllusions;
+}
+
+/** Ack `admin:illusion_set`. */
+export interface AdminIllusionSetAck {
+  ok: true;
+  illusions: GlobalIllusions;
 }
 
 export interface AdminAccountPasswordAck {
@@ -2060,6 +2148,9 @@ export interface ConversationResetPayload {
 //                           ("Admin is typing") for the user side only.
 //
 // Kategori E — Pusat Cheat (v25, semua cheat admin jadi satu tempat):
+// admin:illusion_get      {} → AdminIllusionGetAck | ChatErrorAck  (v72)
+// admin:illusion_set      { patch: GlobalIllusions } → AdminIllusionSetAck (v72)
+// illusion:flags          server → IllusionFlagsPayload (push ke user, v72)
 // admin:cheat_peek        { userId } → AdminCheatPeekAck | ChatErrorAck
 //                           Resolves the user↔admin conversation, returns the
 //                           latest page + current cheat toggles (no side effect).

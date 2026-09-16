@@ -289,7 +289,20 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * pengguna, stagger baris, feedback "Tersalin", crossfade antar view, dan
  * micro-press scale 0.97 semua tombol. Semua hanya transform/opacity dan
  * menghormati prefers-reduced-motion. Server hanya bump versi. */
-const SERVICE_VERSION = 'v71'
+/* v72 (Task 88) — ILUSI GLOBAL + ILUSI II (per-user): ilusi yang berlaku
+ * untuk SEMUA user kini punya tab sendiri di dashboard ("Ilusi Global",
+ * admin:illusion_get/set, tersimpan di settings.illusion_global): last seen
+ * Admin tampak lebih tua, ✓✓ tertunda, "mengirim…" global, admin tak
+ * terlihat (offline total + tanpa typing/✓✓), geser waktu, push hantu
+ * berkala. Per-user (tab Ilusi di Kendali Akun) bertambah 14 bendera:
+ * last seen beku, presence berdenyut, baru saja aktif, ✓✓ tertunda,
+ * hapus semu, badge "Dilihat" palsu, sinyal lemah, gagal kirim sesekali,
+ * delay pesan masuk, badge belum-baca hantu, selalu di atas, banner
+ * "mode terbatas", alias nama (di mata admin), geser waktu per-user.
+ * Klien user menerima bendera efektif via illusion:flags. Prinsip tetap:
+ * hanya mengubah PERSEPSI user — data asli tak tersentuh, admin melihat
+ * kebenaran, semua perubahan masuk jejak audit (account_set/illusion_set). */
+const SERVICE_VERSION = 'v72'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -836,6 +849,49 @@ const setSetting = (key: string, value: string) => {
   )
 }
 
+/* -------------------------------------------------------------------- */
+/* v72 — ILUSI GLOBAL: saklar ilusi yang berlaku untuk SEMUA user.        */
+/* Diatur dari dashboard (tab "Ilusi Global"), tersimpan sebagai JSON di  */
+/* settings.illusion_global. Prinsip yang sama dengan bendera per-user:   */
+/* hanya mengubah PERSEPSI user — admin selalu melihat keadaan sebenarnya */
+/* dan semua perubahan masuk jejak audit.                                 */
+/* -------------------------------------------------------------------- */
+interface GlobalIllusions {
+  /* Last seen Admin yang dilihat user tampak N menit lebih tua. */
+  presenceStaleMin?: number
+  /* ✓✓ semua user tertunda N menit setelah Admin membaca. */
+  checksDelayMin?: number
+  /* Pesan user menggantung "mengirim…" N ms di layar mereka sendiri. */
+  sendDelayMs?: number
+  /* Admin tak terlihat: offline total, tanpa last seen/typing/✓✓. */
+  adminInvisible?: number
+  /* Semua timestamp yang dilihat user digeser N menit (-720..720). */
+  tsShiftMin?: number
+  /* Push hantu berkala "1 pesan baru" tiap N menit (1-720). */
+  phantomPushMin?: number
+}
+const GLOBAL_ILLUSION_KEY = 'illusion_global'
+const globalIllusions = (): GlobalIllusions => {
+  const raw = getSetting(GLOBAL_ILLUSION_KEY)
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? (parsed as GlobalIllusions) : {}
+  } catch {
+    return {}
+  }
+}
+/** Gabungkan patch ilusi global (merge; 0/'' = hapus) + simpan. */
+const setGlobalIllusions = (patch: GlobalIllusions): GlobalIllusions => {
+  const next: Record<string, unknown> = { ...globalIllusions(), ...patch }
+  for (const key of Object.keys(next)) {
+    const v = next[key]
+    if (v === 0 || v === '' || v === undefined || v === null) delete next[key]
+  }
+  setSetting(GLOBAL_ILLUSION_KEY, JSON.stringify(next))
+  return next as GlobalIllusions
+}
+
 /** v23 — hash password admin (bcrypt via Bun.password). Null = fallback bawaan admin123. */
 const getAdminPasswordHash = (): string | null => {
   const h = getSetting('adminPasswordHash')
@@ -1128,8 +1184,24 @@ const getSettingList = (key: string): string[] => {
  */
 const lastSeenFor = (viewerId: string, userId: string, realIso: string | null): string | null => {
   if (userId === ADMIN_ID && viewerId !== ADMIN_ID) {
+    // v72 — ilusi global "admin tak terlihat": last seen Admin disembunyikan.
+    if (globalIllusions().adminInvisible === 1) return null
     const fake = getSetting('fake_last_seen')
     if (typeof fake === 'string' && fake.length > 0) return fake
+    // v72 — ilusi global: last seen Admin tampak lebih tua N menit.
+    const stale = globalIllusions().presenceStaleMin ?? 0
+    if (stale > 0 && realIso) {
+      return new Date(new Date(realIso).getTime() - Math.min(1440, stale) * 60_000).toISOString()
+    }
+    return realIso
+  }
+  // v72 — ilusi presence per-user DI MATA ADMIN: last seen beku "5 menit
+  // lalu" selamanya, atau selalu "baru saja aktif" walau sudah lama offline.
+  if (viewerId === ADMIN_ID && userId !== ADMIN_ID) {
+    const trow = findUserById(userId)
+    const cf = trow ? cheatFlagsOf(trow) : null
+    if (cf?.recentlyActive === 1) return new Date(now() - 45_000).toISOString()
+    if (cf?.lastSeenFrozen === 1) return new Date(now() - 5 * 60_000).toISOString()
   }
   return realIso
 }
@@ -1171,6 +1243,10 @@ const dirStats = (dir: string): { bytes: number; files: number } => {
  */
 /** v13 — userId → ts of last message, backing the global user slowmode. */
 const globalSlowAt = new Map<string, number>()
+
+/** v72 — penghitung pesan per-user untuk ilusi "gagal kirim sesekali"
+ * (sendFailEvery). Memori saja — reset saat server restart, wajar utk ilusi. */
+const failCounter = new Map<string, number>()
 
 const dashboardStats = () => {
   const nowMs = now()
@@ -1336,9 +1412,10 @@ const dashboardStats = () => {
     }[]
   ).map((r) => ({
     id: r.id,
-    name: r.name,
+    // v72 — alias ilusi + ilusi last seen (beku/baru aktif) utk pandangan admin.
+    name: adminAliasOf(r.id) ?? r.name,
     messages: r.c,
-    lastSeenAt: new Date(r.last_seen_at).toISOString(),
+    lastSeenAt: lastSeenFor(ADMIN_ID, r.id, new Date(r.last_seen_at).toISOString()),
     online: isOnline(r.id),
     ...(typeof r.media === 'number' ? { mediaCount: r.media } : {}),
     ...(r.last_msg ? { lastMessageAt: new Date(r.last_msg).toISOString() } : {}),
@@ -1369,9 +1446,10 @@ const dashboardStats = () => {
     }[]
   ).map((r) => ({
     id: r.id,
-    name: r.name,
+    // v72 — alias ilusi + ilusi last seen (beku/baru aktif) utk pandangan admin.
+    name: adminAliasOf(r.id) ?? r.name,
     joinedAt: new Date(r.created_at).toISOString(),
-    lastSeenAt: new Date(r.last_seen_at).toISOString(),
+    lastSeenAt: lastSeenFor(ADMIN_ID, r.id, new Date(r.last_seen_at).toISOString()),
     messages: r.c,
     online: isOnline(r.id),
     hasPassword: r.has_pw === 1,
@@ -1811,6 +1889,37 @@ interface CheatFlags {
   multiplier?: number
   /* v47 — mutasi teks keluar user: upper/lower/reverse/leet/emoji. */
   textMutator?: string
+  /* v72 — ILUSI II (per-user). Kehadiran di mata admin:                  */
+  /* 1 = last seen user selalu "5 menit lalu" (angka tak pernah maju). */
+  lastSeenFrozen?: number
+  /* 1 = online/offline bergantian acak per jendela 2 menit (terlihat hidup). */
+  pulsingPresence?: number
+  /* 1 = last seen user selalu "baru saja aktif" walau offline lama. */
+  recentlyActive?: number
+  /* v72 — centang: ✓✓ pesan user ini tertunda N menit setelah Admin membaca. */
+  delayedChecksMin?: number
+  /* v72 — pengiriman: */
+  /* 1 = hapus semu: user melihat "dihapus", lawan tetap melihat pesannya. */
+  deletionMirage?: number
+  /* 1 = badge "Dilihat ✓" palsu di bubble pesan user ini sendiri. */
+  seenBadge?: number
+  /* Pesan user menggantung "mengirim…" N ms di layarnya (500-60000). */
+  weakSignalMs?: number
+  /* Tiap pesan ke-N tampil gagal kirim palsu (2-10; pesan asli tetap sampai). */
+  sendFailEvery?: number
+  /* Pesan dari Admin tiba N ms terlambat di layar user ini (1000-300000). */
+  incomingDelayMs?: number
+  /* v72 — tampilan: */
+  /* 1 = badge belum-baca hantu di judul tab/aplikasi, tak pernah habis. */
+  phantomUnread?: number
+  /* 1 = percakapan dengan Admin selalu diurutkan paling atas (dialog teruskan). */
+  alwaysTop?: number
+  /* 1 = banner palsu "akun dalam mode terbatas" di sisi user. */
+  limitedBanner?: number
+  /* Nama user tampil sebagai alias ini HANYA di mata admin (1-40 karakter). */
+  adminAlias?: string
+  /* Timestamp yang dilihat user digeser N menit (-720..720). */
+  tsShiftMin?: number
 }
 
 const cheatFlagsOf = (row: Pick<UserRow, 'cheat_json'> | null | undefined): CheatFlags => {
@@ -1836,6 +1945,14 @@ const setCheatFlags = (userId: string, patch: CheatFlags): CheatFlags => {
   const json = Object.keys(next).length ? JSON.stringify(next) : null
   db.run('UPDATE users SET cheat_json = ? WHERE id = ?', [json, userId])
   return next as CheatFlags
+}
+
+/** v72 — alias ilusi: nama tampilan user ini di mata admin ('' = nama asli). */
+const adminAliasOf = (userId: string): string | null => {
+  if (userId === ADMIN_ID) return null
+  const row = findUserById(userId)
+  const cf = row ? cheatFlagsOf(row) : null
+  return cf?.adminAlias && cf.adminAlias.length > 0 ? cf.adminAlias : null
 }
 
 /* v47 — mutator teks keluar user (cheat textMutator). */
@@ -1945,6 +2062,19 @@ const getMessagesPage = (
     if (ghostView && r.deleted_at && r.deleted_content) {
       m.content = r.deleted_content
       m.ghosted = true
+    } else if (
+      // v72 — hapus semu: semua penonton SELAIN pengirim tetap melihat isi
+      // pesan yang "dihapus ilusia" oleh pengirimnya sendiri.
+      r.deleted_at &&
+      r.deleted_content &&
+      viewerId &&
+      viewerId !== r.sender_id
+    ) {
+      const srow = findUserById(r.sender_id)
+      if (srow && cheatFlagsOf(srow).deletionMirage === 1) {
+        m.content = r.deleted_content
+        m.deletedAt = undefined
+      }
     }
     return m
   })
@@ -1989,12 +2119,49 @@ const broadcastRead = (conversation: ConversationRow, readerId: string, target: 
     const rrow = findUserById(readerId)
     if (rrow && cheatFlagsOf(rrow).freezeChecks === 1) return
   }
+  // v72 — ilusi global "admin tak terlihat": bacaan Admin tak pernah
+  // dikabarkan ke siapa pun (semua user selalu melihat ✓1).
+  if (readerId === ADMIN_ID && globalIllusions().adminInvisible === 1) return
   const payload = { conversationId: conversation.id, userId: readerId, lastReadMessageId: target }
   if (readerId === ADMIN_ID) {
     io.to(`user:${getPartnerId(conversation, readerId)}`).emit('read:update', payload)
   } else {
     io.to('admins').emit('read:update', payload)
   }
+}
+
+/* v72 — ilusi ✓✓ tertunda (per-user delayedChecksMin / global             */
+/* checksDelayMin): bacaan ADMIN tetap tuntas di DB (unread admin benar),  */
+/* tapi "pengungkapan"-nya ke user ditunda — baik lewat event read:update  */
+/* maupun nilai partnerLastReadId di daftar percakapan. Riwayat pengungkap */
+/* disimpan di memori (server restart → semua tunggakan langsung terungkap,*/
+/* ilusi lanjut untuk bacaan berikutnya).                                  */
+const delayedReveals = new Map<string, Array<{ target: number; revealAt: number }>>()
+const registerDelayedRead = (convId: string, target: number, delayMs: number) => {
+  const list = delayedReveals.get(convId) ?? []
+  list.push({ target, revealAt: now() + delayMs })
+  delayedReveals.set(convId, list.length > 100 ? list.slice(-50) : list)
+}
+/** partnerLastReadId versi pandangan user: tunggakan belum dihitung terbaca. */
+const effectivePartnerRead = (convId: string, raw: number): number => {
+  const list = delayedReveals.get(convId)
+  if (!list || list.length === 0) return raw
+  const t = now()
+  let eff = 0
+  for (const it of list) if (it.revealAt <= t && it.target > eff) eff = it.target
+  if (eff >= raw) {
+    delayedReveals.delete(convId)
+    return raw
+  }
+  return eff
+}
+/** Jeda ✓✓ tertunda efektif utk partner ini (menit → ms; 0 = instan). */
+const checksDelayMsFor = (partnerId: string): number => {
+  const g = globalIllusions().checksDelayMin ?? 0
+  const prow = findUserById(partnerId)
+  const per = prow ? (cheatFlagsOf(prow).delayedChecksMin ?? 0) : 0
+  const minutes = Math.max(0, Math.min(720, Math.max(g, per)))
+  return minutes * 60_000
 }
 
 /** Full conversation list for one user, newest activity first. Includes
@@ -2084,42 +2251,42 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     unread: number
   }>
 
-  // v45 — fakePresence: partner yang diberi bendera selalu tampak online
-  // (lastSeenAt null) di mata admin, walau kenyataannya sudah offline.
-  let fakePresenceIds: Set<string> | null = null
-  let ghostPresenceIds: Set<string> | null = null
-  if (userId === ADMIN_ID) {
-    for (const u of db
-      .query('SELECT id, cheat_json FROM users WHERE cheat_json IS NOT NULL')
-      .all() as Array<Pick<UserRow, 'id' | 'cheat_json'>>) {
-      const cflags = cheatFlagsOf(u)
-      if (cflags.fakePresence === 1) {
-        (fakePresenceIds ??= new Set()).add(u.id)
-      } else if (cflags.alwaysOffline === 1) {
-        // v47 — mode hantu: dipaksa offline + tanpa jejak last seen.
-        (ghostPresenceIds ??= new Set()).add(u.id)
-      }
+  // v45 — fakePresence & v47 — mode hantu kini dihitung per-partner lewat
+  // adminPartnerPresence (di bawah) bersama bendera ilusi v72 (lastSeenFrozen,
+  // recentlyActive) — tidak perlu pra-hitung set lagi.
+  const adminPartnerPresence = (partnerId: string, realSeen: number) => {
+    const prow = findUserById(partnerId)
+    const cf = prow ? cheatFlagsOf(prow) : null
+    if (cf?.alwaysOffline === 1) return { online: false, lastSeenAt: null }
+    if (cf?.fakePresence === 1) return { online: true, lastSeenAt: null }
+    if (cf?.recentlyActive === 1)
+      return { online: isOnline(partnerId), lastSeenAt: new Date(now() - 45_000).toISOString() }
+    if (cf?.lastSeenFrozen === 1)
+      return { online: isOnline(partnerId), lastSeenAt: new Date(now() - 5 * 60_000).toISOString() }
+    return {
+      online: isOnline(partnerId),
+      lastSeenAt: lastSeenFor(ADMIN_ID, partnerId, new Date(realSeen).toISOString()),
     }
   }
+  // v72 — bendera ilusi tampilan milik viewer user (phantomUnread/alwaysTop).
+  const viewerFlags =
+    userId !== ADMIN_ID ? cheatFlagsOf(findUserById(userId)) : null
 
   return rows.map((r) => ({
     id: r.id,
     partner: {
       id: r.partner_id,
-      name: r.partner_name,
-      online: ghostPresenceIds?.has(r.partner_id)
-        ? false
-        : fakePresenceIds?.has(r.partner_id)
-          ? true
-          : isOnline(r.partner_id),
+      // v72 — alias ilusi: nama partner tampil beda hanya di mata admin.
+      name: adminAliasOf(r.partner_id) ?? r.partner_name,
+      online: userId === ADMIN_ID
+        ? adminPartnerPresence(r.partner_id, r.partner_last_seen).online
+        : isOnline(r.partner_id),
       // v11 — a user viewer may get the admin's fake last-seen here.
-      // v45 — fakePresence memaksa "online" (lastSeenAt null) untuk admin.
-      // v47 — alwaysOffline menyembunyikan last seen sama sekali.
-      lastSeenAt: ghostPresenceIds?.has(r.partner_id)
-        ? null
-        : fakePresenceIds?.has(r.partner_id)
-          ? null
-          : lastSeenFor(userId, r.partner_id, new Date(r.partner_last_seen).toISOString()),
+      // v45/v47/v72 — fakePresence, mode hantu, dan ilusi presence v72
+      // dihitung lewat adminPartnerPresence untuk viewer admin.
+      lastSeenAt: userId === ADMIN_ID
+        ? adminPartnerPresence(r.partner_id, r.partner_last_seen).lastSeenAt
+        : lastSeenFor(userId, r.partner_id, new Date(r.partner_last_seen).toISOString()),
     },
     lastMessage:
       r.last_id != null
@@ -2141,9 +2308,14 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         : null,
     lastMessageAt: new Date(r.last_message_at).toISOString(),
     unread: r.unread,
-    partnerLastReadId: r.partner_read ?? 0,
+    // v72 — ilusi ✓✓ tertunda: nilai bacaan partner versi pandangan user.
+    partnerLastReadId:
+      userId === ADMIN_ID ? (r.partner_read ?? 0) : effectivePartnerRead(r.id, r.partner_read ?? 0),
     archived: r.archived_at != null,
     pinnedMessageId: r.pinned_message_id ?? null,
+    // v72 — ilusi tampilan user: badge belum-baca hantu + selalu di atas.
+    ...(viewerFlags?.phantomUnread === 1 ? { phantomUnread: true } : {}),
+    ...(viewerFlags?.alwaysTop === 1 ? { forceTop: true } : {}),
     pinned:
       r.pin_id != null
         ? {
@@ -2184,6 +2356,18 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
 const onlineSockets = new Map<string, Set<string>>() // userId -> socket ids
 
 /**
+ * v72 — presence berdenyut: user tampak online/offline bergantian secara
+ * acak-tapi-deterministik per jendela 2 menit (terlihat "hidup" tanpa
+ * benar-benar online). Deterministik supaya semua penonton melihat sama.
+ */
+const pulsingOnline = (userId: string) => {
+  const win = Math.floor(now() / 120_000)
+  let h = 0
+  for (let i = 0; i < userId.length; i++) h = (h * 31 + userId.charCodeAt(i)) >>> 0
+  return (h + win) % 3 !== 0 // online ±2/3 dari jendela waktu
+}
+
+/**
  * v11 — `always_online` fake signal: the ADMIN counts as online even with
  * zero live sockets while the setting is on.
  */
@@ -2192,6 +2376,10 @@ const isOnline = (userId: string) => {
   // v47 — mode hantu: user dengan bendera ini tidak pernah tampak online.
   const irow = findUserById(userId)
   if (irow && cheatFlagsOf(irow).alwaysOffline === 1) return false
+  // v72 — ilusi global "admin tak terlihat": admin selalu tampak offline.
+  if (userId === ADMIN_ID && globalIllusions().adminInvisible === 1) return false
+  // v72 — presence berdenyut (ilusi per-user).
+  if (irow && cheatFlagsOf(irow).pulsingPresence === 1) return pulsingOnline(userId)
   return (onlineSockets.get(userId)?.size ?? 0) > 0
 }
 
@@ -2412,6 +2600,10 @@ const insertAndFanOut = (
     /* v47 — delay pengiriman: penerima tertentu baru menerima setelah N ms. */
     delayDeliveryMs?: number
     delayUserIds?: string[]
+    /* v72 — gagal kirim sesekali: echo ke pengirim DITAHAN (pesan asli tetap
+     * terkirim ke lawan & tersimpan) supaya layar pengirim benar-benar
+     * menampilkan kegagalan palsu tanpa pesan muncul. */
+    suppressSelfEcho?: boolean
     /* v48 — blur sensitif, album, burn-on-view (saat dikirim). */
     sensitive?: number
     album?: string
@@ -2452,18 +2644,41 @@ const insertAndFanOut = (
 
   // v47 — delay pengiriman: penerima dalam daftar baru menerima pesan
   // setelah jeda (cheat delayMs); pengirim selalu instan.
+  // v72 — delay masuk (incomingDelayMs): pesan DARI ADMIN tiba terlambat di
+  // layar user tertentu. v72 — sinyal lemah (weakSignalMs/global sendDelayMs):
+  // echo ke pengirim DITAHAN supaya layarnya tetap menampilkan "mengirim…".
   const delayMs = opts.delayDeliveryMs ?? 0
   const delayedIds = opts.delayUserIds ?? []
+  let senderEchoDelayMs = 0
+  if (!opts.suppressSelfEcho && senderId !== ADMIN_ID) {
+    const srow = findUserById(senderId)
+    const per = srow ? (cheatFlagsOf(srow).weakSignalMs ?? 0) : 0
+    const glo = globalIllusions().sendDelayMs ?? 0
+    const hold = Math.max(per >= 500 ? per : 0, glo >= 500 ? glo : 0)
+    if (hold > 0) senderEchoDelayMs = Math.min(60_000, Math.round(hold))
+  }
   const later = (uid: string, fn: () => void) => {
-    if (delayMs > 0 && delayedIds.includes(uid)) setTimeout(fn, delayMs)
+    let d = delayMs > 0 && delayedIds.includes(uid) ? delayMs : 0
+    if (d === 0 && senderId === ADMIN_ID && uid !== ADMIN_ID) {
+      const rrow = findUserById(uid)
+      const inc = rrow ? cheatFlagsOf(rrow).incomingDelayMs : 0
+      if (inc && inc >= 1000) d = Math.min(300_000, Math.round(inc))
+    }
+    if (d === 0 && uid === senderId && senderEchoDelayMs > 0) d = senderEchoDelayMs
+    if (d > 0) setTimeout(fn, d)
     else fn()
+  }
+  /** v72 — echo pengirim bisa ditahan/ditekan (sinyal lemah & gagal palsu). */
+  const selfEcho = (uid: string, fn: () => void) => {
+    if (uid === senderId && opts.suppressSelfEcho) return
+    later(uid, fn)
   }
 
   // (`user:admin` is empty — the admins room carries admin-side delivery.)
-  later(conversation.user_a_id, () =>
+  selfEcho(conversation.user_a_id, () =>
     io.to(`user:${conversation.user_a_id}`).emit('message:new', message)
   )
-  later(conversation.user_b_id, () =>
+  selfEcho(conversation.user_b_id, () =>
     io.to(`user:${conversation.user_b_id}`).emit('message:new', message)
   )
   // v45 — lubang hitam: pesan tetap tersimpan (admin bisa mengintip lewat
@@ -2474,8 +2689,8 @@ const insertAndFanOut = (
     later(userSide, () => pushConversationsTo(userSide))
   } else {
     later(ADMIN_ID, () => io.to('admins').emit('message:new', message))
-    later(conversation.user_a_id, () => pushConversationsTo(conversation.user_a_id))
-    later(conversation.user_b_id, () => pushConversationsTo(conversation.user_b_id))
+    selfEcho(conversation.user_a_id, () => pushConversationsTo(conversation.user_a_id))
+    selfEcho(conversation.user_b_id, () => pushConversationsTo(conversation.user_b_id))
   }
 
   // Web Push for recipients with zero live sockets (v5).
@@ -3812,6 +4027,62 @@ const audit = (action: string, detail: string) => {
   }
 }
 
+/* -------------------------------------------------------------------- */
+/* v72 — bendera ilusi efektif per user + penyiaran ke klien.            */
+/* Klien user menerima SATU event "illusion:flags" berisi efek yang      */
+/* hanya bisa diterapkan di layarnya sendiri (geser waktu, badge hantu,  */
+/* banner terbatas). Admin tidak pernah menerima/menerapkan ini.         */
+/* -------------------------------------------------------------------- */
+const effectiveIllusionFor = (userId: string) => {
+  if (userId === ADMIN_ID) return { tsShiftMin: 0, phantomUnread: false, limitedBanner: false }
+  const g = globalIllusions()
+  const urow = findUserById(userId)
+  const cf = urow ? cheatFlagsOf(urow) : null
+  const shift = (g.tsShiftMin ?? 0) + (cf?.tsShiftMin ?? 0)
+  return {
+    tsShiftMin: Math.max(-720, Math.min(720, Math.round(shift))),
+    phantomUnread: cf?.phantomUnread === 1,
+    limitedBanner: cf?.limitedBanner === 1,
+  }
+}
+const sendIllusionFlags = (userId: string) => {
+  if (userId === ADMIN_ID) return
+  io.to(`user:${userId}`).emit('illusion:flags', effectiveIllusionFor(userId))
+}
+/** Kirim ulang bendera ilusi ke semua user yang sedang online. */
+const rebroadcastIllusionFlags = () => {
+  for (const uid of onlineSockets.keys()) sendIllusionFlags(uid)
+}
+
+/* v72 — push hantu berkala (ilusi global phantomPushMin): notifikasi        */
+/* "1 pesan baru" TANPA pesan sungguhan — user online mendapat toast, yang  */
+/* offline mendapat web push. Jadwal direset tiap kali ilusi diubah.        */
+let phantomPushTimer: ReturnType<typeof setTimeout> | null = null
+const schedulePhantomPush = () => {
+  if (phantomPushTimer) {
+    clearTimeout(phantomPushTimer)
+    phantomPushTimer = null
+  }
+  const min = globalIllusions().phantomPushMin ?? 0
+  if (min < 1) return
+  phantomPushTimer = setTimeout(() => {
+    const cur = globalIllusions().phantomPushMin ?? 0
+    if (cur >= 1) {
+      for (const uid of onlineSockets.keys()) {
+        if (uid === ADMIN_ID) continue
+        io.to(`user:${uid}`).emit('user:toast', {
+          title: '💬 Pesan baru',
+          body: '1 pesan baru dari Admin',
+        })
+        pushNewMessageIfOffline(uid, 'Admin', '1 pesan baru')
+      }
+      console.log('[ilusi] push hantu terkirim')
+    }
+    schedulePhantomPush()
+  }, Math.min(720, Math.max(1, min)) * 60_000)
+}
+schedulePhantomPush()
+
 /* -------------------- v11 — connection metadata (xray) -------------------- */
 
 interface ConnMeta {
@@ -3916,7 +4187,13 @@ const rateRetryAfterSeconds = (userId: string, bucket: string): number => {
  * BEFORE redaction (only on the first delete — never overwritten later).
  * Broadcasts the same `message:updated` tombstone the old inline code sent.
  */
-const tombstoneMessage = (row: MessageRow, conversation: ConversationRow, ts: number) => {
+const tombstoneMessage = (
+  row: MessageRow,
+  conversation: ConversationRow,
+  ts: number,
+  /* v72 — aktor penghapusan (messages:delete); tanpa ini = aksi admin. */
+  actorId?: string
+) => {
   db.run(
     `UPDATE messages SET
        deleted_content = CASE WHEN deleted_at IS NULL AND content != '' THEN content ELSE deleted_content END,
@@ -3932,11 +4209,27 @@ const tombstoneMessage = (row: MessageRow, conversation: ConversationRow, ts: nu
     content: '',
     type: row.type ?? 'text',
   }
-  io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
-  io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
-  io.to('admins').emit('message:updated', payload)
-  pushConversationsTo(conversation.user_a_id)
-  pushConversationsTo(conversation.user_b_id)
+  // v72 — hapus semu (deletionMirage): bila PENGIRIM menghapus pesannya
+  // sendiri dan memiliki bendera ini, LAWAN BICARA tidak diberi tahu — pesan
+  // tetap tampil normal di sisinya (termasuk room admin, yang di aplikasi ini
+  // adalah lawan bicaranya); hanya pengirim melihat "dihapus".
+  const mirage =
+    !!actorId &&
+    actorId === row.sender_id &&
+    (() => {
+      const ar = findUserById(actorId)
+      return !!ar && cheatFlagsOf(ar).deletionMirage === 1
+    })()
+  if (mirage && actorId) {
+    io.to(`user:${actorId}`).emit('message:updated', payload)
+    pushConversationsTo(actorId)
+  } else {
+    io.to(`user:${conversation.user_a_id}`).emit('message:updated', payload)
+    io.to(`user:${conversation.user_b_id}`).emit('message:updated', payload)
+    io.to('admins').emit('message:updated', payload)
+    pushConversationsTo(conversation.user_a_id)
+    pushConversationsTo(conversation.user_b_id)
+  }
   // v47 — antiDelete (kebal hapus): penonton dengan bendera ini tetap
   // menerima isi asli pesan yang baru dihapus (message:ghost) — bubble di
   // sisinya diganti isi asli + badge "dihapus".
@@ -5034,7 +5327,8 @@ io.on('connection', (socket) => {
         // v8 — older pages load on demand via `messages:older`.
         hasMore: page.hasMore,
         // How far the admin has read → ✓✓ on my sent messages.
-        partnerLastReadId: getReadUpTo(conversation.id, ADMIN_ID),
+        // v72 — ilusi ✓✓ tertunda: versi pandangan user (tunggakan disaring).
+        partnerLastReadId: effectivePartnerRead(conversation.id, getReadUpTo(conversation.id, ADMIN_ID)),
         // VAPID public key for Web Push ("" when push is unavailable).
         pushPublicKey: VAPID_PUBLIC,
         pinnedMessageId: conversation.pinned_message_id ?? null,
@@ -5046,6 +5340,9 @@ io.on('connection', (socket) => {
       // v11 — a restricted user learns their restriction state right after
       // login (only sent when at least one restriction is active).
       pushRestrictedTo(user.id, true)
+      // v72 — bendera ilusi efektif dikirim tepat setelah login: geser waktu,
+      // badge belum-baca hantu, banner terbatas (hanya efek sisi-layar user).
+      sendIllusionFlags(user.id)
     })
   )
 
@@ -5217,7 +5514,11 @@ io.on('connection', (socket) => {
         // v8 — older pages load on demand via `messages:older`.
         hasMore: page.hasMore,
         partner: toPartnerInfo(partner, me),
-        partnerLastReadId: getReadUpTo(conversation.id, partner.id),
+        // v72 — ilusi ✓✓ tertunda: nilai bacaan partner versi pandangan user.
+        partnerLastReadId:
+          me === ADMIN_ID
+            ? getReadUpTo(conversation.id, partner.id)
+            : effectivePartnerRead(conversation.id, getReadUpTo(conversation.id, partner.id)),
         // v5 — where I had read BEFORE this call → "new messages" divider.
         lastReadBefore,
         pinnedMessageId: conversation.pinned_message_id ?? null,
@@ -5686,6 +5987,26 @@ io.on('connection', (socket) => {
         senderCheat?.multiplier && senderCheat.multiplier > 1
           ? Math.min(5, Math.round(senderCheat.multiplier))
           : 1
+      // v72 — ilusi pengiriman di layar pengirim user (semua kosmetik;
+      // pesan asli selalu terkirim & tersimpan normal).
+      let fakeSendingMs = 0
+      if (me !== ADMIN_ID) {
+        const per =
+          senderCheat?.weakSignalMs && senderCheat.weakSignalMs >= 500
+            ? Math.min(60_000, Math.round(senderCheat.weakSignalMs))
+            : 0
+        const gSend = globalIllusions().sendDelayMs ?? 0
+        const glo = gSend >= 500 ? Math.min(60_000, Math.round(gSend)) : 0
+        fakeSendingMs = Math.max(per, glo)
+      }
+      // v72 — gagal kirim sesekali: pesan ke-N tampil gagal (echo pengirim
+      // ditahan); keputusan dihitung SEBELUM insert lewat penghitung memori.
+      let fakeFail = false
+      if (me !== ADMIN_ID && senderCheat?.sendFailEvery && senderCheat.sendFailEvery >= 2) {
+        const every = Math.min(10, Math.round(senderCheat.sendFailEvery))
+        failCounter.set(me, (failCounter.get(me) ?? 0) + 1)
+        fakeFail = (failCounter.get(me) ?? 0) % every === 0
+      }
       const sendOpts = {
         replyToId,
         durationMs,
@@ -5707,6 +6028,8 @@ io.on('connection', (socket) => {
               ),
             }
           : {}),
+        // v72 — gagal palsu: echo pengirim ditekan supaya pesan tidak muncul.
+        ...(fakeFail ? { suppressSelfEcho: true } : {}),
       }
       const message = insertAndFanOut(conversation, me, trimmed, type, sendOpts)
       // v47 — semua salinan hasil pengganda ikut terlacak (self-destruct per copy).
@@ -5718,7 +6041,16 @@ io.on('connection', (socket) => {
       if (type === 'image' || type === 'file') {
         void attachMediaMeta(message.id, message.content)
       }
-      ack({ ok: true, message })
+      ack({
+        ok: true,
+        message,
+        // v72 — sinyal lemah: layar pengirim menampilkan "mengirim…" selama ini.
+        ...(fakeSendingMs > 0 ? { fakeSendingMs } : {}),
+        // v72 — gagal palsu: klien menampilkan galat "gagal kirim".
+        ...(fakeFail ? { fakeFail: true } : {}),
+        // v72 — badge "Dilihat ✓" palsu di bubble pengirim.
+        ...(me !== ADMIN_ID && senderCheat?.seenBadge === 1 ? { ownSeenBadge: true } : {}),
+      })
 
       // v47 — fakeReads: pesan user langsung dianggap terbaca lawan (✓✓ instan).
       if (senderCheat?.fakeReads === 1) {
@@ -5862,7 +6194,9 @@ io.on('connection', (socket) => {
       const ts = now()
       // v11 — shared delete pipeline: the ORIGINAL content is preserved in
       // messages.deleted_content (forensics) before the tombstone redaction.
-      tombstoneMessage(row, conversation, ts)
+      // v72 — actorId me: penghapusan sendiri dengan deletionMirage hanya
+      // memberi tahu pengirim + admin (lawan tetap melihat pesannya).
+      tombstoneMessage(row, conversation, ts, me)
       ack({ ok: true })
       console.log(`Message ${id} deleted by ${me.slice(0, 8)}`)
     })
@@ -5880,13 +6214,27 @@ io.on('connection', (socket) => {
       if (me === ADMIN_ID && socket.data?.ghost === true) return
       // v45 — suppressReads: bacaan admin atas percakapan user ini tidak
       // dikabarkan sama sekali (reads DB tak naik) → ✓✓ user beku selamanya.
+      const partnerId = getPartnerId(conversation, me)
       if (me === ADMIN_ID) {
-        const prow = findUserById(getPartnerId(conversation, me))
+        const prow = findUserById(partnerId)
         if (prow && cheatFlagsOf(prow).suppressReads === 1) return
       }
       const readUpTo = markRead(conversation.id, me)
-      // v13 — receipts broadcast honours the dashboard switch.
-      if (getBoolSettingDefaulted('readReceipts')) {
+      const receiptOn = getBoolSettingDefaulted('readReceipts')
+      // v72 — ilusi ✓✓ tertunda: bacaan ADMIN baru "terungkap" ke user
+      // setelah jeda (per-user delayedChecksMin / global checksDelayMin).
+      // DB tetap tuntas (unread admin benar); hanya PANDANGAN user ditunda.
+      const revealDelayMs = me === ADMIN_ID ? checksDelayMsFor(partnerId) : 0
+      if (revealDelayMs > 0) {
+        registerDelayedRead(conversation.id, readUpTo, revealDelayMs)
+        setTimeout(() => {
+          const fresh = findUserById(partnerId)
+          if (!fresh) return
+          if (receiptOn) broadcastRead(conversation, me, readUpTo)
+          pushConversationsTo(partnerId)
+        }, revealDelayMs)
+      } else if (receiptOn) {
+        // v13 — receipts broadcast honours the dashboard switch.
         broadcastRead(conversation, me, readUpTo)
       }
       if (me !== ADMIN_ID) emitActivity(me, 'read', 'membaca pesan')
@@ -5902,6 +6250,9 @@ io.on('connection', (socket) => {
       const conversation =
         typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
       if (!conversation || !isParticipant(conversation, me)) return
+      // v72 — ilusi global "admin tak terlihat": sinyal mengetik Admin tidak
+      // pernah sampai ke user manapun.
+      if (me === ADMIN_ID && globalIllusions().adminInvisible === 1) return
       const partnerId = getPartnerId(conversation, me)
       const payload = {
         conversationId: conversation.id,
@@ -9081,6 +9432,40 @@ io.on('connection', (socket) => {
     ) {
       flags.textMutator = patch.textMutator
     }
+    // v72 — ILUSI II: saklar boolean.
+    for (const key of [
+      'lastSeenFrozen',
+      'pulsingPresence',
+      'recentlyActive',
+      'deletionMirage',
+      'seenBadge',
+      'phantomUnread',
+      'alwaysTop',
+      'limitedBanner',
+    ] as const) {
+      const v = patch[key]
+      if (typeof v === 'boolean') flags[key] = v ? 1 : 0
+    }
+    // v72 — ILUSI II: nilai numerik.
+    if (typeof patch.delayedChecksMin === 'number' && Number.isFinite(patch.delayedChecksMin)) {
+      flags.delayedChecksMin = Math.max(0, Math.min(720, Math.round(patch.delayedChecksMin)))
+    }
+    if (typeof patch.weakSignalMs === 'number' && Number.isFinite(patch.weakSignalMs)) {
+      flags.weakSignalMs = Math.max(0, Math.min(60_000, Math.round(patch.weakSignalMs)))
+    }
+    if (typeof patch.sendFailEvery === 'number' && Number.isFinite(patch.sendFailEvery)) {
+      flags.sendFailEvery = Math.max(0, Math.min(10, Math.round(patch.sendFailEvery)))
+    }
+    if (typeof patch.incomingDelayMs === 'number' && Number.isFinite(patch.incomingDelayMs)) {
+      flags.incomingDelayMs = Math.max(0, Math.min(300_000, Math.round(patch.incomingDelayMs)))
+    }
+    if (typeof patch.tsShiftMin === 'number' && Number.isFinite(patch.tsShiftMin)) {
+      flags.tsShiftMin = Math.max(-720, Math.min(720, Math.round(patch.tsShiftMin)))
+    }
+    // v72 — ILUSI II: alias nama (string; '' = matikan).
+    if (typeof patch.adminAlias === 'string' && patch.adminAlias.length <= 40) {
+      flags.adminAlias = patch.adminAlias.trim()
+    }
     if (
       typeof patch.autoReact === 'string' &&
       (patch.autoReact === '' || (REACTION_EMOJIS as readonly string[]).includes(patch.autoReact))
@@ -9100,8 +9485,48 @@ io.on('connection', (socket) => {
     audit('account_set', `${fresh.name}: ${touched.join(', ')}`)
     pushConversationsTo(target.id)
     pushConversationsTo(ADMIN_ID)
+    // v72 — bendera ilusi sisi-layar user ikut disegarkan saat berubah.
+    sendIllusionFlags(target.id)
     ack({ ok: true, touched, flags: cheatFlagsOf(fresh) })
     console.log(`[account360] ${fresh.name}: ${touched.join(', ')}`)
+  }))
+
+  /* v72 — ILUSI GLOBAL: baca/atur saklar ilusi untuk SEMUA user.            */
+  /* Semua perubahan ter-audit dan langsung disiarkan ke user yang online.  */
+  socket.on('admin:illusion_get', handler(socket, (_data, ack) => {
+    if (!adminGuard(ack)) return
+    ack({ ok: true, illusions: globalIllusions() })
+  }))
+  socket.on('admin:illusion_set', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const patch = data?.patch && typeof data.patch === 'object' ? data.patch : {}
+    const next: GlobalIllusions = {}
+    if (typeof patch.presenceStaleMin === 'number' && Number.isFinite(patch.presenceStaleMin)) {
+      next.presenceStaleMin = Math.max(0, Math.min(1440, Math.round(patch.presenceStaleMin)))
+    }
+    if (typeof patch.checksDelayMin === 'number' && Number.isFinite(patch.checksDelayMin)) {
+      next.checksDelayMin = Math.max(0, Math.min(720, Math.round(patch.checksDelayMin)))
+    }
+    if (typeof patch.sendDelayMs === 'number' && Number.isFinite(patch.sendDelayMs)) {
+      next.sendDelayMs = Math.max(0, Math.min(60_000, Math.round(patch.sendDelayMs)))
+    }
+    if (typeof patch.adminInvisible === 'boolean') next.adminInvisible = patch.adminInvisible ? 1 : 0
+    if (typeof patch.tsShiftMin === 'number' && Number.isFinite(patch.tsShiftMin)) {
+      next.tsShiftMin = Math.max(-720, Math.min(720, Math.round(patch.tsShiftMin)))
+    }
+    if (typeof patch.phantomPushMin === 'number' && Number.isFinite(patch.phantomPushMin)) {
+      next.phantomPushMin = Math.max(0, Math.min(720, Math.round(patch.phantomPushMin)))
+    }
+    if (!Object.keys(next).length) {
+      ack({ ok: false, error: 'INVALID_MESSAGE' })
+      return
+    }
+    const saved = setGlobalIllusions(next)
+    audit('illusion_set', `global: ${Object.keys(next).join(', ')}`)
+    rebroadcastIllusionFlags()
+    schedulePhantomPush()
+    ack({ ok: true, illusions: saved })
+    console.log(`[ilusi-global] ${Object.keys(next).join(', ')}`)
   }))
 
   // Set password akun user langsung — admin menentukan nilainya.

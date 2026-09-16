@@ -51,9 +51,11 @@ import {
   Users,
   Wand2,
   Lightbulb,
+  Sparkles,
 } from "lucide-react";
 
 import { AdminCheat } from "@/components/chat/admin-cheat";
+import { AdminIlusiGlobal } from "@/components/chat/admin-ilusi-global";
 import { AdminMediaTautan } from "@/components/chat/admin-media-tautan";
 import { AccountControlDialog } from "@/components/chat/account-control-dialog";
 import { AdminPusat } from "@/components/chat/admin-pusat";
@@ -130,6 +132,7 @@ import { UserInsightDialog } from "@/components/chat/user-insight-dialog";
 export type DashboardTab =
   | "pusat"
   | "cheat"
+  | "ilusiglobal"
   | "penyimpanan"
   | "mediatautan"
   | "ringkasan"
@@ -142,6 +145,7 @@ export type DashboardTab =
 const TABS: { key: DashboardTab; label: string; icon: typeof GaugeCircle }[] = [
   { key: "pusat", label: "Pusat", icon: Landmark },
   { key: "cheat", label: "Cheat", icon: Wand2 },
+  { key: "ilusiglobal", label: "Ilusi Global", icon: Sparkles },
   { key: "penyimpanan", label: "Penyimpanan", icon: HardDrive },
   { key: "mediatautan", label: "Media & Tautan", icon: Images },
   { key: "ringkasan", label: "Ringkasan", icon: GaugeCircle },
@@ -2092,6 +2096,9 @@ export function AdminDashboard({
           ) : tab === "cheat" ? (
             /* v25 — Pusat Cheat: semua fitur cheat admin dalam satu tempat. */
             <AdminCheat socket={socket} users={stats.users} />
+          ) : tab === "ilusiglobal" ? (
+            /* v72 — Ilusi Global: saklar ilusi untuk SEMUA user. */
+            <AdminIlusiGlobal socket={socket} />
           ) : tab === "pusat" ? (
             <AdminPusat socket={socket} version={stats.version} />
           ) : (

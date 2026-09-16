@@ -790,3 +790,37 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser, gateway :81):** login UjiV68 — stagger brand+form aktif (`ck-fade-up`, delay 0.04 s), micro-press tombol aktif (transition transform 0.15 s), blob float utuh; kirim pesan → bubble terender + centang; chip "Balas" → `ck-slide-down` terukur; admin — daftar percakapan `motion.button` (style framer aktif), badge unread `ck-pop` (UjiV68 naik ke puncak dgn badge 1), Manajemen pengguna 11 baris `row-enter` dgn `--i` 0..10 + `ck-fade-up`; konsol browser 0 error di 2 sesi. Verify **552/552**; lint 0/0.
 
 **File kunci:** `src/app/globals.css` (sistem animasi + micro-press), `src/app/page.tsx` (view crossfade), `src/components/chat/ChatBubble.tsx`, `Messenger.tsx`, `AdminPanel.tsx`, `user-manager.tsx`, `admin-dashboard.tsx`, `link-preview.tsx`, `mini-services/chat-service/index.ts` (bump v71), `src/instrumentation.ts` (rescue-v71), `scripts/verify-integrity.sh` (+23 cek; 2 cek literal v70 → penanda historis).
+
+### v72 (Task 88) — Ilusi Global (semua user) + Ilusi II: 14 ilusi baru per-user
+
+**Konteks:** lanjutan tab Ilusi (v45–v47) dan permintaan "tambahkan semuanya, pisahkan fitur ilusi per semua user dan per user". Prinsip tak berubah: ilusi hanya mengubah PERSEPSI — data asli tak tersentuh, admin melihat kebenaran, semua perubahan ter-audit.
+
+**Ilusi GLOBAL (SEMUA user) — tab baru "Ilusi Global" di Dashboard Aplikasi (`admin-ilusi-global.tsx`), tersimpan JSON di `settings.illusion_global` via `admin:illusion_get/set` (adminGuard + audit `illusion_set`):**
+1. **Admin tak terlihat** (`adminInvisible`) — Admin offline total di mata semua user: `isOnline` → false, last seen disembunyikan (`lastSeenFor` → null), sinyal mengetik tidak pernah diteruskan (gate di handler `typing`), bacaan Admin tak pernah dikabarkan (gate di `broadcastRead`).
+2. **Last seen Admin tampak lebih tua** (`presenceStaleMin` 0–1440 menit) — geser mundur timestamp last seen Admin yang dilihat user.
+3. **✓✓ tertunda** (`checksDelayMin` 0–720 menit) — bacaan Admin baru "terungkap" ke user setelah jeda: `registerDelayedRead`/`effectivePartnerRead` (memori) men-saring `partnerLastReadId` + event `read:update` ditunda; DB tetap tuntas sehingga unread admin benar.
+4. **Ilusi "mengirim…"** (`sendDelayMs` 500–60000 ms) — echo pesan ke pengirim ditahan (`senderEchoDelayMs` di `insertAndFanOut`), composer menampilkan "⏳ Mengargar…" selama jeda.
+5. **Zona waktu ilusi** (`tsShiftMin` -720..720) — semua timestamp yang dilihat user digeser.
+6. **Push hantu berkala** (`phantomPushMin` 1–720) — `schedulePhantomPush` mengirim toast "💬 Pesan baru" (online) + web push (offline) tanpa pesan sungguhan.
+
+**Ilusi II PER-USER — tab Ilusi di Kendali Akun (`account-control-dialog.tsx`, blok "Ilusi II — v72", via `admin:account_set`):**
+1. **Last seen beku** (`lastSeenFrozen`) — di mata admin selalu "5 menit lalu".
+2. **Presence berdenyut** (`pulsingPresence`) — online/offline deterministik per jendela 2 menit (`pulsingOnline`).
+3. **Baru saja aktif** (`recentlyActive`) — last seen selalu 45 detik lalu.
+4. **✓✓ tertunda** (`delayedChecksMin`) — versi per-user dari centang tertunda (efektif = max(global, per-user)).
+5. **Hapus semu** (`deletionMirage`) — user menghapus → di layarnya "dihapus", lawan bicara (admin) TETAP melihat pesannya: tombstone hanya dikirim ke pengirim (`tombstoneMessage(actorId)`), halaman riwayat direstorasi utk viewer ≠ pengirim (`getMessagesPage`).
+6. **Badge "Dilihat ✓" palsu** (`seenBadge`) — chip "· Dilihat" di bubble sendiri; ack `messages:send` membawa `ownSeenBadge`, tak pernah bocor ke pihak lain.
+7. **Sinyal lemah** (`weakSignalMs`) — versi per-user dari ilusi mengirim.
+8. **Gagal kirim sesekali** (`sendFailEvery`) — tiap pesan ke-N tampil gagal: `failCounter` (memori) + `suppressSelfEcho` menahan echo pengirim; pesan asli tetap terkirim ke lawan.
+9. **Delay pesan masuk** (`incomingDelayMs`) — pesan dari Admin tiba terlambat di layar user ini (`later()` per-penerima).
+10. **Badge belum-baca hantu** (`phantomUnread`) — judul tab/favicon selalu +1.
+11. **Selalu di atas** (`alwaysTop`) — percakapan forceTop diurutkan pertama di dialog Teruskan.
+12. **Banner "mode terbatas"** (`limitedBanner`) — banner kuning psikologis di layar user (bisa ditutup).
+13. **Alias nama** (`adminAlias`) — nama user tampil beda HANYA di mata admin (`adminAliasOf` dipakai daftar percakapan + dashboard stats).
+14. **Zona waktu ilusi** (`tsShiftMin`) — versi per-user (dijumlahkan dgn global, clamp ±12 jam).
+
+**Kanal klien:** event push `illusion:flags` (payload `IllusionFlagsPayload`: tsShiftMin/phantomUnread/limitedBanner) dikirim saat login sukses, saat `admin:account_set` target berubah, dan saat `admin:illusion_set` (rebroadcast ke semua user online). Messenger menggeser `createdAt` saat pesan masuk ke state (`shiftIso`/`shiftMessages`) sehingga bubble + pemisah tanggal konsisten; bendera direset saat sesi berakhir.
+
+**E2E terverifikasi (agent-browser, 2 sesi gateway :81):** tab "Ilusi Global" tampil + simpan (`settings.illusion_global` terisi + audit `[ilusi-global]`); adminInvisible ON → user melihat Admin offline; alias "Timo Verifikasi" muncul di sidebar admin (kembali "rvg" setelah dihapus); phantomUnread → judul "(1) ChatKita"; limitedBanner → banner tampil live + persisten; tsShift +60 → pesan 04.15 tampil 05.15; seenBadge → chip "· Dilihat" (tak bocor ke admin); weakSignal 5 dtk + sendFailEvery 2 → "Mengirim…" lalu banner gagal, pesan tetap sampai ke admin; hapus semu → user "Pesan ini dihapus", admin tetap melihat isi (bug fanout tombstone ke admins ditemukan & diperbaiki saat E2E); state uji dibersihkan (flags rvg di-null-kan, 3 pesan uji dihapus, global dikosongkan). Verify **581/581**; lint 0/0.
+
+**File kunci:** `mini-services/chat-service/index.ts` (GlobalIllusions + 14 bendera + 2 handler + efek di isOnline/lastSeenFor/insertAndFanOut/tombstone/getMessagesPage/messages:read + bump v72), `src/components/chat/admin-ilusi-global.tsx` (BARU), `admin-dashboard.tsx` (tab "ilusiglobal"), `account-control-dialog.tsx` (blok Ilusi II), `Messenger.tsx` (listener illusion:flags + shift + banner + status kirim + badge judul + sort teruskan), `ChatBubble.tsx` (prop ownSeenBadge), `src/lib/chat-types.ts` (14 tipe bendera + GlobalIllusions + ack + payload + MessageAck/ConversationOverview), `src/instrumentation.ts` (rescue-v72), `scripts/verify-integrity.sh` (+29 cek; cek literal v71 → penanda historis).

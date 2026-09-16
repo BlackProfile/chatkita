@@ -111,6 +111,12 @@ const BOT_DELAY_OPTIONS = [0, 3, 10, 30, 60];
 const SELF_DESTRUCT_OPTIONS = [0, 10, 30, 60, 300, 900, 3600];
 const DELAY_OPTIONS = [0, 2000, 5000, 10000, 30000, 60000];
 const MULTIPLIER_OPTIONS = [1, 2, 3, 4, 5];
+/* v72 — ILUSI II: pilihan numerik. */
+const CHECKS_DELAY_OPTIONS = [0, 1, 5, 15, 60, 240];
+const WEAK_OPTIONS = [0, 2000, 5000, 15000, 30000, 60000];
+const FAIL_OPTIONS = [0, 2, 3, 5, 10];
+const INCOMING_OPTIONS = [0, 2000, 5000, 15000, 60000];
+const SHIFT_OPTIONS = [-120, -60, -15, 0, 15, 60, 120];
 const TEXT_MUTATOR_OPTIONS: Array<{ value: string; label: string }> = [
   /* v47 — "off" = sentinel utk "" (Radix Select melarang value string kosong). */
   { value: "off", label: "Nonaktif" },
@@ -187,6 +193,8 @@ export function AccountControlDialog({
   const [floodText, setFloodText] = useState("Halo? Kamu di mana ya?");
   const [floodCount, setFloodCount] = useState("5");
   const [floodInterval, setFloodInterval] = useState("600");
+  // v72 — ilusi II: draf alias nama (disimpan lewat tombol).
+  const [aliasDraft, setAliasDraft] = useState("");
 
   // massal
   const [findText, setFindText] = useState("");
@@ -215,6 +223,8 @@ export function AccountControlDialog({
         setBotOn(res.account.botReplyOn);
         setBotText(res.account.botReplyText ?? "");
         setBotDelay(String(Math.round((res.account.botReplyDelayMs ?? 3000) / 1000)));
+        // v72 — sinkronkan draf alias ilusi dengan nilai tersimpan.
+        setAliasDraft(res.account.flags.adminAlias ?? "");
       } else if (res.error !== "UNAUTHORIZED") {
         toast.error("Gagal memuat profil akun");
       }
@@ -1072,6 +1082,217 @@ export function AccountControlDialog({
                     ))}
                   </div>
                 </div>
+
+                {/* ---------------- v72 — ILUSI II ---------------- */}
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Ilusi II — v72</p>
+
+                {/* Kehadiran (di mata admin) */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="text-xs font-semibold">Last seen beku</p>
+                      <p className="text-[11px] text-muted-foreground">User ini selalu tampak "terakhir dilihat 5 menit lalu" di mata admin — angkanya tak pernah maju.</p>
+                    </div>
+                    <Switch checked={flag("lastSeenFrozen")} onCheckedChange={() => toggleFlag("lastSeenFrozen", "Last seen beku")} aria-label="Last seen beku" />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="text-xs font-semibold">Presence berdenyut</p>
+                      <p className="text-[11px] text-muted-foreground">Status user ini online/offline bergantian acak tiap ±2 menit — terlihat "hidup" tanpa benar-benar online.</p>
+                    </div>
+                    <Switch checked={flag("pulsingPresence")} onCheckedChange={() => toggleFlag("pulsingPresence", "Presence berdenyut")} aria-label="Presence berdenyut" />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="text-xs font-semibold">Baru saja aktif</p>
+                      <p className="text-[11px] text-muted-foreground">Last seen user ini selalu "baru saja" walau sudah lama offline.</p>
+                    </div>
+                    <Switch checked={flag("recentlyActive")} onCheckedChange={() => toggleFlag("recentlyActive", "Baru saja aktif")} aria-label="Baru saja aktif" />
+                  </div>
+                </div>
+
+                {/* Centang + pengiriman */}
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <div className="space-y-1">
+                    <Label className="text-xs">✓✓ tertunda (centang dua)</Label>
+                    <Select
+                      value={String(account.flags.delayedChecksMin ?? 0)}
+                      onValueChange={(v) =>
+                        setPatch({ delayedChecksMin: Number(v) }, "✓✓ tertunda diperbarui ✓", "ckd")
+                      }
+                    >
+                      <SelectTrigger className="h-8 text-xs" aria-label="Centang dua tertunda">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {CHECKS_DELAY_OPTIONS.map((m) => (
+                          <SelectItem key={m} value={String(m)} className="text-xs">
+                            {m === 0 ? "Nonaktif" : `${m} menit`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-xs">Ilusi sinyal lemah</Label>
+                    <Select
+                      value={String(account.flags.weakSignalMs ?? 0)}
+                      onValueChange={(v) =>
+                        setPatch({ weakSignalMs: Number(v) }, "Sinyal lemah diperbarui ✓", "wsk")
+                      }
+                    >
+                      <SelectTrigger className="h-8 text-xs" aria-label="Ilusi sinyal lemah">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {WEAK_OPTIONS.map((s) => (
+                          <SelectItem key={s} value={String(s)} className="text-xs">
+                            {s === 0 ? "Nonaktif" : `${Math.round(s / 1000)} detik`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-xs">Gagal kirim sesekali</Label>
+                    <Select
+                      value={String(account.flags.sendFailEvery ?? 0)}
+                      onValueChange={(v) =>
+                        setPatch({ sendFailEvery: Number(v) }, "Gagal kirim sesekali disetel ✓", "sfe")
+                      }
+                    >
+                      <SelectTrigger className="h-8 text-xs" aria-label="Gagal kirim sesekali">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {FAIL_OPTIONS.map((n) => (
+                          <SelectItem key={n} value={String(n)} className="text-xs">
+                            {n === 0 ? "Nonaktif" : `Tiap pesan ke-${n}`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-xs">Delay pesan masuk (dari Admin)</Label>
+                    <Select
+                      value={String(account.flags.incomingDelayMs ?? 0)}
+                      onValueChange={(v) =>
+                        setPatch({ incomingDelayMs: Number(v) }, "Delay masuk diperbarui ✓", "inc")
+                      }
+                    >
+                      <SelectTrigger className="h-8 text-xs" aria-label="Delay pesan masuk">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {INCOMING_OPTIONS.map((s) => (
+                          <SelectItem key={s} value={String(s)} className="text-xs">
+                            {s === 0 ? "Nonaktif" : `${Math.round(s / 1000)} detik`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="text-xs font-semibold">Hapus semu</p>
+                      <p className="text-[11px] text-muted-foreground">Saat user ini menghapus pesan, di layarnya tampil "dihapus" — tapi pesan tetap normal di sisi lawan bicara.</p>
+                    </div>
+                    <Switch checked={flag("deletionMirage")} onCheckedChange={() => toggleFlag("deletionMirage", "Hapus semu")} aria-label="Hapus semu" />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="text-xs font-semibold">Badge "Dilihat ✓" palsu</p>
+                      <p className="text-[11px] text-muted-foreground">Bubble pesan user ini (di layarnya sendiri) selalu memuat label "Dilihat ✓".</p>
+                    </div>
+                    <Switch checked={flag("seenBadge")} onCheckedChange={() => toggleFlag("seenBadge", "Badge dilihat palsu")} aria-label="Badge dilihat palsu" />
+                  </div>
+                </div>
+
+                {/* Tampilan (di layar user) */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="text-xs font-semibold">Badge belum-baca hantu</p>
+                      <p className="text-[11px] text-muted-foreground">Judul tab/aplikasi user ini selalu memuat badge "(1)" yang tidak pernah habis dibacanya.</p>
+                    </div>
+                    <Switch checked={flag("phantomUnread")} onCheckedChange={() => toggleFlag("phantomUnread", "Badge belum-baca hantu")} aria-label="Badge belum-baca hantu" />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="text-xs font-semibold">Percakapan selalu di atas</p>
+                      <p className="text-[11px] text-muted-foreground">Percakapan dengan Admin selalu terurut paling atas di dialog teruskan milik user ini.</p>
+                    </div>
+                    <Switch checked={flag("alwaysTop")} onCheckedChange={() => toggleFlag("alwaysTop", "Selalu di atas")} aria-label="Percakapan selalu di atas" />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 rounded-lg border p-2.5">
+                    <div>
+                      <p className="text-xs font-semibold">Banner "mode terbatas"</p>
+                      <p className="text-[11px] text-muted-foreground">Banner kuning "akun dalam mode terbatas" tampil di layar user ini — tanpa efek fungsional apa pun.</p>
+                    </div>
+                    <Switch checked={flag("limitedBanner")} onCheckedChange={() => toggleFlag("limitedBanner", "Banner mode terbatas")} aria-label="Banner mode terbatas" />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <div className="space-y-1">
+                    <Label className="text-xs">Zona waktu ilusi</Label>
+                    <Select
+                      value={String(account.flags.tsShiftMin ?? 0)}
+                      onValueChange={(v) =>
+                        setPatch({ tsShiftMin: Number(v) }, "Zona waktu ilusi disetel ✓", "tss")
+                      }
+                    >
+                      <SelectTrigger className="h-8 text-xs" aria-label="Zona waktu ilusi">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {SHIFT_OPTIONS.map((m) => (
+                          <SelectItem key={m} value={String(m)} className="text-xs">
+                            {m === 0 ? "Waktu sebenarnya" : `${m > 0 ? "+" : ""}${m} menit`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-xs">Alias nama (hanya di mata admin)</Label>
+                    <div className="flex gap-1.5">
+                      <Input
+                        value={aliasDraft}
+                        onChange={(e) => setAliasDraft(e.target.value)}
+                        maxLength={40}
+                        className="h-8 text-xs"
+                        placeholder={account.name}
+                        aria-label="Alias ilusi"
+                      />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 shrink-0 text-xs"
+                        disabled={busy === "alias"}
+                        onClick={() => setPatch({ adminAlias: aliasDraft.trim() }, "Alias ilusi disimpan ✓", "alias")}
+                      >
+                        {busy === "alias" ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : "Simpan"}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+                <p className="text-[10px] leading-snug text-muted-foreground">
+                  Ilusi II: kehadiran &amp; alias hanya mengubah PANDANGAN admin; sisanya mengubah persepsi user sendiri. Semua saklar bisa dimatikan kapan saja dan setiap perubahan masuk jejak audit.
+                </p>
 
                 <div className="space-y-1.5 rounded-lg border p-2.5">
                   <p className="text-xs font-semibold">Toast ke user (alert palsu)</p>

@@ -68,6 +68,8 @@ interface ChatBubbleProps {
   dataSaver?: boolean;
   /** Partner has read up to this message → ✓✓ on own bubbles. */
   read?: boolean;
+  /** v72 — ilusi: chip "Dilihat ✓" palsu di bubble sendiri (cheat seenBadge). */
+  ownSeenBadge?: boolean;
   replyTo?: ReplyPreview;
   /** Label for the quoted author ("Anda" / partner name). */
   replyAuthor?: string;
@@ -166,6 +168,7 @@ export function ChatBubble({
   side,
   type = "text",
   read = false,
+  ownSeenBadge = false,
   replyTo,
   replyAuthor,
   durationMs,
@@ -921,6 +924,12 @@ export function ChatBubble({
                 ) : (
                   <Check className="size-3.5" aria-label="Terkirim" />
                 )}
+              </span>
+            ) : null}
+            {ownSeenBadge && isRight && !deleted ? (
+              /* v72 — ilusi: badge "Dilihat" palsu (cheat seenBadge per-user). */
+              <span className="anim-fade-in inline-flex items-center gap-0.5 font-medium" aria-label="Dilihat">
+                · Dilihat
               </span>
             ) : null}
           </span>
