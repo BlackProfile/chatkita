@@ -1823,3 +1823,21 @@ Stage Summary:
 - Fitur baru: album media render-time (v73) — deretan foto/video berurutan menyatu jadi SATU gelembung, semua fitur per-pesan tetap utuh via tombol ⌄ per tile
 - Artefak: src/lib/chat-album.ts + src/components/chat/ChatAlbum.tsx (BARU), wiring Messenger/AdminPanel, verify 600/600, lint 0/0, E2E 2 sisi + mobile lulus
 - Keputusan: pengelompokan render-time (bukan ubah skema) agar retroaktif & tanpa migrasi DB; jeda 2 menit + guard pending; maks 6 tile + overlay "+N"; pending moderasi tidak digabung album
+
+---
+Task ID: 89-b
+Agent: Z.ai Code (main)
+Task: "sinkronkan pada admin juga" — verifikasi & pemulihan sandbox setelah rollback lokal ke v60
+
+Work Log:
+- Deteksi: sandbox lokal ter-rollback ke v60 (6526778) padahal remote origin/main sudah memuat timeline penuh v61–v73 — termasuk v73 (Task 89) = fitur ALBUM MEDIA dengan wiring Messenger+AdminPanel (jawaban untuk permintaan penggabungan media + sinkron admin).
+- Implementasi v61 duplikat yang sempat dibuat lokal (media-grouping.ts, media-album.tsx, bump v61) diselamatkan ke branch lokal `backup-v61-album` (tidak di-push; redundan thd v73).
+- Pemulihan sesuai prosedur anti-rollback: db live diamankan ke /tmp/dbsync/, pkill chat-service (3 pola), `git reset --hard origin/main` (548bc52, SERVICE_VERSION v73, RESCUE_TAG rescue-v73), chat-service di-restart manual → banner "chat-service v73 listening on port 3003".
+- Verifikasi: `bash scripts/verify-integrity.sh` → 600/600; `bun run lint` → 0/0.
+- E2E agent-browser pada stack v73: buat akun uji AlbumUji73 via Dashboard → Buat akun; login user; unggah 3 foto via input multi-file → "Kirim semua" → SATU gelembung album (header "3 foto · 12.59", grid 2+1); ketuk petak → viewer pratinjau per-media; admin membuka percakapan yang sama → album identik tampil di sisi kiri (screenshot /tmp/album73-admin.png); 0 error konsol kedua sesi.
+- Bersih-bersih: akun uji AlbumUji73 dihapus lewat Kendali akun penuh → "Hapus akun permanen" (DB terverifikasi terhapus); sesi browser ditutup; chat.db dibiarkan dirty (konvensi runtime-drift).
+
+Stage Summary:
+- Permintaan "ketika kirim media banyak, buat ini jadi menyatu" + "sinkronkan pada admin juga" TERPENUHI oleh v73 (Task 89) yang sudah ter-push; lokal kini selaras origin/main (548bc52).
+- Layanan: 81/3000/3003 hidup, banner v73; verify 600/600; lint 0/0.
+- Branch `backup-v61-album` hanya referensi lokal (tidak dihapus agar jejak keputusan tersimpan).
