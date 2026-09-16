@@ -1749,3 +1749,27 @@ Work Log:
 Stage Summary:
 - v70: satu prop `fullscreen` di DialogContent + 10 panel besar kini memakai seluruh layar (tabel/galeri/daftar mengisi sisa tinggi layar, unlock konsol terpusat, viewer media imersif); dialog kecil tak berubah; server hanya bump versi.
 - Integritas: verify 529/529, lint 0/0; commit + tag rescue-v70 (anti-rollback).
+
+---
+Task ID: 87
+Agent: Z.ai Code (utama)
+Task: "berikan ide animasi animasi pada aplikasi lengkap, yang smooth tapi ga lebay" → disetujui "tambahkan semuanya" — lapis animasi halus seluruh aplikasi (v71).
+
+Work Log:
+- Klarifikasi status: worklog ternyata sudah di v70 (Task 84=v68, 85=v69, 86=fullscreen v70 — ringkasan sesi lama basi); tugas animasi = Task 87/v71. Baseline verify 529/529 ✓.
+- Survei Explore: framer-motion SUDAH terpasang & dipakai ChatBubble (enter bubble), TypingDots + keyframes typing ada, tombol lompat/reply chip/edit chip/deleted tombstone ada; admin = AdminPanel.tsx + user-manager.tsx (bukan bagian Messenger); page.tsx memilih view chat/admin.
+- Fondasi globals.css: 5 keyframes (ck-fade-up/in/slide-down/pop/shake) + utility anim-* + .anim-stagger (anak 40 ms bertingkat) + .row-enter (--i cap 10) + .view-enter + .img-blur-up + MICRO-PRESS global (button:active scale 0.97; transition-property DIPERLUAS di luar @layer agar tak menimpa transition-colors) + guard prefers-reduced-motion total. Prinsip: hanya transform+opacity, 150–300 ms, ease-out [0.22,1,0.36,1].
+- ChatBubble (6 edit): bubble sendiri scale settle 0.98→1 (0.18 s); centang Dibaca crossfade via key remount; tombstone & media-kedaluwarsa fade-in; chip "· diedit" fade-in; foto blur-up (opacity-0 → img-blur-up onLoad, key per imageSrc).
+- Messenger (9 edit): container login anim-stagger (brand→kartu) + form anim-stagger (field bertingkat); authError shake ringan key={authError} (2 lokasi, replace_all); tombol lompat anim-pop + badge angka pop key={newCount}; indikator mengetik fade-in; chip balas & edit slide-down; titik online transition-colors 300 ms; status partner crossfade key={partnerStatus}.
+- page.tsx: wrapper keyed {view} + view-enter → crossfade chat↔admin.
+- AdminPanel: import framer-motion; tombol percakapan → motion.button layout (FLIP reorder 0.22 s, item baru fade-in); badge unread pop key={c.unread}; titik online transisi.
+- user-manager: spinner "Memuat…" → skeleton 6 baris (Skeleton); baris user row-enter + --i (map (u,i)).
+- admin-dashboard: state linkCopied; kartu tautan fade-up; tombol Salin → Check "Tersalin" 1,5 s (ikon + label).
+- link-preview: PreviewThumb img img-blur-up.
+- Prosedur wajib: pkill 3 pola → 3003 BEBAS → bump index.ts v71 (blok komentar; tanpa perubahan logika) → nohup → banner "chat-service v71 listening" ✓; instrumentation rescue-v71 + bump void 0.
+- verify: 2 cek literal v70 → penanda historis ("PANEL BESAR JADI FULLSCREEN", "const RESCUE_TAG") + seksi v71 23 cek → **552/552**; lint 0/0; dev.log bersih (warning edge-runtime benign).
+- E2E agent-browser 2 sesi (gateway :81): t87a login UjiV68/uji68 — stagger brand+form terukur (ck-fade-up, delay 0.04 s), micro-press transition transform 0.15 s, float-slow utuh; kirim "Tes animasi v71 ✨" → bubble + centang Terkirim; aksi Balas → chip terukur ck-slide-down; t87b /?admin admin123 — daftar percakapan motion.button (style framer "opacity: 1"), badge unread ck-pop (UjiV68 naik ke puncak dgn badge 1), Manajemen pengguna 11 baris row-enter --i 0..10 ck-fade-up; screenshot /tmp/t87a-chat.png, /tmp/t87a-bubble.png, /tmp/t87b-users.png; konsol 0 error kedua sesi.
+
+Stage Summary:
+- v71: seluruh ide animasi yang bisa diterapkan KINI HIDUP — masuk elemen berjenjang & halus, feedback micro (press/pop/crossfade/shake ringan), FLIP daftar percakapan, skeleton, blur-up foto, dan hormat prefers-reduced-motion; tanpa animasi layout-reflow (anti-jank), tanpa bounce lebay. Item sengaja TIDAK diimplementasi: shared-element fullscreen panel (butuh Task konsol baru; v70 sudah fade/zoom), drag-to-dismiss drawer (komponen drawer tak terpakai), highlight pulse pesan-edit (butuh pelacakan just-edited; chip fade sudah ada), crossfade tema (berbenturan disableTransitionOnChange next-themes).
+- Commit + tag rescue-v71.

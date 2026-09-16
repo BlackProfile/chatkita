@@ -327,7 +327,7 @@ function PreviewThumb({
       loading="lazy"
       draggable={false}
       onError={() => setFailed(true)}
-      className={cn("shrink-0 bg-muted object-cover", className)}
+      className={cn(/* v71 — thumbnail pratinjau fade-in halus. */ "img-blur-up shrink-0 bg-muted object-cover", className)}
     />
   );
 }

@@ -17,6 +17,8 @@ import { AccountControlDialog } from "@/components/chat/account-control-dialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+/* v71 — skeleton loading daftar user (pengganti spinner "Memuat…"). */
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
   DialogContent,
@@ -219,20 +221,34 @@ export function UserManager({
             </DialogHeader>
             <div className="min-h-40 flex-1 overflow-y-auto">
               {listLoading && users.length === 0 ? (
-                <p className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
-                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                  Memuat…
-                </p>
+                /* v71 — skeleton baris: bentuk daftar terlihat sejak awal,
+                 * bukan spinner kosong. */
+                <div aria-hidden="true" className="space-y-2 py-2">
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <div key={i} className="flex items-center gap-3 rounded-xl p-2">
+                      <Skeleton className="size-9 shrink-0 rounded-full" />
+                      <div className="min-w-0 flex-1 space-y-1.5">
+                        <Skeleton className="h-3.5 w-32" />
+                        <Skeleton className="h-3 w-48" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
               ) : users.length === 0 ? (
                 <p className="py-10 text-center text-sm text-muted-foreground">
                   Belum ada user terdaftar.
                 </p>
               ) : (
                 <ul className="space-y-1">
-                  {users.map((u) => {
+                  {users.map((u, i) => {
                     const r = restrictionCache.get(u.id);
                     return (
-                      <li key={u.id}>
+                      /* v71 — baris masuk berjenjang (stagger, cap indeks 10). */
+                      <li
+                        key={u.id}
+                        className="row-enter"
+                        style={{ "--i": Math.min(i, 10) } as React.CSSProperties}
+                      >
                         <button
                           type="button"
                           className="flex w-full items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-accent"

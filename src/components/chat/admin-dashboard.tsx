@@ -435,6 +435,8 @@ export function AdminDashboard({
   const [linkBusy, setLinkBusy] = useState(false);
   const [linkMsg, setLinkMsg] = useState<string | null>(null);
   const [createdLink, setCreatedLink] = useState<(AdminLinkInfo & { token: string }) | null>(null);
+  /* v71 — feedback ikon salin: Copy → centang "Tersalin" 1,5 detik. */
+  const [linkCopied, setLinkCopied] = useState(false);
   const [settingsResetOpen, setSettingsResetOpen] = useState(false);
   const [settingsResetBusy, setSettingsResetBusy] = useState(false);
 
@@ -1515,7 +1517,8 @@ export function AdminDashboard({
                 </div>
                 {linkMsg ? <p className="mb-2 text-xs text-destructive">{linkMsg}</p> : null}
                 {createdLink ? (
-                  <div className="mb-2 rounded-lg border border-sky-500/40 bg-sky-500/5 p-2">
+                  /* v71 — kartu tautan fade-up saat muncul. */
+                  <div className="anim-fade-up mb-2 rounded-lg border border-sky-500/40 bg-sky-500/5 p-2">
                     <p className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-sky-600">
                       <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />
                       Tautan untuk {createdLink.userName ?? createdLink.userId} — hanya
@@ -1531,11 +1534,18 @@ export function AdminDashboard({
                         className="h-7 shrink-0 gap-1 text-[11px]"
                         onClick={() => {
                           void navigator.clipboard.writeText(linkUrlOf(createdLink.token));
+                          /* v71 — ikon & label berganti halus, bukan toast saja. */
+                          setLinkCopied(true);
+                          window.setTimeout(() => setLinkCopied(false), 1500);
                           toast.success("Tautan disalin — kirim ke user.");
                         }}
                       >
-                        <Copy className="size-3" aria-hidden="true" />
-                        Salin
+                        {linkCopied ? (
+                          <Check className="size-3 text-emerald-600" aria-hidden="true" />
+                        ) : (
+                          <Copy className="size-3" aria-hidden="true" />
+                        )}
+                        {linkCopied ? "Tersalin" : "Salin"}
                       </Button>
                     </div>
                   </div>

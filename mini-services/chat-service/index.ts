@@ -280,7 +280,16 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * dipusatkan), dashboard aplikasi, kendali akun penuh, viewer media, galeri
  * media user+admin, manajemen pengguna (daftar + X-Ray), audit log,
  * pencarian pesan, dan forensik. Tanpa perubahan event/logika server. */
-const SERVICE_VERSION = 'v70'
+/* v71 (Task 87) — LAPIS ANIMASI HALUS (klien): gelembung pesan sendiri ikut
+ * scale settle 0.98→1, centang terkirim→dibaca crossfade, tombstone "dihapus"
+ * & chip "diedit" fade-in, foto blur-up onLoad, chip balas/edit slide-down,
+ * tombol lompat + badge unread pop, titik online & status partner transisi
+ * halus, layar login entrance berjenjang + error shake ringan, daftar
+ * percakapan admin FLIP reorder (framer-motion layout), skeleton manajemen
+ * pengguna, stagger baris, feedback "Tersalin", crossfade antar view, dan
+ * micro-press scale 0.97 semua tombol. Semua hanya transform/opacity dan
+ * menghormati prefers-reduced-motion. Server hanya bump versi. */
+const SERVICE_VERSION = 'v71'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'

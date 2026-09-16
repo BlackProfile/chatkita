@@ -36,7 +36,10 @@ export default function Page() {
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
       <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        {view === "chat" ? <Messenger /> : view === "admin" ? <AdminPanel /> : null}
+        {/* v71 — crossfade lembut tiap pindah view (chat ↔ admin). */}
+        <div key={view} className="view-enter flex min-h-0 flex-1 flex-col overflow-hidden">
+          {view === "chat" ? <Messenger /> : view === "admin" ? <AdminPanel /> : null}
+        </div>
       </main>
     </div>
   );

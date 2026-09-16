@@ -231,6 +231,8 @@ export function ChatBubble({
   /* v56 — media gagal dimuat (file hilang/404, mis. media terhapus di luar
    * aplikasi) → kartu ramah "Media tidak tersedia", bukan gambar rusak. */
   const [imgFailed, setImgFailed] = useState(false);
+  /* v71 — foto blur-up: fade halus begitu gambar selesai dimuat. */
+  const [imgLoaded, setImgLoaded] = useState(false);
   const [vidFailed, setVidFailed] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -300,9 +302,11 @@ export function ChatBubble({
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.15 }}
+      /* v71 — bubble sendiri ikut "settle" (scale 0.98→1); easing soft-out
+       * agar masuknya terasa responsif tanpa memantul. */
+      initial={{ opacity: 0, y: 6, scale: isRight ? 0.98 : 1 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
       className={cn("flex w-full flex-col", isRight ? "items-end" : "items-start")}
       data-mid={messageId}
     >
@@ -398,13 +402,14 @@ export function ChatBubble({
 
           {/* Deleted tombstone */}
           {deleted ? (
-            <p className="flex items-center gap-1.5 py-0.5 text-sm italic opacity-70">
+            /* v71 — crossfade lembut ke tulisan "dihapus", bukan hilang mendadak. */
+            <p className="anim-fade-in flex items-center gap-1.5 py-0.5 text-sm italic opacity-70">
               <Trash2 className="size-3.5" aria-hidden="true" />
               Pesan ini dihapus
             </p>
           ) : mediaExpired ? (
             /* v8 — media dibersihkan pembersih retensi (teks/transkrip tetap). */
-            <p className="flex items-center gap-1.5 py-0.5 text-sm italic opacity-70">
+            <p className="anim-fade-in flex items-center gap-1.5 py-0.5 text-sm italic opacity-70">
               <Hourglass className="size-3.5" aria-hidden="true" />
               Media kedaluwarsa
             </p>
@@ -457,15 +462,19 @@ export function ChatBubble({
           ) : isFileImage && imageSrc ? (
             <div className="relative" onClick={(e) => e.stopPropagation()}>
               <img
+                key={imageSrc}
                 src={imageSrc}
                 alt={fileName ?? "Foto yang dikirim"}
                 className={cn(
                   // v55 — lebar foto dibatasi 20rem (konsisten dgn kartu file/audio
                   // 18rem) dan tak pernah meluber dari gelembung di layar sempit.
                   "max-h-64 w-auto max-w-[min(100%,20rem)] cursor-zoom-in rounded-xl object-cover",
+                  // v71 — blur-up: tersembunyi sampai termuat, lalu fade halus.
+                  imgLoaded ? "img-blur-up" : "opacity-0",
                   sensitive && !sensitiveRevealed && "blur-lg"
                 )}
                 loading="lazy"
+                onLoad={() => setImgLoaded(true)}
                 onError={() => setImgFailed(true)}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -898,15 +907,21 @@ export function ChatBubble({
                 })}
               </span>
             ) : null}
-            {edited && !deleted ? <span aria-label="Pesan diedit">· diedit</span> : null}
+            {edited && !deleted ? (
+              /* v71 — chip "diedit" fade-in halus. */
+              <span aria-label="Pesan diedit" className="anim-fade-in">· diedit</span>
+            ) : null}
             {starred && !deleted ? <Star className="size-3 fill-amber-400 text-amber-400" aria-label="Berbintang" /> : null}
             {pinned && !deleted ? <Pin className="size-3" aria-label="Disematkan" /> : null}
             {isRight ? (
-              read ? (
-                <CheckCheck className="size-3.5" aria-label="Dibaca" />
-              ) : (
-                <Check className="size-3.5" aria-label="Terkirim" />
-              )
+              /* v71 — centang terkirim→dibaca crossfade, bukan ganti kasar. */
+              <span key={read ? "dibaca" : "terkirim"} className="anim-fade-in inline-flex">
+                {read ? (
+                  <CheckCheck className="size-3.5" aria-label="Dibaca" />
+                ) : (
+                  <Check className="size-3.5" aria-label="Terkirim" />
+                )}
+              </span>
             ) : null}
           </span>
         </div>

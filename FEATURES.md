@@ -769,3 +769,24 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser, desktop 1440×900 + mobile 390×844):** Dashboard full=true 1440×900 & 390×844; Konsol database fullscreen + unlock terpusat (pass y=509/844) + tabel users mengisi sisa layar (444px desktop) + masking password_hash •••• tetap aktif + sub-dialog edit sel tetap 512px panel kanan + "Kunci konsol" kembali minta password; Kendali akun penuh — rvg fullscreen dengan 4 tab; Manajemen pengguna fullscreen (list 742px, 11 user) + X-Ray 780px; Audit log fullscreen (list 746px, 100 item); galeri media admin fullscreen (grid 6 media) → viewer video fullscreen (footer Unduh nempel dasar); regresi dialog kecil "Ganti nama saya" tetap 640px panel kanan (x=800); mobile: dashboard & konsol DB full tanpa scroll halaman (`scrollHeight<=innerHeight`); konsol browser bersih (0 error selain 404 media kedaluwarsa). Verify **529/529**; lint 0/0.
 
 **File kunci:** `src/components/ui/dialog.tsx` (prop fullscreen), `src/components/chat/db-console.tsx`, `admin-dashboard.tsx`, `account-control-dialog.tsx`, `media-viewer.tsx`, `user-media-panel.tsx`, `user-media-dialog.tsx`, `user-manager.tsx`, `admin-tools.tsx` (Forensik/Pencarian/Audit), `mini-services/chat-service/index.ts` (bump v70), `src/instrumentation.ts` (rescue-v70), `scripts/verify-integrity.sh` (+17 cek; 2 cek literal v69 → penanda historis).
+
+### v71 (Task 87) — Lapis Animasi Halus Seluruh Aplikasi (smooth, tidak lebay)
+
+**Permintaan:** "berikan ide animasi pada aplikasi lengkap, yang smooth tapi ga lebay" → disetujui "tambahkan semuanya".
+
+**Fondasi (globals.css):** 5 keyframes ChatKita (`ck-fade-up/ck-fade-in/ck-slide-down/ck-pop/ck-shake`), utility `anim-*`, stagger anak (`.anim-stagger > *` 40 ms bertingkat), stagger baris (`.row-enter` + `--i` cap 10), crossfade view (`.view-enter`), blur-up gambar (`.img-blur-up`), **micro-press global** (semua tombol scale 0.97 saat ditekan, transition-property diperluas bukan diganti), dan SEMUA dimatikan bila `prefers-reduced-motion: reduce`. Aturan besi: hanya `transform`+`opacity`, 150–300 ms, ease-out `[0.22,1,0.36,1]`.
+
+**Per area:**
+1. **Chat (ChatBubble)** — bubble sendiri settle scale 0.98→1 (0.18 s soft-out); centang Terkirim→Dibaca crossfade (key remount); tombstone "Pesan ini dihapus" & "Media kedaluwarsa" fade-in; chip "· diedit" fade-in; foto blur-up: `opacity-0` → fade 0.3 s begitu `onLoad` (key per sumber).
+2. **Messenger** — layar login entrance berjenjang (brand → kartu → tiap field form, stagger 40 ms); error login shake ringan 3 px sekali (replay per pesan); tombol lompat + angka unread pop (key per angka); indikator mengetik fade-in; chip balas & edit slide-down 0.2 s; titik online transition-colors 300 ms; status partner crossfade per ganti teks.
+3. **Shell (page.tsx)** — crossfade lembut chat ↔ admin (key per view).
+4. **Panel admin (AdminPanel)** — daftar percakapan **FLIP reorder** via framer-motion `motion.button layout` (pesan baru menggeser daftar dengan meluncur, 0.22 s); badge unread pop tiap bertambah; titik online transisi halus.
+5. **Manajemen pengguna (user-manager)** — loading spinner diganti **skeleton 6 baris**; baris user masuk stagger.
+6. **Dashboard admin (admin-dashboard)** — kartu tautan masuk fade-up; tombol Salin → ikon centang + "Tersalin" 1,5 detik.
+7. **Pratinjau tautan (link-preview)** — thumbnail fade-in.
+
+**Sudah ada sebelumnya (tidak diubah):** enter bubble via framer-motion (v-anterior), TypingDots, fullscreen dialog fade/zoom (v70), toast sonner.
+
+**E2E terverifikasi (agent-browser, gateway :81):** login UjiV68 — stagger brand+form aktif (`ck-fade-up`, delay 0.04 s), micro-press tombol aktif (transition transform 0.15 s), blob float utuh; kirim pesan → bubble terender + centang; chip "Balas" → `ck-slide-down` terukur; admin — daftar percakapan `motion.button` (style framer aktif), badge unread `ck-pop` (UjiV68 naik ke puncak dgn badge 1), Manajemen pengguna 11 baris `row-enter` dgn `--i` 0..10 + `ck-fade-up`; konsol browser 0 error di 2 sesi. Verify **552/552**; lint 0/0.
+
+**File kunci:** `src/app/globals.css` (sistem animasi + micro-press), `src/app/page.tsx` (view crossfade), `src/components/chat/ChatBubble.tsx`, `Messenger.tsx`, `AdminPanel.tsx`, `user-manager.tsx`, `admin-dashboard.tsx`, `link-preview.tsx`, `mini-services/chat-service/index.ts` (bump v71), `src/instrumentation.ts` (rescue-v71), `scripts/verify-integrity.sh` (+23 cek; 2 cek literal v70 → penanda historis).

@@ -2270,7 +2270,8 @@ export function Messenger() {
           <ThemeToggle />
         </div>
 
-        <div className="relative z-[1] w-full max-w-md">
+        {/* v71 — entrance berjenjang: brand dulu, kartu menyusul. */}
+        <div className="anim-stagger relative z-[1] w-full max-w-md">
           {/* Brand */}
           <div className="mb-5 flex flex-col items-center text-center">
             <span
@@ -2305,7 +2306,7 @@ export function Messenger() {
               </p>
             ) : null}
             <form
-              className="space-y-4"
+              className="anim-stagger space-y-4"
               onSubmit={(e) => {
                 e.preventDefault();
                 if (lastName && loginMode === "continue") handleAuth(lastName);
@@ -2385,7 +2386,8 @@ export function Messenger() {
                     </p>
                   ) : null}
                   {authError ? (
-                    <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    /* v71 — error shake ringan 1x (replay tiap pesan berganti). */
+                    <p key={authError} className="anim-shake rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
                       {authError}
                     </p>
                   ) : null}
@@ -2600,7 +2602,8 @@ export function Messenger() {
                     </p>
                   ) : null}
                   {authError ? (
-                    <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    /* v71 — error shake ringan 1x (replay tiap pesan berganti). */
+                    <p key={authError} className="anim-shake rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
                       {authError}
                     </p>
                   ) : null}
@@ -2736,8 +2739,9 @@ export function Messenger() {
             </Avatar>
             <span
               aria-hidden="true"
+              /* v71 — pergantian status online transisi warna halus. */
               className={cn(
-                "absolute -right-0.5 -bottom-0.5 size-3 rounded-full border-2 border-background",
+                "absolute -right-0.5 -bottom-0.5 size-3 rounded-full border-2 border-background transition-colors duration-300",
                 partner?.online ? "bg-emerald-500" : "bg-muted-foreground/40"
               )}
             />
@@ -2747,8 +2751,10 @@ export function Messenger() {
               {partner?.name ?? "Admin"}
             </p>
             <p
+              /* v71 — teks status partner crossfade tiap berganti. */
+              key={partnerStatus}
               className={cn(
-                "truncate text-xs",
+                "anim-fade-in truncate text-xs",
                 partnerTyping || partner?.online
                   ? "text-emerald-600"
                   : "text-muted-foreground"
@@ -3105,7 +3111,8 @@ export function Messenger() {
             <Button
               size="icon"
               aria-label={newCount > 0 ? `${newCount} pesan baru` : "Ke pesan terbaru"}
-              className="absolute bottom-4 right-4 z-10 size-10 rounded-full bg-emerald-600 text-white shadow-lg hover:bg-emerald-600/90"
+              /* v71 — tombol lompat pop-in halus saat muncul. */
+              className="anim-pop absolute bottom-4 right-4 z-10 size-10 rounded-full bg-emerald-600 text-white shadow-lg hover:bg-emerald-600/90"
               onClick={() => {
                 setNewCount(0);
                 scrollToBottom(true);
@@ -3113,7 +3120,8 @@ export function Messenger() {
             >
               <ArrowDown className="size-4" aria-hidden="true" />
               {newCount > 0 ? (
-                <span className="absolute -right-1 -top-1 flex size-5 items-center justify-center rounded-full bg-rose-500 text-[10px] font-semibold">
+                /* v71 — angka baru pop tiap bertambah (remount via key). */
+                <span key={newCount} className="anim-pop absolute -right-1 -top-1 flex size-5 items-center justify-center rounded-full bg-rose-500 text-[10px] font-semibold">
                   {newCount > 9 ? "9+" : newCount}
                 </span>
               ) : null}
@@ -3123,7 +3131,8 @@ export function Messenger() {
 
         {/* Typing indicator */}
         {partnerTyping ? (
-          <div className="px-4 pb-1">
+          /* v71 — fade-in halus saat indikator muncul/hilang. */
+          <div className="anim-fade-in px-4 pb-1">
             <TypingDots label="sedang mengetik…" />
           </div>
         ) : null}
@@ -3137,7 +3146,8 @@ export function Messenger() {
 
         {/* Reply chip */}
         {replyTo ? (
-          <div className="mx-3 mb-1 flex items-center gap-2 rounded-xl border border-l-2 border-emerald-500/25 border-l-emerald-500 bg-card/90 px-2.5 py-1.5 text-xs shadow-sm backdrop-blur-sm">
+          /* v71 — bar balas slide-down lembut saat dipilih. */
+          <div className="anim-slide-down mx-3 mb-1 flex items-center gap-2 rounded-xl border border-l-2 border-emerald-500/25 border-l-emerald-500 bg-card/90 px-2.5 py-1.5 text-xs shadow-sm backdrop-blur-sm">
             <div className="min-w-0 flex-1">
               <p className="font-medium text-emerald-600">
                 Balas ke {replyTo.senderId === me.userId ? "diri sendiri" : (partner?.name ?? "Admin")}
@@ -3167,7 +3177,8 @@ export function Messenger() {
 
         {/* Edit chip (v5) */}
         {editing ? (
-          <div className="mx-3 mb-1 flex items-center gap-2 rounded-xl border border-l-2 border-amber-500/25 border-l-amber-500 bg-amber-500/10 px-2.5 py-1.5 text-xs backdrop-blur-sm">
+          /* v71 — bar edit slide-down lembut. */
+          <div className="anim-slide-down mx-3 mb-1 flex items-center gap-2 rounded-xl border border-l-2 border-amber-500/25 border-l-amber-500 bg-amber-500/10 px-2.5 py-1.5 text-xs backdrop-blur-sm">
             <div className="min-w-0 flex-1">
               <p className="font-medium text-amber-600">Mengedit pesan</p>
               <p className="truncate text-muted-foreground">{editing.content}</p>

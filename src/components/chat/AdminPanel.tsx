@@ -59,6 +59,8 @@ import {
   X,
   Zap,
 } from "lucide-react";
+/* v71 — FLIP reorder daftar percakapan (item meluncur halus ke posisi baru). */
+import { motion } from "framer-motion";
 import type { Socket } from "socket.io-client";
 import { toast } from "sonner";
 
@@ -2769,9 +2771,19 @@ export function AdminPanel() {
                     filteredConversations.map((c) => {
                       const isActive = c.id === activeId;
                       return (
-                        <button
+                        /* v71 — motion.button layout: saat pesan baru memindahkan
+                         * percakapan ke atas, item MELUNCUR (FLIP) bukan loncat;
+                         * item baru fade-in lembut. Hanya transform/opacity. */
+                        <motion.button
                           key={c.id}
                           type="button"
+                          layout
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          transition={{
+                            layout: { duration: 0.22, ease: "easeOut" },
+                            duration: 0.18,
+                          }}
                           className={cn(
                             "flex w-full items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-accent",
                             isActive && "bg-accent"
@@ -2791,8 +2803,9 @@ export function AdminPanel() {
                             </Avatar>
                             <span
                               aria-hidden="true"
+                              /* v71 — titik online transisi warna halus. */
                               className={cn(
-                                "absolute -right-0.5 -bottom-0.5 size-3 rounded-full border-2 border-background",
+                                "absolute -right-0.5 -bottom-0.5 size-3 rounded-full border-2 border-background transition-colors duration-300",
                                 c.partner.online ? "bg-emerald-500" : "bg-muted-foreground/40"
                               )}
                             />
@@ -2827,12 +2840,16 @@ export function AdminPanel() {
                                 : formatChatTime(c.lastMessageAt)}
                             </span>
                             {c.unread > 0 ? (
-                              <Badge className="h-5 min-w-5 rounded-full bg-emerald-600 px-1 text-[10px] text-white">
+                              /* v71 — badge pop tiap angka bertambah (remount via key). */
+                              <Badge
+                                key={c.unread}
+                                className="anim-pop h-5 min-w-5 rounded-full bg-emerald-600 px-1 text-[10px] text-white"
+                              >
                                 {c.unread > 99 ? "99+" : c.unread}
                               </Badge>
                             ) : null}
                           </span>
-                        </button>
+                        </motion.button>
                       );
                     })
                   )}
