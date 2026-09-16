@@ -83,7 +83,8 @@ export function UserMediaDialog({
         if (!o) onClose();
       }}
     >
-      <DialogContent className="flex flex-col overflow-hidden">
+      {/* v70 — galeri media admin kini fullscreen. */}
+      <DialogContent fullscreen className="overflow-hidden">
         {target ? (
           <MediaBody
             key={target.id}

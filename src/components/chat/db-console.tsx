@@ -379,9 +379,11 @@ export function DbConsole({
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className="max-w-4xl">
+      {/* v70 — konsol kini FULLSCREEN: tabel data memakai sisa tinggi layar,
+          langkah unlock dipusatkan di kanvas penuh. */}
+      <DialogContent fullscreen>
         {!unlocked ? (
-          <>
+          <div className="mx-auto flex min-h-0 w-full max-w-md flex-1 flex-col justify-center gap-4">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <Database className="size-4 text-emerald-600" aria-hidden="true" />
@@ -445,7 +447,7 @@ export function DbConsole({
                 Buka konsol
               </Button>
             </form>
-          </>
+          </div>
         ) : (
           <>
             <DialogHeader>
@@ -516,9 +518,10 @@ export function DbConsole({
               </Button>
             </div>
 
-            {/* Skema + browser */}
-            <div className="grid gap-3 md:grid-cols-[12rem_1fr]">
-              <div className="max-h-60 overflow-y-auto rounded-xl border md:max-h-96">
+            {/* Skema + browser — v70: isi sisa tinggi layar (fullscreen),
+                daftar tabel & tabel data menggulir internal tanpa cap max-h. */}
+            <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] gap-3 md:grid-cols-[14rem_1fr] md:grid-rows-1">
+              <div className="max-h-44 min-h-0 overflow-y-auto rounded-xl border md:max-h-none">
                 {schema === null ? (
                   <p className="flex items-center justify-center gap-2 p-4 text-xs text-muted-foreground">
                     <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
@@ -553,7 +556,7 @@ export function DbConsole({
                 )}
               </div>
 
-              <div className="min-w-0 space-y-2">
+              <div className="flex min-h-0 min-w-0 flex-col gap-2">
                 {!activeTable ? (
                   <p className="flex h-32 items-center justify-center rounded-xl border text-xs text-muted-foreground">
                     Pilih tabel di kiri untuk menjelajah isinya.
@@ -632,7 +635,7 @@ export function DbConsole({
 
                     {rowsError ? <ErrText res={rowsError} /> : null}
 
-                    <div className="max-h-96 overflow-auto rounded-xl border">
+                    <div className="min-h-0 flex-1 overflow-auto rounded-xl border">
                       {rowsLoading && !rows ? (
                         <p className="flex items-center justify-center gap-2 p-6 text-xs text-muted-foreground">
                           <Loader2 className="size-4 animate-spin" aria-hidden="true" />

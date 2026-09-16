@@ -1731,3 +1731,21 @@ Work Log:
 Stage Summary:
 - v69: admin kini bisa MENGEDIT DATABASE LENGKAP langsung dari aplikasi — browse skema/tabel, edit sel, tambah/hapus baris, SQL bebas multi-statement — tanpa akses server. "Jangan sampai bocor" dijawab berlapis: step-up password per pembukaan dialog (terkunci saat ditutup), rate-limit + TOTP, validasi identifier anti-injection, prepared statement, audit total, backup fisik otomatis sebelum tulisan pertama, dan masking kolom sensitif default-aktif (screenshot aman). Non-admin & user biasa: nol permukaan (UNAUTHORIZED / DB_LOCKED / UI tak ada).
 - Commit + tag rescue-v69.
+
+---
+Task ID: 86
+Agent: Z.ai Code (utama)
+Task: Jawab "buat panel databasenya fullscreen, dan panel yang butuh fullscreen lainnya buat jadi fullscreen" — varian fullscreen di DialogContent + 10 panel besar (v70).
+
+Work Log:
+- PEMULIHAN: sandbox lokal ternyata ter-rollback ke v60 (tag lokal berhenti di rescue-v60, reflog tanpa v61+); semua kerja v61–v69 selamat di origin (tag rescue-v61..v69 + main 138dcab). chat-service dimatikan (port 3003 FREE) → `git reset --hard origin/main` (v69 + hygiene backups) → restart → banner v69 → semua cek konteks kembali (SERVICE_VERSION v69, worklog Task 85, FEATURES v69).
+- SURVEI: 46 pemakaian DialogContent dipetakan (judul per dialog); keputusan "panel yang butuh fullscreen" = permukaan kerja/data berat: konsol database, dashboard aplikasi, kendali akun penuh, viewer media, galeri media (user+admin), manajemen pengguna, audit log, pencarian pesan, forensik. Dialog kecil (PIN, konfirmasi, kamera, polling, teruskan, dsb.) tetap panel kanan.
+- dialog.tsx: prop `fullscreen` — `inset-0 h-dvh w-full flex-col gap-4 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]` + fade (bukan slide-kanan), mobile `overflow-y-auto` → `md:overflow-hidden`.
+- db-console.tsx: unlock dipusatkan (max-w-md justify-center), grid browser `min-h-0 flex-1` + `md:grid-cols-[14rem_1fr] md:grid-rows-1`, daftar tabel max-h-44→penuh desktop, area tabel `min-h-0 flex-1 overflow-auto` (cap max-h-96 dibuang); sub-dialog edit/insert tetap panel kecil.
+- 8 file lain: admin-dashboard (gap-0 p-0 pb-0 sm:p-0 — hati-hati tailwind-merge vs sm:p-6), account-control (md:overflow-y-auto), media-viewer (bg-black overflow-hidden pb-3 sm:pb-4), user-media-panel, user-media-dialog (overflow-hidden), user-manager (list + X-Ray flex-1), admin-tools ×3 (Forensik/Pencarian/Audit — MultiEdit lagi-lagi parsial: audit rg lalu edit tunggal per anchor unik).
+- v70: SERVICE_VERSION 'v70' + blok komentar; instrumentation rescue-v70 + bump void 0; verify-integrity +17 cek & 2 cek literal v69 → penanda historis → 529/529; FEATURES.md seksi v70.
+- E2E agent-browser (t86a, desktop 1440×900 lalu mobile 390×844): Dashboard full 2 viewport + screenshot; Konsol DB unlock terpusat → tabel users mengisi layar (444px) → masking •••• aktif → sub-dialog edit sel tetap 512px → Kunci konsol re-lock ✓; Kendali akun rvg fullscreen; Manajemen pengguna fullscreen (742px/11 user) + X-Ray; Audit log fullscreen (746px/100 item); galeri admin fullscreen → viewer video fullscreen (footer Unduh dasar); regresi "Ganti nama saya" tetap 640px; mobile konsol DB tanpa page-scroll; konsol 0 error. BUG KETEMU+FIX saat E2E: varian fullscreen awalnya lupa `inset-0` → panel muncul di bawah viewport (top:577px) — ditambahkan, full=true.
+
+Stage Summary:
+- v70: satu prop `fullscreen` di DialogContent + 10 panel besar kini memakai seluruh layar (tabel/galeri/daftar mengisi sisa tinggi layar, unlock konsol terpusat, viewer media imersif); dialog kecil tak berubah; server hanya bump versi.
+- Integritas: verify 529/529, lint 0/0; commit + tag rescue-v70 (anti-rollback).

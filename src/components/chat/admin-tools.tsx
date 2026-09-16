@@ -295,7 +295,8 @@ export function ForensicsDialog({
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="">
+        {/* v70 — forensik kini fullscreen (jejak pesan lebih leluasa). */}
+        <DialogContent fullscreen>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <ShieldAlert className="size-4 text-emerald-600" aria-hidden="true" />
@@ -345,7 +346,7 @@ export function ForensicsDialog({
             ) : null}
           </div>
 
-          <div className="max-h-96 min-h-40 space-y-2 overflow-y-auto">
+          <div className="min-h-40 flex-1 space-y-2 overflow-y-auto">
             {tab === "terhapus" ? (
               deleted === null ? (
                 <p className="py-10 text-center text-sm text-muted-foreground">Memuat…</p>
@@ -483,7 +484,8 @@ export function SearchMessagesDialog({
         }
       }}
     >
-      <DialogContent className="">
+      {/* v70 — pencarian pesan kini fullscreen (hasil lebih leluasa). */}
+      <DialogContent fullscreen>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Search className="size-4 text-emerald-600" aria-hidden="true" />
@@ -523,7 +525,7 @@ export function SearchMessagesDialog({
               Tidak ada hasil untuk “{query.trim()}”.
             </p>
           ) : (
-            <div className="max-h-80 space-y-2 overflow-y-auto">
+            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
               {items.map((it) => (
                 <button
                   key={it.messageId}
@@ -658,7 +660,8 @@ export function AuditLogDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="">
+      {/* v70 — audit log kini fullscreen (100 entri lebih leluasa). */}
+      <DialogContent fullscreen>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <ScrollText className="size-4 text-emerald-600" aria-hidden="true" />
@@ -714,7 +717,7 @@ export function AuditLogDialog({
             Belum ada aksi tercatat.
           </p>
         ) : (
-          <ol className="max-h-96 space-y-1.5 overflow-y-auto">
+          <ol className="min-h-0 flex-1 space-y-1.5 overflow-y-auto">
             {items.map((it, i) => (
               <li key={i} className="flex items-start gap-2 rounded-lg border p-2">
                 <span className="mt-0.5 shrink-0">

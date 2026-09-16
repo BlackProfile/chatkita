@@ -607,7 +607,8 @@ export function AccountControlDialog({
   return (
     <>
       <Dialog open={open} onOpenChange={handleOpenChange}>
-        <DialogContent className="">
+        {/* v70 — panel besar kini fullscreen; konten panjang tetap menggulir. */}
+        <DialogContent fullscreen className="md:overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-base">
               <UserCog className="size-4" aria-hidden="true" />

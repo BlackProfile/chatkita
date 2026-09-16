@@ -204,7 +204,8 @@ export function UserManager({
       open={open}
       onOpenChange={onOpenChange}
     >
-      <DialogContent className="">
+      {/* v70 — manajemen pengguna kini fullscreen (daftar & X-Ray lebih luas). */}
+      <DialogContent fullscreen>
         {detailId === null ? (
           <>
             <DialogHeader>
@@ -216,7 +217,7 @@ export function UserManager({
                 Ketuk user untuk X-Ray: profil, aktivitas, dan kontrol sesi.
               </DialogDescription>
             </DialogHeader>
-            <div className="max-h-96 min-h-40 overflow-y-auto">
+            <div className="min-h-40 flex-1 overflow-y-auto">
               {listLoading && users.length === 0 ? (
                 <p className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
                   <Loader2 className="size-4 animate-spin" aria-hidden="true" />
@@ -311,7 +312,7 @@ export function UserManager({
             ) : !profile ? (
               <p className="py-8 text-center text-sm text-muted-foreground">Profil tidak tersedia.</p>
             ) : (
-              <div className="max-h-[65vh] space-y-3 overflow-y-auto pr-1">
+              <div className="max-h-[65vh] min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 md:max-h-none">
                 {/* Chip status pembatasan */}
                 <div className="flex flex-wrap items-center gap-1.5">
                   {restricted?.frozen ? (

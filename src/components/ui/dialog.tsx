@@ -52,13 +52,20 @@ function DialogOverlay({
   )
 }
 
+// v70 (Task 86): varian FULLSCREEN — panel menutup seluruh layar (inset-0 h-dvh,
+// tanpa sudut membulat, animasi fade bukan slide-kanan) untuk permukaan kerja
+// besar: konsol database, dashboard aplikasi, kendali akun penuh, viewer media,
+// dan galeri media. Mobile tetap bisa menggulir bila blok tetap melebihi layar;
+// padding bawah menghormati safe-area inset (iOS).
 function DialogContent({
   className,
   children,
   showCloseButton = true,
+  fullscreen = false,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
+  fullscreen?: boolean
 }) {
   return (
     <DialogPortal data-slot="dialog-portal">
@@ -66,7 +73,10 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right fixed inset-y-0 right-0 z-50 grid w-full content-start gap-4 overflow-y-auto border-l p-6 shadow-2xl duration-200 sm:w-[640px] sm:rounded-l-2xl",
+          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out fixed z-50 shadow-2xl duration-200",
+          fullscreen
+            ? "inset-0 flex h-dvh w-full flex-col gap-4 overflow-y-auto p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0 sm:p-6 md:overflow-hidden"
+            : "data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right inset-y-0 right-0 grid w-full content-start gap-4 overflow-y-auto border-l p-6 sm:w-[640px] sm:rounded-l-2xl",
           className
         )}
         {...props}

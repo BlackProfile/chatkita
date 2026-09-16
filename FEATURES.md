@@ -743,3 +743,29 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi:** uji keamanan socket **22/22** (non-admin ditolak, DB_LOCKED default, password salah ditolak, injection tabel/kolom ditolak, siklus CREATE→INSERT→SELECT→edit→DELETE→DROP→lock mulus, berkas backup fisik terbentuk); browser: gerbang step-up → skema 15 objek/79 MB → masking users 20 sel •••• default, toggle reveal 0↔20 → CREATE+INSERT multi-statement + auto-backup tercatat → edit sel live di grid → DROP bersih → "Kunci konsol" kembali minta password; sisi user (UjiV68) tanpa menu/konsol; audit_log memuat seluruh jejak. Verify **512/512**; lint 0/0.
 
 **File kunci:** `mini-services/chat-service/index.ts` (helper + 8 handler admin:db_* + bump v69), `src/components/chat/db-console.tsx` (BARU), `src/components/chat/AdminPanel.tsx` (menu + mount), `src/lib/chat-types.ts` (8 tipe + katalog), `src/instrumentation.ts` (rescue-v69), `scripts/verify-integrity.sh` (+18 cek; 2 cek literal v68 → penanda historis).
+
+---
+
+### v70 (Task 86) — Panel Besar Jadi Fullscreen: Konsol Database, Dashboard, Kendali Akun, Viewer Media, dll.
+
+**Permintaan:** "buat panel databasenya fullscreen, dan panel yang butuh fullscreen lainnya buat jadi fullscreen."
+
+**Mekanisme (satu pintu):** `DialogContent` (src/components/ui/dialog.tsx) kini punya prop **`fullscreen`** — panel menutup seluruh layar (`inset-0 h-dvh w-full`, tanpa sudut membulat, animasi **fade** bukan slide-kanan, padding bawah menghormati safe-area iOS). Mobile tetap bisa menggulir bila blok tetap melebihi layar (`overflow-y-auto` → `md:overflow-hidden`). Dialog kecil (konfirmasi, form, kamera, dsb.) TIDAK berubah — tetap panel kanan 640px.
+
+**Panel yang jadi fullscreen (10):**
+1. **Konsol database** (db-console) — tabel data mengisi sisa tinggi layar (`flex-1` tanpa cap max-h-96), daftar tabel ikut memanjang (max-h-44 mobile, penuh desktop), langkah unlock dipusatkan di kanvas penuh (`justify-center`); sub-dialog edit sel & tambah baris TETAP panel kecil.
+2. **Dashboard Aplikasi** (admin-dashboard) — 10 tab memakai seluruh layar.
+3. **Kendali akun penuh** (account-control-dialog) — konten panjang tetap menggulir (`md:overflow-y-auto`).
+4. **Viewer media** (media-viewer) — panggung foto/video/PDF memakai seluruh layar (black stage).
+5. **Galeri media user** (user-media-panel "Media, File & Tautan").
+6. **Galeri media admin** (user-media-dialog).
+7. **Manajemen pengguna** (user-manager) — daftar user & X-Ray memakai sisa layar (742px vs 384px sebelumnya).
+8. **Audit log** (admin-tools) — 100 entri memakai sisa layar (746px vs 384px).
+9. **Pencarian pesan** (admin-tools) — hasil memakai sisa layar.
+10. **Forensik** (admin-tools) — jejak pesan memakai sisa layar.
+
+**Detail teknis:** konflik padding ditangani eksplisit (dashboard `p-0 pb-0 sm:p-0`, viewer `pb-3 sm:pb-4`) agar `pb-[safe-area]` tak menyisakan celah; tabel konsol memakai grid `md:grid-cols-[14rem_1fr] md:grid-rows-1` + `min-h-0` berantai agar area baris scroll internal sempurna. Tanpa perubahan event/logika server (bump versi saja).
+
+**E2E terverifikasi (agent-browser, desktop 1440×900 + mobile 390×844):** Dashboard full=true 1440×900 & 390×844; Konsol database fullscreen + unlock terpusat (pass y=509/844) + tabel users mengisi sisa layar (444px desktop) + masking password_hash •••• tetap aktif + sub-dialog edit sel tetap 512px panel kanan + "Kunci konsol" kembali minta password; Kendali akun penuh — rvg fullscreen dengan 4 tab; Manajemen pengguna fullscreen (list 742px, 11 user) + X-Ray 780px; Audit log fullscreen (list 746px, 100 item); galeri media admin fullscreen (grid 6 media) → viewer video fullscreen (footer Unduh nempel dasar); regresi dialog kecil "Ganti nama saya" tetap 640px panel kanan (x=800); mobile: dashboard & konsol DB full tanpa scroll halaman (`scrollHeight<=innerHeight`); konsol browser bersih (0 error selain 404 media kedaluwarsa). Verify **529/529**; lint 0/0.
+
+**File kunci:** `src/components/ui/dialog.tsx` (prop fullscreen), `src/components/chat/db-console.tsx`, `admin-dashboard.tsx`, `account-control-dialog.tsx`, `media-viewer.tsx`, `user-media-panel.tsx`, `user-media-dialog.tsx`, `user-manager.tsx`, `admin-tools.tsx` (Forensik/Pencarian/Audit), `mini-services/chat-service/index.ts` (bump v70), `src/instrumentation.ts` (rescue-v70), `scripts/verify-integrity.sh` (+17 cek; 2 cek literal v69 → penanda historis).

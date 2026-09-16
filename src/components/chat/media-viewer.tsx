@@ -341,9 +341,11 @@ function ViewerDialog({
       {/* v57 — showCloseButton=false: × bawaan dialog (top-4 right-4, 16px)
           dulu BERTUMPUK dgn tombol slideshow (right-3 top-3) — persis seperti
           screenshot user. Kini keduanya satu grup rapi kanan-atas. */}
+      {/* v70 — viewer kini fullscreen: panggung media memakai seluruh layar. */}
       <DialogContent
+        fullscreen
         showCloseButton={false}
-        className="flex flex-col gap-3 border-white/10 bg-black p-3 text-white sm:p-4"
+        className="gap-3 overflow-hidden border-white/10 bg-black p-3 pb-3 text-white sm:p-4 sm:pb-4"
       >
         <DialogTitle className="sr-only">Pratinjau {displayName}</DialogTitle>
         <DialogDescription className="sr-only">

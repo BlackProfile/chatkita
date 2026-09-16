@@ -274,7 +274,13 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * (5) SEMUA perubahan masuk audit_log (db_unlock/db_cell/db_insert/db_delete/
  * db_sql/db_backup); (6) masking kolom sensitif di klien (password/token/
  * hash/secret → ••••) default AKTIF agar screenshot tidak membocorkannya. */
-const SERVICE_VERSION = 'v69'
+/* v70 (Task 86) — PANEL BESAR JADI FULLSCREEN: varian `fullscreen` di
+ * DialogContent (panel menutup seluruh layar, fade bukan slide-kanan, aman
+ * safe-area iOS). Dipakai konsol database (tabel mengisi sisa layar, unlock
+ * dipusatkan), dashboard aplikasi, kendali akun penuh, viewer media, galeri
+ * media user+admin, manajemen pengguna (daftar + X-Ray), audit log,
+ * pencarian pesan, dan forensik. Tanpa perubahan event/logika server. */
+const SERVICE_VERSION = 'v70'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'

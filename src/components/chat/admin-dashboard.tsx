@@ -948,7 +948,8 @@ export function AdminDashboard({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex flex-col gap-0 overflow-hidden p-0">
+      {/* v70 — dashboard kini fullscreen (permukaan kerja multi-tab). */}
+      <DialogContent fullscreen className="gap-0 overflow-hidden p-0 pb-0 sm:p-0">
         <DialogHeader className="shrink-0 border-b bg-muted/30 px-4 py-3 sm:px-6 sm:py-4">
           <DialogTitle className="flex items-center gap-2 text-base sm:text-lg">
             <span className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm shadow-emerald-600/25">
