@@ -251,6 +251,23 @@ export interface ConversationOverview {
   phantomUnread?: boolean;
   /** v72 — ilusi: percakapan ini selalu diurutkan paling atas (dialog teruskan). */
   forceTop?: boolean;
+  /** v74 — TTL media percakapan (jam; 0 = ikuti pengaturan global). */
+  mediaTtlHours?: number;
+}
+
+/** v74 — siaran perubahan TTL media percakapan (admin:conversation_ttl). */
+export interface ConversationTtlPayload {
+  conversationId: string;
+  ttlHours: number;
+  label: string;
+}
+
+/** v74 — ack admin:conversation_ttl. */
+export interface ConversationTtlAck {
+  ok: true;
+  ttlHours: number;
+  label: string;
+  swept: number;
 }
 
 /* ------------------------------------------------------------------ */
@@ -282,6 +299,8 @@ export interface UserAuthAck {
   /** Pinned banner state. */
   pinnedMessageId?: number | null;
   pinned?: { id: number; senderId: string; snippet: string; type: string } | null;
+  /** v74 — TTL media percakapan aktif (jam; 0 = ikuti pengaturan global). */
+  mediaTtlHours?: number;
   /** v27 — akun lama tanpa password → klien wajib buka modal pemasangan. */
   mustSetPassword?: boolean;
 }

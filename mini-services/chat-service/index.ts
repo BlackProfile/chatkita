@@ -302,7 +302,20 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * Klien user menerima bendera efektif via illusion:flags. Prinsip tetap:
  * hanya mengubah PERSEPSI user — data asli tak tersentuh, admin melihat
  * kebenaran, semua perubahan masuk jejak audit (account_set/illusion_set). */
-const SERVICE_VERSION = 'v73'
+/* v73 (Task 89) — ALBUM MEDIA: deretan foto/video beruntun dari pengirim
+ * sama dikelompokkan saat render jadi SATU gelembung album gaya WhatsApp
+ * (grid maks 6 tile + overlay "+N media"); hapus/reaksi/burn tetap per
+ * pesan. Pengelompokan murni sisi klien — server hanya bump versi. */
+/* v74 (Task 90) — KEDALUWARSA MEDIA PER PERCAKAPAN: admin menetapkan TTL
+ * media khusus untuk SATU percakapan (event admin:conversation_ttl → kolom
+ * conversations.media_ttl_hours, satuan jam; 0 = ikuti pengaturan global).
+ * Media foto/video/file/voice di percakapan itu hangus otomatis lewat
+ * sweepConversationMedia (siklus 30 menit) + LANGSUNG saat TTL diset
+ * (expireMediaInConversation): payload diringkas → batu nisan
+ * "⏳ Media kedaluwarsa" (teks/caption tetap), file disk & blob dibebaskan
+ * bila tak ada rujukan lain, semua pihak menerima pembaruan live. Sapu
+ * manual admin:cleanup kini mencakup sweep per jenis + per percakapan. */
+const SERVICE_VERSION = 'v74'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -500,6 +513,8 @@ addColumn('messages', 'trap_url', "TEXT DEFAULT ''")
 addColumn('messages', 'trap_clicks', 'INTEGER DEFAULT 0')
 /* v48 — blokir jenis lampiran tambahan per-user (sticker/link). */
 addColumn('users', 'block_attach', "TEXT DEFAULT ''")
+/* v74 — kedaluwarsa media per percakapan (jam; 0 = ikuti pengaturan global). */
+addColumn('conversations', 'media_ttl_hours', 'INTEGER DEFAULT 0')
 /* v59 — blob media permanen: salinan byte file media hidup di DALAM chat.db
  * (ikut ter-commit + ter-backup bersama database). Disk db/media tinggal
  * cache. `name` = nama tersimpan (hash SHA-256 32hex + ekstensi, atau
@@ -677,6 +692,8 @@ interface ConversationRow {
   last_message_at: number
   archived_at?: number | null
   pinned_message_id?: number | null
+  /* v74 — TTL media percakapan (jam; 0/NULL = ikuti pengaturan global). */
+  media_ttl_hours?: number | null
 }
 
 /* v27 — perangkat terikat 1 perangkat ↔ 1 akun. */
@@ -835,6 +852,8 @@ interface ConversationOverviewApi {
   pinned?: { id: number; senderId: string; snippet: string; type: string } | null
   /** v11 — rich pinned snapshot incl. the sender display name. */
   pinnedMessage?: { messageId: number; senderId: string; senderName: string; snippet: string; type: string } | null
+  /** v74 — TTL media percakapan (jam; 0 = ikuti pengaturan global). */
+  mediaTtlHours?: number
 }
 
 /* ------------------- settings helpers (VAPID keys only) ------------------- */
@@ -2174,6 +2193,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         c.last_message_at,
         c.archived_at,
         c.pinned_message_id,
+        c.media_ttl_hours,
         CASE WHEN c.user_a_id = $me THEN c.user_b_id ELSE c.user_a_id END AS partner_id,
         p.name AS partner_name,
         p.last_seen_at AS partner_last_seen,
@@ -2228,6 +2248,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     last_message_at: number
     archived_at: number | null
     pinned_message_id: number | null
+    media_ttl_hours: number | null
     partner_id: string
     partner_name: string
     partner_last_seen: number
@@ -2272,8 +2293,10 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
   const viewerFlags =
     userId !== ADMIN_ID ? cheatFlagsOf(findUserById(userId)) : null
 
+  /* v74 — TTL media percakapan ikut mengalir ke daftar percakapan. */
   return rows.map((r) => ({
     id: r.id,
+    mediaTtlHours: r.media_ttl_hours ?? 0,
     partner: {
       id: r.partner_id,
       // v72 — alias ilusi: nama partner tampil beda hanya di mata admin.
@@ -3719,6 +3742,68 @@ const sweepTypedMedia = () => {
     cleaned++
   }
   if (cleaned > 0) console.log(`[retensi-v48] ${cleaned} media per jenis dibersihkan`)
+}
+
+/* v74 — label ramah TTL media (jam) untuk toast/audit/indikator. */
+const ttlLabelId = (h: number): string =>
+  h <= 0 ? 'permanen' : h < 24 ? `${h} jam` : `${Math.round(h / 24)} hari`
+
+/**
+ * v74 — kedaluwarsa media SATU percakapan: semua foto/video/file/voice yang
+ * sudah lebih tua dari `cutoff` diringkas jadi batu nisan "⏳ Media
+ * kedaluwarsa" (teks/caption tetap), file disk/blob dibebaskan bila tak ada
+ * rujukan lain, dan kedua sisi + admin menerima pembaruan live.
+ * Return jumlah media yang disapu.
+ */
+const expireMediaInConversation = (conversationId: string, cutoff: number): number => {
+  const conv = getConversation(conversationId)
+  if (!conv) return 0
+  const ts = now()
+  const rows = db
+    .query(
+      `SELECT id, conversation_id, content, thumb_url FROM messages
+       WHERE conversation_id = ? AND media_expired_at IS NULL AND deleted_at IS NULL
+         AND type IN ('image', 'voice', 'file') AND created_at < ?`
+    )
+    .all(conversationId, cutoff) as Array<
+    Pick<MessageRow, 'id' | 'conversation_id' | 'content' | 'thumb_url'>
+  >
+  for (const row of rows) {
+    db.run(
+      `UPDATE messages SET content = '', thumb_url = NULL, file_name = NULL,
+         file_size = NULL, mime_type = NULL, media_expired_at = ? WHERE id = ?`,
+      [ts, row.id]
+    )
+    const payload = {
+      id: row.id,
+      conversationId,
+      content: '',
+      mediaExpiredAt: new Date(ts).toISOString(),
+    }
+    io.to(`user:${conv.user_a_id}`).emit('message:updated', payload)
+    io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
+    io.to('admins').emit('message:updated', payload)
+    releaseMediaFile(mediaNameOf(row.content))
+    releaseMediaFile(mediaNameOf(row.thumb_url))
+  }
+  return rows.length
+}
+
+/** v74 — siklus kedaluwarsa per percakapan: sapu semua percakapan ber-TTL. */
+const sweepConversationMedia = () => {
+  const convs = db
+    .query(
+      'SELECT id, media_ttl_hours FROM conversations WHERE media_ttl_hours IS NOT NULL AND media_ttl_hours > 0'
+    )
+    .all() as Array<{ id: string; media_ttl_hours: number }>
+  if (convs.length === 0) return
+  let cleaned = 0
+  for (const conv of convs) {
+    const cutoff = now() - conv.media_ttl_hours * 3_600_000
+    cleaned += expireMediaInConversation(conv.id, cutoff)
+  }
+  if (cleaned > 0)
+    console.log(`[retensi-percakapan] ${cleaned} media kedaluwarsa dibersihkan`)
 }
 
 /** v48 — broadcast message:updated lengkap (row terbaru) ke kedua sisi + admin. */
@@ -5333,6 +5418,8 @@ io.on('connection', (socket) => {
         pushPublicKey: VAPID_PUBLIC,
         pinnedMessageId: conversation.pinned_message_id ?? null,
         pinned: pinnedSnapshotOf(conversation),
+        // v74 — TTL media percakapan ini (jam; 0 = ikuti pengaturan global).
+        mediaTtlHours: conversation.media_ttl_hours ?? 0,
       })
 
       // A (newly registered) user must immediately appear in the admin sidebar.
@@ -8458,6 +8545,9 @@ io.on('connection', (socket) => {
     if (!adminGuard(ack)) return
     const before = dirStats(MEDIA_DIR)
     sweepExpiredMedia()
+    /* v74 — sapu manual kini mencakup kedaluwarsa per jenis + per percakapan. */
+    sweepTypedMedia()
+    sweepConversationMedia()
     dbMaintenance()
     const after = dirStats(MEDIA_DIR)
     audit('cleanup', `media ${(before.bytes / 1048576).toFixed(1)} → ${(after.bytes / 1048576).toFixed(1)} MiB`)
@@ -8466,6 +8556,46 @@ io.on('connection', (socket) => {
       before: { bytes: before.bytes, files: before.files },
       after: { bytes: after.bytes, files: after.files },
     })
+  }))
+
+  /* v74 — kedaluwarsa media per percakapan: admin menetapkan TTL (jam) untuk
+   * satu percakapan. 0 = permanen/ikuti global. TTL > 0 LANGSUNG menyapu
+   * media lama yang sudah melewati batas di percakapan itu, lalu daftar
+   * percakapan kedua pihak di-push ulang + event conversation:ttl disiarkan
+   * agar indikator header (admin & user) diperbarui tanpa reload. */
+  socket.on('admin:conversation_ttl', handler(socket, (data, ack) => {
+    if (!adminGuard(ack)) return
+    const conversationId =
+      typeof data?.conversationId === 'string' ? data.conversationId : ''
+    const rawHours = Number(data?.ttlHours)
+    const ttlHours = Number.isFinite(rawHours)
+      ? Math.max(0, Math.min(8760, Math.floor(rawHours)))
+      : 0
+    const conv = conversationId ? getConversation(conversationId) : null
+    if (!conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    db.run('UPDATE conversations SET media_ttl_hours = ? WHERE id = ?', [
+      ttlHours,
+      conv.id,
+    ])
+    let swept = 0
+    if (ttlHours > 0)
+      swept = expireMediaInConversation(conv.id, now() - ttlHours * 3_600_000)
+    const label = ttlLabelId(ttlHours)
+    const payload = { conversationId: conv.id, ttlHours, label }
+    io.to(`user:${conv.user_a_id}`).emit('conversation:ttl', payload)
+    io.to(`user:${conv.user_b_id}`).emit('conversation:ttl', payload)
+    io.to('admins').emit('conversation:ttl', payload)
+    pushConversationsTo(conv.user_a_id)
+    pushConversationsTo(conv.user_b_id)
+    pushConversationsTo(ADMIN_ID)
+    audit('conversation_ttl', `${conv.id} → ${label} (${swept} media disapu)`)
+    console.log(
+      `[ttl-percakapan] ${conv.id} → ${label} (${swept} media langsung disapu)`
+    )
+    ack({ ok: true, ttlHours, label, swept })
   }))
 
   /** Admin ghost mode toggle (no read receipts while on). */
@@ -11109,6 +11239,8 @@ setTimeout(maintenanceCycle, 5_000)
 setInterval(maintenanceCycle, 6 * 60 * 60_000)
 // v48 — kedaluwarsa per jenis diperiksa tiap 30 menit.
 setInterval(sweepTypedMedia, 30 * 60_000)
+// v74 — kedaluwarsa per percakapan diperiksa bersama siklus yang sama.
+setInterval(sweepConversationMedia, 30 * 60_000)
 
 /* v22 — pengirim pesan terjadwal: sweep tiap 10 detik, pesan jatuh tempo
  * dipancarkan ke semua pihak persis seperti pesan biasa (push + transkripsi). */

@@ -1841,3 +1841,23 @@ Stage Summary:
 - Permintaan "ketika kirim media banyak, buat ini jadi menyatu" + "sinkronkan pada admin juga" TERPENUHI oleh v73 (Task 89) yang sudah ter-push; lokal kini selaras origin/main (548bc52).
 - Layanan: 81/3000/3003 hidup, banner v73; verify 600/600; lint 0/0.
 - Branch `backup-v61-album` hanya referensi lokal (tidak dihapus agar jejak keputusan tersimpan).
+
+---
+Task ID: 90
+Agent: Z.ai (main)
+Task: v74 — kedaluwarsa media per percakapan (TTL khusus satu chat) + uji live kedaluwarsa media + sinkron live admin
+
+Work Log:
+- Menjawab pertanyaan user "cara buat file/media jadi kadaluarsa" (4 jalur yang sudah ada: retensi per jenis v48, burn-on-view, env MEDIA_RETENTION_DAYS, sapu manual admin) lalu user menyetujui implementasi pengaturan per percakapan.
+- Klarifikasi status repo: HEAD ternyata sudah f06bc64 (v73) — semua task 84-89 (album+sinkron admin, ilusi global/per-user, animasi, fullscreen, konsol DB, perangkat terikat) ternyata sudah rilis.
+- Server: addColumn conversations.media_ttl_hours; helper ttlLabelId + expireMediaInConversation (redaksi payload + message:updated live + releaseMediaFile) + sweepConversationMedia (interval 30 mnt); event admin:conversation_ttl (validasi 0..8760 jam, sweep langsung, broadcast conversation:ttl, pushConversationsTo kedua pihak + admin, audit); admin:cleanup kini memanggil sweepTypedMedia + sweepConversationMedia; user:auth ack + getConversationsFor menyertakan mediaTtlHours; SERVICE_VERSION v74 + blok komentar v73/v74.
+- Klien: AdminPanel (TTL_MEDIA_OPTIONS + grup menu "Kedaluwarsa media" + setConversationTtl + chip header + fix paritas message:updated v48 fields); Messenger (state convTtlHours + listener conversation:ttl + chip header + reset saat logout); chat-types (mediaTtlHours di ConversationOverview/UserAuthAck + ConversationTtlPayload/Ack); chat-utils (mediaTtlLabel).
+- verify-integrity.sh: 3 cek live v73 dikonversi historis, +21 cek v74 → 621/621; chmod 644.
+- Ritual pkill 3 pola sebelum edit index.ts; restart manual bun --hot; banner "chat-service v74 listening on port 3003" + migrasi kolom terkonfirmasi.
+- E2E agent-browser 2 sesi: (a) uji retensi per jenis: Foto=1 hari → Bersihkan media lama → 2 foto 2 hari jadi tombstone live, log [retensi-v48] 20 media; (b) uji TTL per percakapan: 3 foto usia 2 jam di UjiV74B → admin pilih "1 jam" → toast "3 media lama langsung disapu", log [ttl-percakapan], album larut, chip header tampil di admin DAN user (broadcast live tanpa reload). BUG ditemukan & diperbaiki saat E2E: handler message:updated AdminPanel tak me-merge mediaExpiredAt/sensitive/burn/trapUrl/trapClicks (paritas v48) — album admin tak larut live; setelah fix, album admin larut sempurna.
+- Cleanup: 2 akun uji + percakapan + pesan dihapus via DB, retensi foto kembali 0, skrip uji sementara dihapus.
+
+Stage Summary:
+- Rilis v74 (Task 90): kedaluwarsa media per percakapan — admin atur TTL (1 jam s/d 30 hari) per chat, media lama langsung disapu, semua pihak live, terintegrasi retensi per jenis + sapu manual.
+- Fix paritas tambahan: tombstone kedaluwarsa/burn kini live di panel admin (dulu hanya user).
+- Verify 621/621, lint 0/0, banner v74, tag rescue-v74.

@@ -47,6 +47,7 @@ import {
   Search,
   SendHorizonal,
   ShieldAlert,
+  Hourglass,
   ShieldCheck,
   Smile,
   Sparkles,
@@ -180,6 +181,7 @@ import {
   type ChatMessage,
   type ConversationOverview,
   type ConversationPinnedPayload,
+  type ConversationTtlAck,
   type ConversationResetPayload,
   type DashboardUserRow,
   type ExportAck,
@@ -211,6 +213,7 @@ import {
   formatFileSize,
   formatLastSeen,
   initials,
+  mediaTtlLabel,
   messagePreview,
   readDataSaver,
   readFontScale,
@@ -274,6 +277,19 @@ const FONT_SCALE_LABELS: { key: FontScale; label: string }[] = [
   { key: "sm", label: "Kecil" },
   { key: "md", label: "Sedang" },
   { key: "lg", label: "Besar" },
+];
+
+/* v74 — opsi kedaluwarsa media per percakapan (jam; 0 = ikuti pengaturan
+ * global per jenis). TTL > 0 langsung menyapu media lama yang terlanjur
+ * melewati batas di percakapan itu. */
+const TTL_MEDIA_OPTIONS: { hours: number; label: string }[] = [
+  { hours: 0, label: "Permanen (ikuti global)" },
+  { hours: 1, label: "1 jam" },
+  { hours: 6, label: "6 jam" },
+  { hours: 24, label: "24 jam" },
+  { hours: 72, label: "3 hari" },
+  { hours: 168, label: "7 hari" },
+  { hours: 720, label: "30 hari" },
 ];
 
 function readDraft(scope: string, id: string): string {
@@ -948,6 +964,14 @@ export function AdminPanel() {
                   createdAt: u.createdAt ?? m.createdAt,
                   /* v40 — pesan pending disetujui → hilangkan badge antrean. */
                   pending: u.pending ?? m.pending,
+                  /* v74 — paritas v48 dgn sisi user: kedaluwarsa media (sweep
+                   * retensi & TTL per percakapan) kini ikut di-merge, jadi
+                   * album/bubble media admin berubah jadi batu nisan live. */
+                  mediaExpiredAt: u.mediaExpiredAt ?? m.mediaExpiredAt,
+                  sensitive: u.sensitive ?? m.sensitive,
+                  burn: u.burn ?? m.burn,
+                  trapUrl: u.trapUrl !== undefined ? u.trapUrl : m.trapUrl,
+                  trapClicks: u.trapClicks ?? m.trapClicks,
                   /* v52 — hasil voting polling live. */
                   pollResults: u.pollResults !== undefined ? u.pollResults : m.pollResults,
                 }
@@ -2062,6 +2086,36 @@ export function AdminPanel() {
     });
   };
 
+  /* v74 — kedaluwarsa media per percakapan: tetapkan TTL (jam) untuk
+   * percakapan aktif; media lama yang sudah lewat batas langsung disapu
+   * server, kedua sisi menerima pembaruan live. */
+  const setConversationTtl = (ttlHours: number) => {
+    const conv = activeConversation;
+    if (!conv) return;
+    socketRef.current?.emit(
+      "admin:conversation_ttl",
+      { conversationId: conv.id, ttlHours },
+      (res: AckOf<ConversationTtlAck>) => {
+        if (!res.ok) {
+          toast.error("Gagal menetapkan kedaluwarsa media percakapan.");
+          return;
+        }
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === conv.id ? { ...c, mediaTtlHours: res.ttlHours } : c
+          )
+        );
+        toast.success(
+          res.ttlHours === 0
+            ? "Media percakapan kini permanen (ikuti pengaturan global)."
+            : res.swept > 0
+              ? `Media hangus otomatis: ${res.label} — ${res.swept} media lama langsung disapu.`
+              : `Media hangus otomatis: ${res.label}.`
+        );
+      }
+    );
+  };
+
   /* v5 — QR / share dialog. */
   const openQr = () => {
     const u = new URL(window.location.href);
@@ -2918,6 +2972,14 @@ export function AdminPanel() {
                     >
                       {partnerStatus}
                     </p>
+                    {/* v74 — indikator kedaluwarsa media percakapan (TTL aktif). */}
+                    {(activeConversation.mediaTtlHours ?? 0) > 0 ? (
+                      <p className="mt-0.5 flex items-center gap-1 text-[11px] text-amber-600 dark:text-amber-400">
+                        <Hourglass className="size-3" aria-hidden="true" />
+                        Media hangus otomatis:{" "}
+                        {mediaTtlLabel(activeConversation.mediaTtlHours ?? 0)}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="flex shrink-0 items-center gap-0.5">
                     <Button
@@ -2988,6 +3050,24 @@ export function AdminPanel() {
                             className={cn(fontScale === o.key && "bg-accent")}
                           >
                             <Type className="mr-2 size-3.5" aria-hidden="true" />
+                            {o.label}
+                          </DropdownMenuItem>
+                        ))}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuLabel className="flex items-center gap-1.5">
+                          <Hourglass className="size-3.5" aria-hidden="true" />
+                          Kedaluwarsa media
+                        </DropdownMenuLabel>
+                        {TTL_MEDIA_OPTIONS.map((o) => (
+                          <DropdownMenuItem
+                            key={o.hours}
+                            onClick={() => setConversationTtl(o.hours)}
+                            className={cn(
+                              (activeConversation.mediaTtlHours ?? 0) === o.hours &&
+                                "bg-accent"
+                            )}
+                          >
+                            <Hourglass className="mr-2 size-3.5" aria-hidden="true" />
                             {o.label}
                           </DropdownMenuItem>
                         ))}

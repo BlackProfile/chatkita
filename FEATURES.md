@@ -849,3 +849,28 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser, gateway :81):** 4 foto seed → 1 album "4 foto · 05.05 ✓" grid 2×2 (user kanan, admin kiri); ketuk tile → viewer "foto-uji-album-2.jpg"; ⌄ → "Media 2/4 · Reaksi/Balas/Bintangi/Hapus"; reaksi ❤️ → badge di tile; hapus media 4 → album menyusut live jadi "3 foto" (tombstone di luar album); admin: aksi Metadata → dialog "foto-uji-album-2.jpg" (Pengirim UjiV48); mobile 390px: layout 2+1 lebar, ⌄ selalu tampak, divider "Pesan baru" melintasi album. State uji dibersihkan (pesan seed dihapus, hash password uji dipulihkan). Verify **600/600**; lint 0/0.
 
 **File kunci:** `src/lib/chat-album.ts` (BARU), `src/components/chat/ChatAlbum.tsx` (BARU), `Messenger.tsx` + `AdminPanel.tsx` (wiring album), `mini-services/chat-service/index.ts` (bump v73), `src/instrumentation.ts` (rescue-v73), `scripts/verify-integrity.sh` (+21 cek; cek literal v72 versi → konversi v73).
+
+---
+
+## v74 (Task 90) — Kedaluwarsa media per percakapan (TTL khusus satu chat)
+
+**Konteks:** kedaluwarsa media sebelumnya hanya global — retensi per jenis (Foto/Video/File, v48) atau env `MEDIA_RETENTION_DAYS` (v8). Admin belum bisa menjadikan media **satu percakapan tertentu** hangus otomatis dengan batas waktu sendiri.
+
+**Solusi:** admin menetapkan TTL media per percakapan dari menu ⋮ "Menu lainnya" → grup **"Kedaluwarsa media"** di header chat: Permanen (ikuti global) · 1 jam · 6 jam · 24 jam · 3 hari · 7 hari · 30 hari.
+
+**Perilaku server** (`mini-services/chat-service/index.ts`):
+- Kolom baru `conversations.media_ttl_hours` (INTEGER DEFAULT 0; 0 = ikuti pengaturan global) — migrasi idempoten `addColumn`.
+- Event **`admin:conversation_ttl`** {conversationId, ttlHours} (admin-only): validasi 0..8760 jam → simpan → bila TTL > 0 **langsung menyapu** media lama yang sudah melewati batas di percakapan itu (`expireMediaInConversation`) → broadcast `conversation:ttl` ke kedua ruang user + admins → push ulang daftar percakapan kedua pihak → audit `conversation_ttl` → ack {ttlHours, label, swept}.
+- **`expireMediaInConversation`**: redaksi payload foto/video/file/voice (content, thumb, nama, ukuran, mime) → batu nisan "⏳ Media kedaluwarsa" (teks/caption tetap) → `message:updated` live ke semua pihak → file disk dibebaskan hanya bila tak ada rujukan lain (`releaseMediaFile`). Return jumlah yang disapu.
+- **`sweepConversationMedia`**: siklus periodik 30 menit (bersama sweep per jenis v48) untuk semua percakapan ber-TTL.
+- **`admin:cleanup`** (tombol "Bersihkan media lama") kini mencakup sweep per jenis + per percakapan — sapu manual tak lagi setengah jalan.
+- `user:auth` ack + `getConversationsFor` kini menyertakan `mediaTtlHours`.
+
+**Perilaku klien:**
+- **AdminPanel**: grup pilihan TTL di "Menu lainnya" (item aktif disorot) + chip indikator amber "⏳ Media hangus otomatis: {label}" di header chat + toast hasil ("— N media lama langsung disapu").
+- **Messenger (user)**: chip indikator yang sama di header (baca `mediaTtlHours` dari ack login, update live via `conversation:ttl`); media yang hangus berubah jadi batu nisan live; album (v73) otomatis larut karena media kedaluwarsa tak layak album.
+- **Fix paritas**: handler `message:updated` AdminPanel kini me-merge field v48 (`mediaExpiredAt`, `sensitive`, `burn`, `trapUrl`, `trapClicks`) yang selama ini hanya ada di sisi user — sweep/ burn kini tercermin live juga di panel admin.
+
+**E2E terverifikasi (agent-browser, 2 sesi gateway :81):** (1) jalur per jenis — set "Foto (hari)"=1 → "Bersihkan media lama" → 2 foto berusia 2 hari jadi "Media kedaluwarsa" live (log `[retensi-v48] 20 media`), dikembalikan ke 0; (2) jalur per percakapan — 3 foto berusia 2 jam di chat UjiV74B → admin pilih "1 jam" → toast "3 media lama langsung disapu", log `[ttl-percakapan] … → 1 jam (3 media)`, album larut jadi 6 batu nisan di admin, **sisi user menerima chip + batu nisan live tanpa reload**; state uji dibersihkan (2 akun uji + percakapan dihapus, retensi kembali 0). Verify **621/621**; lint 0/0.
+
+**File kunci:** `mini-services/chat-service/index.ts` (kolom + expireMediaInConversation + sweepConversationMedia + admin:conversation_ttl + cleanup + bump v74), `AdminPanel.tsx` (menu TTL + chip + fix paritas message:updated), `Messenger.tsx` (state TTL + listener + chip), `src/lib/chat-types.ts` (mediaTtlHours + ConversationTtlPayload/Ack), `src/lib/chat-utils.ts` (mediaTtlLabel), `src/instrumentation.ts` (rescue-v74), `scripts/verify-integrity.sh` (+21 cek; cek literal v73 → konversi historis).

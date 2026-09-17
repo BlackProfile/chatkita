@@ -27,6 +27,7 @@ import {
   Pin,
   Plus,
   RotateCcw,
+  Hourglass,
   Search,
   SendHorizonal,
   ShieldCheck,
@@ -123,6 +124,7 @@ import {
   type ChatMessage,
   type ConversationOverview,
   type ConversationPinnedPayload,
+  type ConversationTtlPayload,
   type ConversationResetPayload,
   type HistoryAck,
   type MessageAck,
@@ -158,6 +160,7 @@ import {
   formatFileSize,
   formatLastSeen,
   initials,
+  mediaTtlLabel,
   readDataSaver,
   readFontScale,
   resolveFileKind,
@@ -694,6 +697,8 @@ export function Messenger() {
     snippet: string;
     senderName?: string;
   } | null>(null);
+  // v74 — kedaluwarsa media percakapan aktif (jam; 0 = ikuti global).
+  const [convTtlHours, setConvTtlHours] = useState(0);
   // v11 — status pembatasan akun dari admin (user:restricted live).
   const [restricted, setRestricted] = useState<UserRestrictedPayload | null>(null);
   /** Tick detik untuk hitung mundur bisukan (hanya jalan saat aktif). */
@@ -875,6 +880,8 @@ export function Messenger() {
             setPinnedMsg(
               res.pinned ? { id: res.pinned.id, snippet: res.pinned.snippet } : null
             );
+            // v74 — TTL media percakapan aktif saat login.
+            setConvTtlHours(res.mediaTtlHours ?? 0);
             setInput(readDraft("user", res.user.id));
             void subscribeToPush(socket, res.pushPublicKey);
           } else {
@@ -886,6 +893,7 @@ export function Messenger() {
             setConversationId(null);
             setPartner(null);
             setMessages([]);
+            setConvTtlHours(0); // v74 — reset indikator TTL saat sesi gugur.
             /* v67 — sesi tersimpan menunjuk akun yang sudah tidak ada
              * (dihapus admin saat perangkat offline) → validasi ke server:
              * benar hilang → bersihkan kartu lanjut + catatan spesifik,
@@ -1019,6 +1027,12 @@ export function Messenger() {
             }
           : null
       );
+    });
+    // v74 — kedaluwarsa media per percakapan: indikator header diperbarui live
+    // saat admin menetapkan/mengganti TTL percakapan ini.
+    socket.on("conversation:ttl", (p: ConversationTtlPayload) => {
+      if (p.conversationId !== conversationIdRef.current) return;
+      setConvTtlHours(p.ttlHours);
     });
     // v11 — reset chat (admin / v29 user sendiri): kosongkan pesan + sisipkan catatan sistem.
     socket.on("conversation:reset", (p: ConversationResetPayload) => {
@@ -2841,6 +2855,13 @@ export function Messenger() {
             >
               {partnerStatus}
             </p>
+            {/* v74 — indikator kedaluwarsa media percakapan (TTL aktif). */}
+            {convTtlHours > 0 ? (
+              <p className="anim-fade-in mt-0.5 flex items-center gap-1 text-[11px] text-amber-600 dark:text-amber-400">
+                <Hourglass className="size-3" aria-hidden="true" />
+                Media hangus otomatis: {mediaTtlLabel(convTtlHours)}
+              </p>
+            ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
             {/* v48 — panel media, file & tautan percakapan ini. */}

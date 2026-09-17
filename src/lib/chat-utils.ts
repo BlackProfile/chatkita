@@ -422,3 +422,10 @@ export function contactDataOf(content: string): ContactContent | null {
     return null;
   }
 }
+
+/** v74 — label ramah untuk TTL media percakapan (jam; 0 = permanen). */
+export function mediaTtlLabel(hours: number): string {
+  if (!hours || hours <= 0) return "permanen";
+  if (hours < 24) return `${hours} jam`;
+  return `${Math.round(hours / 24)} hari`;
+}
