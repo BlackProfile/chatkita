@@ -1,0 +1,32 @@
+# =====================================================================
+# ChatKita — Caddyfile untuk DOCKER COMPOSE (Opsi B)
+# Nama service (web / chat) dipakai sebagai host internal jaringan compose.
+# Domain diambil dari variabel DOMAIN di file .env compose:
+#   DOMAIN=chatkita.example.com   (HTTPS otomatis)
+#   DOMAIN=:80                    (HTTP saja, belum punya domain)
+# =====================================================================
+
+{$DOMAIN} {
+	# Request bermuatan ?XTransformPort=3003 (pola klien ChatKita) -> service chat
+	@transform_port_query {
+		query XTransformPort=*
+	}
+
+	handle @transform_port_query {
+		reverse_proxy chat:3003 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	handle {
+		reverse_proxy web:3000 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+}

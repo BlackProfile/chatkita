@@ -1,0 +1,65 @@
+# =====================================================================
+# ChatKita — Docker Compose (web + chat + caddy)
+#
+# Sebelum menjalankan, buat file .env sejajar dengan file ini:
+#   DOMAIN=chatkita.example.com      # atau ":80" bila belum punya domain
+#   ADMIN_PASSWORD=GantiDenganKataSandiKuat
+#   MEDIA_RETENTION_DAYS=0
+#
+# Jalankan:  docker compose up -d --build   (lihat DEPLOY.md)
+# =====================================================================
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    image: chatkita-web:latest
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: file:/data/custom.db
+    volumes:
+      # Semua data web: custom.db + media/ (dipakai bersama chat)
+      - chatkita_data:/data
+
+  chat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: chat
+    image: chatkita-chat:latest
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Isi ADMIN_PASSWORD di file .env (wajib, jangan admin123)}
+      MEDIA_RETENTION_DAYS: ${MEDIA_RETENTION_DAYS:-0}
+    volumes:
+      # Kode + database chat (chat.db, wal, shm) — persisten
+      - chatdata:/opt/chat-service
+      # Media & backup — SATU volume yang sama dengan web
+      - chatkita_data:/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      DOMAIN: ${DOMAIN:-:80}
+    volumes:
+      - ./deploy/Caddyfile.docker:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  # Data aplikasi (web DB + media + backup) — dipakai web & chat
+  chatkita_data:
+  # Kode & database chat-service
+  chatdata:
+  # Sertifikat & state Caddy
+  caddy_data:
+  caddy_config:

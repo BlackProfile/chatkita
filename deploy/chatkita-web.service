@@ -1,0 +1,26 @@
+# =====================================================================
+# ChatKita Web — Next.js 16 standalone (Bun), port 3000
+# Pasang:  sudo cp deploy/chatkita-web.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now chatkita-web
+# =====================================================================
+[Unit]
+Description=ChatKita Web (Next.js standalone via Bun)
+After=network.target
+
+[Service]
+Type=simple
+User=chatkita
+Group=chatkita
+WorkingDirectory=/opt/chatkita
+EnvironmentFile=/opt/chatkita/deploy/chatkita.env
+# Pelindung: symlink db -> volume data wajib ada (dibuat setelah setiap build)
+ExecStartPre=/usr/bin/test -e /opt/chatkita/.next/standalone/db
+ExecStart=/usr/local/bin/bun .next/standalone/server.js
+Restart=always
+RestartSec=3
+# Sedikit proteksi proses
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,41 @@
+# ==========================================================
+# ChatKita — .dockerignore
+# Jangan masukkan data/rahasia/artefak build ke context Docker.
+# ==========================================================
+
+# Dependensi & artefak build (dibuat ulang di dalam image)
+node_modules
+**/node_modules
+.next
+**/.next
+
+# ⚠️ DATA JANGAN PERNAH ikut ke dalam image (harus lewat volume!)
+db
+**/db
+**/chat.db
+**/chat.db-wal
+**/chat.db-shm
+backups
+**/backups
+
+# Rahasia
+.env
+.env.*
+!.env.example
+
+# Git & log
+.git
+.gitignore
+*.log
+dev.log
+server.log
+
+# Skrip/dev khusus sandbox
+agent-ctx
+worklog.md
+mini-services/chat-service/cleanup-test-users.ts
+mini-services/chat-service/test-protocol.ts
+
+# OS noise
+.DS_Store
+Thumbs.db

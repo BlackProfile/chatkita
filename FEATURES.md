@@ -899,3 +899,15 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser, 5 sesi gateway :81):** admin set kode `uji-v75` → saklar ON (state "checked", "Tersimpan ✓"); sesi baru → layar gembok (form hilang); `/?masuk=uji-v75` → form tampil + `gateOk=1` + URL bersih; kode salah via kolom manual → "Kode salah" (gembok bertahan); kode benar manual → terbuka; **broadcast live**: klien terkunci berubah FORM↔GEMBOK tanpa reload saat admin toggle OFF/ON; toggle 2× tidak menghapus kode (DB terverifikasi); kode final `kita-rahasia` + tautan final tampil & berfungsi; mobile 390px gembok rapi. Verify **644/644** (+26 cek, 3 anchor live v74 → v75); lint 0/0.
 
 **File kunci:** `mini-services/chat-service/index.ts` (setting + public:gate_unlock + persist aman + bump v75), `Messenger.tsx` (layar gembok + unlock URL/manual/sessionStorage + state gateLocked), `admin-dashboard.tsx` (kartu Mode privat + kode + tautan), `src/lib/chat-types.ts` (authHidden + authSecret di AppSettingsAck + GateUnlockAck), `src/instrumentation.ts` (rescue-v75), `scripts/verify-integrity.sh` (+26 cek).
+
+---
+
+## Penyebaran produksi (Task 92) — file & panduan
+
+Tanpa perubahan kode server (versi tetap **v75**), disetujui user ("boleh"):
+
+- **DEPLOY.md** — panduan lengkap Bahasa Indonesia: Opsi A (VPS + Bun + systemd + Caddy, HTTPS otomatis) & Opsi B (Docker Compose: web/chat/caddy), lengkap dengan swap untuk VPS 1GB, ufw, init skema Prisma, opsi mulai bersih, update anti-konflik (chat.db/custom.db ter-track git → backup → `git fetch`+`reset --hard` → restore data), backup/restore (sqlite `.backup` + rsync media + `docker compose cp`), checklist keamanan & troubleshooting.
+- **Dockerfile** multi-stage: target `web` (Next.js 16 standalone via Bun, symlink db→/data, `prisma db push` otomatis saat boot pertama, HEALTHCHECK) & target `chat` (socket.io + bun:sqlite, HEALTHCHECK endpoint socket.io).
+- **docker-compose.yml**: volume `chatkita_data` DIPAKAI BERSAMA web & chat (MEDIA_DIR chat = `../../db/media` = folder media web) sehingga media konsisten; `chatdata` untuk kode + chat.db (+WAL persisten); entrypoint chat menyinkronkan kode dari image ke volume agar upgrade aman; `ADMIN_PASSWORD` wajib diisi di `.env` compose.
+- **deploy/**: `chatkita-web.service` & `chatkita-chat.service` (User=chatkita, EnvironmentFile, tanpa `--hot`), `chatkita.env.example`, `Caddyfile` (produksi host, routing `?XTransformPort`), `Caddyfile.docker` (`{$DOMAIN}` → chat:3003/web:3000), entrypoint web & chat, `.dockerignore`.
+- Catatan: Docker tidak tersedia di sandbox → compose & entrypoint tervalidasi sintaks (YAML + `sh -n`) saja; build penuh diuji nanti di VPS.

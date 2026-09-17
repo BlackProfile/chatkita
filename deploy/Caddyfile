@@ -1,0 +1,36 @@
+# =====================================================================
+# ChatKita — Caddyfile PRODUKSI (Opsi A: Caddy terpasang di host VPS)
+#
+# 1. Ganti "chatkita.example.com" dengan domain Anda (DNS A -> IP VPS)
+# 2. sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+# 3. sudo systemctl reload caddy
+#
+# Caddy otomatis menerbitkan & memperbarui sertifikat HTTPS (Let's Encrypt).
+# WebSocket (socket.io) dilalui otomatis tanpa konfigurasi tambahan.
+# =====================================================================
+
+chatkita.example.com {
+	# Semua request bermuatan ?XTransformPort=<port> (mis. 3003) -> service chat
+	@transform_port_query {
+		query XTransformPort=*
+	}
+
+	handle @transform_port_query {
+		reverse_proxy localhost:{query.XTransformPort} {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# Sisanya -> web Next.js
+	handle {
+		reverse_proxy localhost:3000 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+}

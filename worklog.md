@@ -1883,3 +1883,28 @@ Stage Summary:
 - Rilis v75 (Task 91): mode privat — pendaftaran & login tersembunyi dari publik, akses hanya via tautan undangan /?masuk=<kode> yang divalidasi server, bisa disetting (saklar + kode + pratinjau tautan + salin) di Dashboard → Pengaturan.
 - Perangkat bersesi tersimpan & tautan ckl_ tetap aman; kode rahasia tak pernah disiarkan publik; live broadcast tanpa reload.
 - Verify 644/644, lint 0/0, banner v75, tag rescue-v75.
+
+---
+Task ID: 92
+Agent: Z.ai (main)
+Task: Buat paket file deployment produksi (Dockerfile, docker-compose.yml, DEPLOY.md, deploy/) — disetujui user ("boleh"); tanpa perubahan kode server (versi tetap v75)
+
+Work Log:
+- Konteks: v75 (mode privat, Task 91) sudah rilis penuh; sesi ini mengerjakan penawaran file deploy yang menunggu persetujuan → user menjawab "boleh".
+- Server ditemukan MATI saat sesi mulai (port 3003 kosong) → restart manual `bun --hot index.ts` → banner "chat-service v75 listening on port 3003" + gateway 81 & web 3000 sehat.
+- Investigasi path produksi: DB_PATH chat = join(import.meta.dir,'chat.db'); MEDIA_DIR chat = ../../db/media → FOLDER MEDIA SAMA dengan web (menentukan desain volume bersama); BACKUP_DIR = ../../backups; DATABASE_URL web via env (db/custom.db); standalone server.js chdir ke dirname-nya → symlink db wajib setelah build; CORS socket.io origin:'*' (aman produksi); env produksi: ADMIN_PASSWORD (default admin123), MEDIA_RETENTION_DAYS; prisma CLI ada di dependencies (node_modules/prisma/build/index.js).
+- .dockerignore: node_modules/.next/db/chat.db/backups/.env*/log tidak masuk build context.
+- Dockerfile multi-stage: builder (bun install --frozen-lockfile → bunx prisma generate → bun run build) → target `web` (oven/bun:1-slim + openssl + ca-certificates; standalone + prisma schema/CLI; symlink /app/.next/standalone/db→/data; HEALTHCHECK fetch :3000) → target `chat` (bun install chat-service dgn bun.lock; template /opt/chat-service-template + seeding /opt/chat-service; HEALTHCHECK /socket.io polling).
+- Entrypoint web (sh): db push hanya bila /data/custom.db belum ada (idempoten) → exec bun server.js. Entrypoint chat (sh): sinkron index.ts/package.json/bun.lock dari template→volume (named volume hanya di-seeding sekali → upgrade image tanpa merusak chat.db/WAL), bun install bila node_modules kosong, ln -s /data→/db (MEDIA_DIR) & /data/backups→/backups, peringatan ADMIN_PASSWORD default.
+- docker-compose.yml: web + chat + caddy; ADMIN_PASSWORD wajib via ${ADMIN_PASSWORD:?...}; volume chatkita_data dipakai web(/data) DAN chat(/data) → SATU folder media bersama; chatdata untuk kode+chat.db(+wal/shm persisten); caddy_data/caddy_config; DOMAIN dari .env compose (default :80).
+- deploy/: chatkita-web.service & chatkita-chat.service (User=chatkita, EnvironmentFile=chatkita.env, ExecStartPre test symlink utk web, ExecStart TANPA --hot), chatkita.env.example (DATABASE_URL/ADMIN_PASSWORD/MEDIA_RETENTION_DAYS), Caddyfile produksi host (domain → HTTPS otomatis; ?XTransformPort → localhost:{query}; sisanya → localhost:3000), Caddyfile.docker ({$DOMAIN} → chat:3003 / web:3000).
+- Temuan git penting: chat.db & db/custom.db TER-TRACK git (desain "git sebagai backup"; .gitignore mengecualikan wal/shm/db/media/backups), .env bawaan repo berisi path sandbox → DEPLOY.md disesuaikan: peringatan privasi repo publik, opsi mulai bersih (4b: rm chat.db*/custom.db), init skema (4c: bunx prisma db push), alur update resmi Opsi A = stop → sqlite .backup → git fetch + reset --hard → restore DB dari backup + rm wal/shm → rebuild + symlink (menghindari konflik pull); Opsi B update = git fetch + reset --hard (data di volume aman) → compose up --build.
+- DEPLOY.md (Bahasa Indonesia): arsitektur + tabel data, swap 2GB utk VPS 1GB, ufw, Opsi A 7 langkah (bun, user chatkita, env, build+symlink, 4b/4c, systemd, caddy, verifikasi), Opsi B Docker Compose (.env DOMAIN/ADMIN_PASSWORD), backup/restore (sqlite .backup + rsync media; docker compose cp), checklist keamanan (termasuk repo private & mode privat ?masuk=<kode>), troubleshooting 7 baris.
+- Validasi: python3 yaml.safe_load docker-compose.yml OK; sh -n kedua entrypoint OK; chmod 755 entrypoints; Docker TIDAK tersedia di sandbox → build image belum bisa diuji penuh (dinyatakan jujur).
+- Tanpa perubahan kode server/frontend → SERVICE_VERSION tetap v75, verify-integrity.sh tidak diubah, lint tidak diulang (tak ada file TS/TSX berubah).
+
+Stage Summary:
+- Paket deployment lengkap siap pakai: DEPLOY.md (2 opsi, Bahasa Indonesia), Dockerfile multi-stage (web+chat), docker-compose.yml (3 service + volume data), deploy/ (2 unit systemd + env contoh + 2 Caddyfile + 2 entrypoint) + .dockerignore.
+- Desain kunci Docker: media web & chat disatukan di satu volume chatkita_data (MEDIA_DIR chat memang menunjuk folder media web); chat.db di volume sendiri dengan sinkron kode via entrypoint agar upgrade image aman; WAL ikut persisten.
+- Peringatan penting: repo GitHub membawa chat.db berisi riwayat chat (git-as-backup) → sebaiknya repo private; mulai bersih via langkah 4b.
+- Server sandbox sehat kembali (3003 = v75); commit & push via hook.
