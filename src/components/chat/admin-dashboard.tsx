@@ -441,6 +441,11 @@ export function AdminDashboard({
   const [createdLink, setCreatedLink] = useState<(AdminLinkInfo & { token: string }) | null>(null);
   /* v71 — feedback ikon salin: Copy → centang "Tersalin" 1,5 detik. */
   const [linkCopied, setLinkCopied] = useState(false);
+  /* v75 — mode privat: kode rahasia tautan undangan (jalur admin) + feedback
+   * salin + origin browser utk menyusun tautan /?masuk=<kode>. */
+  const [gateSecret, setGateSecret] = useState("");
+  const [gateCopied, setGateCopied] = useState(false);
+  const [gateOrigin, setGateOrigin] = useState("");
   const [settingsResetOpen, setSettingsResetOpen] = useState(false);
   const [settingsResetBusy, setSettingsResetBusy] = useState(false);
 
@@ -471,7 +476,11 @@ export function AdminDashboard({
       fetchStats();
       if (socket?.connected) {
         socket.emit("admin:settings:get", {}, (res: AckOf<AppSettingsAck>) => {
-          if (res.ok) setSettings(res.settings);
+          if (res.ok) {
+            setSettings(res.settings);
+            // v75 — kode rahasia ikut di jalur admin utk tampilan tautan.
+            setGateSecret(res.authSecret ?? "");
+          }
         });
       }
     }, 0);
@@ -481,6 +490,11 @@ export function AdminDashboard({
       clearInterval(iv);
     };
   }, [open, fetchStats, socket]);
+
+  // v75 — origin browser (klien-only) utk pratinjau tautan undangan.
+  useEffect(() => {
+    setGateOrigin(window.location.origin);
+  }, []);
 
   // v13 — tab Sistem memuat snapshot runtime + audit.
   useEffect(() => {
@@ -781,6 +795,8 @@ export function AdminDashboard({
       (res: AckOf<AppSettingsAck> | ChatErrorAck) => {
         if (res.ok) {
           setSettings(res.settings);
+          // v75 — kode bisa terisi acak otomatis saat mode privat dinyalakan.
+          if (typeof res.authSecret === "string") setGateSecret(res.authSecret);
           setSettingsMsg("Tersimpan ✓");
           setTimeout(() => setSettingsMsg(null), 2000);
         } else {
@@ -1853,6 +1869,89 @@ export function AdminDashboard({
                     }}
                     aria-label="Buka pendaftaran"
                   />
+                </div>
+                {/* v75 — Mode privat: sembunyikan masuk & daftar dari publik. */}
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium">Mode privat 🔒</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      Bila aktif, halaman masuk diganti layar gembok — form
+                      masuk/daftar tidak terlihat publik. Akses hanya lewat
+                      tautan undangan di bawah; perangkat yang sudah masuk
+                      tetap aman & tautan khusus (ckl_) tetap berfungsi.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings?.authHidden ?? false}
+                    onCheckedChange={(v) => {
+                      setSettings((s) => (s ? { ...s, authHidden: v } : s));
+                      saveSettings({ authHidden: v });
+                    }}
+                    aria-label="Mode privat"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="dash-gate-secret">
+                    Kode rahasia tautan undangan
+                  </Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="dash-gate-secret"
+                      value={gateSecret}
+                      onChange={(e) => setGateSecret(e.target.value)}
+                      placeholder="mis. kita-rahasia-2025"
+                      autoComplete="off"
+                      className="h-9 flex-1 font-mono"
+                    />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-9 shrink-0"
+                      onClick={() => saveSettings({ authSecret: gateSecret })}
+                    >
+                      <Save className="size-4" aria-hidden="true" />
+                      Simpan kode
+                    </Button>
+                  </div>
+                  {gateSecret ? (
+                    <div className="flex items-center gap-2 rounded-lg bg-muted px-2.5 py-2">
+                      <code className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                        {gateOrigin}/?masuk={gateSecret}
+                      </code>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 shrink-0 px-2"
+                        aria-label="Salin tautan undangan"
+                        onClick={() => {
+                          void navigator.clipboard
+                            .writeText(`${gateOrigin}/?masuk=${gateSecret}`)
+                            .then(() => {
+                              setGateCopied(true);
+                              setTimeout(() => setGateCopied(false), 1500);
+                            })
+                            .catch(() => undefined);
+                        }}
+                      >
+                        {gateCopied ? (
+                          <Check className="size-3.5" aria-hidden="true" />
+                        ) : (
+                          <Copy className="size-3.5" aria-hidden="true" />
+                        )}
+                        {gateCopied ? "Tersalin" : "Salin"}
+                      </Button>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground">
+                      Kode masih kosong — terisi acak otomatis saat mode privat
+                      diaktifkan, atau isi sendiri lalu simpan.
+                    </p>
+                  )}
+                  <p className="text-[11px] text-muted-foreground">
+                    Bagikan tautan hanya ke orang yang dipercaya — siapa pun
+                    yang punya tautan bisa melihat form masuk & daftar. Kode
+                    boleh berisi huruf, angka, titik, garis bawah/strip.
+                  </p>
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="dash-slowmode">

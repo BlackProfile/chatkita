@@ -874,3 +874,28 @@ Perubahan (satu komponen bersama — `src/components/chat/ChatBubble.tsx`, berla
 **E2E terverifikasi (agent-browser, 2 sesi gateway :81):** (1) jalur per jenis — set "Foto (hari)"=1 → "Bersihkan media lama" → 2 foto berusia 2 hari jadi "Media kedaluwarsa" live (log `[retensi-v48] 20 media`), dikembalikan ke 0; (2) jalur per percakapan — 3 foto berusia 2 jam di chat UjiV74B → admin pilih "1 jam" → toast "3 media lama langsung disapu", log `[ttl-percakapan] … → 1 jam (3 media)`, album larut jadi 6 batu nisan di admin, **sisi user menerima chip + batu nisan live tanpa reload**; state uji dibersihkan (2 akun uji + percakapan dihapus, retensi kembali 0). Verify **621/621**; lint 0/0.
 
 **File kunci:** `mini-services/chat-service/index.ts` (kolom + expireMediaInConversation + sweepConversationMedia + admin:conversation_ttl + cleanup + bump v74), `AdminPanel.tsx` (menu TTL + chip + fix paritas message:updated), `Messenger.tsx` (state TTL + listener + chip), `src/lib/chat-types.ts` (mediaTtlHours + ConversationTtlPayload/Ack), `src/lib/chat-utils.ts` (mediaTtlLabel), `src/instrumentation.ts` (rescue-v74), `scripts/verify-integrity.sh` (+21 cek; cek literal v73 → konversi historis).
+
+---
+
+## v75 (Task 91) — Mode privat: sembunyikan masuk & pendaftaran (akses hanya via tautan)
+
+**Konteks:** halaman masuk ChatKita selalu memperlihatkan form masuk/daftar ke siapa pun yang membuka URL. Pemilik ingin instansinya privat: **pendaftaran & login disembunyikan dari publik, akses hanya lewat tautan**, dan bisa disetel sendiri.
+
+**Solusi:** saklar **"Mode privat 🔒"** di Dashboard → Pengaturan → kartu "Akses & pendaftaran" + **kode rahasia tautan undangan** dengan pratinjau `https://domain/?masuk=<kode>` + tombol salin.
+
+**Perilaku server** (`mini-services/chat-service/index.ts`):
+- Setting baru `authHidden` ('1'/'0', ikut `getAppSettings()` → tersiarkan live via `app:settings:update`) dan `authSecret` (**tidak pernah** masuk broadcast publik — hanya jalur admin `admin:settings:get/set`).
+- Event pra-login **`public:gate_unlock`** {code}: validasi kode di server (rate limit per-socket 700 ms; `GATE_INVALID`/`RATE_LIMITED`). Kode dibandingkan di server supaya tidak bisa dicuri dari sisi klien.
+- Persist aman: `authSecret` hanya ditimpa bila admin memang mengirimnya di patch (saklar tidak lagi menghapus kode); saat mode diaktifkan dengan kode kosong → server membuat kode acak `base64url` 8 karakter (`randomBytes(6)`).
+- Validasi kode: maks 64 karakter, charset `[A-Za-z0-9._-]`.
+- Pendaftaran akun baru tetap wajib kode undangan (v27) & tautan `ckl_` (v62) tetap berfungsi — keduanya sudah rahasia sejak awal.
+
+**Perilaku klien:**
+- **Messenger**: saat `authHidden` aktif dan gembok terkunci, SELURUH form masuk/daftar diganti **layar gembok** ("Aplikasi privat" + ikon Lock + kolom "Punya kode akses? Tempel di sini" + tombol Buka). Terbuka via: (1) tautan `/?masuk=<kode>` — divalidasi server, URL langsung dibersihkan; (2) kode manual; (3) tautan `ckl_` admin; (4) perangkat dengan sesi tersimpan tidak pernah melihat gembok (auto re-auth). Status buka disimpan di **sessionStorage** (`chatkita:gateOk`) — hilang saat tab ditutup, sesi baru butuh tautan lagi. Live: admin menyalakan/mematikan → semua klien berubah tanpa reload.
+- **admin-dashboard**: kartu Mode privat (saklar + kolom kode + pratinjau tautan + tombol Salin dengan feedback "Tersalin" 1,5 dtk + catatan keamanan).
+
+**Bug ditemukan & diperbaiki saat E2E:** patch `admin:settings:set` dari saklar (hanya `authHidden`) sempat menimpa `authSecret` tersimpan menjadi kosong lalu memicu regenerasi acak — kode `uji-v75` tiba-tiba jadi `Comi1QI5` → tautan lama gagal (`GATE_INVALID`). Fix: `authSecret` hanya ditulis bila ada di payload; regenerasi hanya bila DB memang kosong.
+
+**E2E terverifikasi (agent-browser, 5 sesi gateway :81):** admin set kode `uji-v75` → saklar ON (state "checked", "Tersimpan ✓"); sesi baru → layar gembok (form hilang); `/?masuk=uji-v75` → form tampil + `gateOk=1` + URL bersih; kode salah via kolom manual → "Kode salah" (gembok bertahan); kode benar manual → terbuka; **broadcast live**: klien terkunci berubah FORM↔GEMBOK tanpa reload saat admin toggle OFF/ON; toggle 2× tidak menghapus kode (DB terverifikasi); kode final `kita-rahasia` + tautan final tampil & berfungsi; mobile 390px gembok rapi. Verify **644/644** (+26 cek, 3 anchor live v74 → v75); lint 0/0.
+
+**File kunci:** `mini-services/chat-service/index.ts` (setting + public:gate_unlock + persist aman + bump v75), `Messenger.tsx` (layar gembok + unlock URL/manual/sessionStorage + state gateLocked), `admin-dashboard.tsx` (kartu Mode privat + kode + tautan), `src/lib/chat-types.ts` (authHidden + authSecret di AppSettingsAck + GateUnlockAck), `src/instrumentation.ts` (rescue-v75), `scripts/verify-integrity.sh` (+26 cek).

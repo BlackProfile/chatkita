@@ -1861,3 +1861,25 @@ Stage Summary:
 - Rilis v74 (Task 90): kedaluwarsa media per percakapan — admin atur TTL (1 jam s/d 30 hari) per chat, media lama langsung disapu, semua pihak live, terintegrasi retensi per jenis + sapu manual.
 - Fix paritas tambahan: tombstone kedaluwarsa/burn kini live di panel admin (dulu hanya user).
 - Verify 621/621, lint 0/0, banner v74, tag rescue-v74.
+
+---
+Task ID: 91
+Agent: Z.ai (main)
+Task: v75 — mode privat: sembunyikan pendaftaran & login, akses hanya via tautan, bisa disetting admin
+
+Work Log:
+- Permintaan user: "sembunyikan pendaftaran & login, buat hanya dari link aja dulu, buat bisa disetting".
+- Pemetaan: alur auth Messenger (public:settings pra-login, magic link ckl_ v62, invite code wajib v27), settings engine (getSetting/setSetting + getAppSettings + admin:settings:get/set + broadcastAppSettings), kartu "Akses & pendaftaran" di admin-dashboard.
+- 铁律1 pkill 3 pola → port 3003 bebas → edit index.ts: SERVICE_VERSION v75 + blok komentar; AppSettingsApi.authHidden (+authSecret optional, jalur admin saja); getAppSettings menyertakan authHidden; event pra-login public:gate_unlock (validasi kode server-side, rate limit per-socket 700 ms via socket.data.gateLast, GATE_INVALID/RATE_LIMITED); admin:settings:set menerima authHidden (bool) + authSecret (validasi charset [A-Za-z0-9._-], maks 64) + persist aman (kode hanya ditimpa bila ada di payload; regenerasi randomBytes(6) base64url hanya bila DB kosong saat mode aktif) + ack mengembalikan authSecret ke admin; admin:settings:get menyertakan authSecret.
+- chat-types.ts: AppSettings.authHidden?, AppSettingsAck.authSecret? (jalur admin), type GateUnlockAck, dokumen event public:gate_unlock.
+- Messenger.tsx: GATE_OK_KEY sessionStorage + readGateOk; state gateUnlocked/gateCode/gateChecking/gateError + gateLocked turunan; submitGateCode; cabang URL ?masuk=<non-ckl_> → public:gate_unlock (sukses → sessionStorage+state, gagal → pesan error); tautan ckl_ sah ikut membuka gembok; layar gembok menggantikan seluruh form (ikon Lock, kolom kode manual, tombol Buka); live via app:settings:update.
+- admin-dashboard.tsx: state gateSecret/gateCopied/gateOrigin; admin:settings:get/set membawa kode; kartu "Mode privat 🔒" (saklar + kolom kode + Simpan kode + pratinjau tautan origin/?masuk=<kode> + Salin/Tersalin + catatan keamanan).
+- instrumentation.ts: RESCUE_TAG rescue-v75 + void 0 komentar v75; verify-integrity.sh: 3 anchor live v74 → v75 + 26 cek baru → chmod 644.
+- Restart chat-service → banner "chat-service v75 listening on port 3003"; verify 644/644; lint 0/0 (1 pola chk_grep diperbaiki: ${gateSecret} di-escape dari ekspansi bash).
+- E2E agent-browser 5 sesi (t92-t96, gateway :81): BUG ditemukan — patch saklar menimpa authSecret jadi kosong lalu regenerasi acak (uji-v75 → Comi1QI5, tautan gagal GATE_INVALID); fix persist aman; retes: admin set kode uji-v75 → DB terverifikasi; toggle OFF→ON 2× kode tak berubah; sesi baru = layar gembok (form hilang); /?masuk=uji-v75 = form tampil + gateOk=1 + URL bersih; kode salah manual = error "Kode salah"; kode benar manual = terbuka; broadcast live FORM↔GEMBOK tanpa reload dua arah; kode final "kita-rahasia" + tautan final berfungsi (sesi t96b); mobile 390px gembok rapi (screenshot /tmp/v75-gembok-mobile.png, /tmp/v75-admin-mode-privat.png); sesi browser ditutup, /tmp/gate-test.mjs dihapus, tanpa artefak DB.
+- Keadaan akhir sesuai permintaan: MODE PRIVAT AKTIF dengan kode "kita-rahasia" (bisa diganti admin di Dashboard → Pengaturan).
+
+Stage Summary:
+- Rilis v75 (Task 91): mode privat — pendaftaran & login tersembunyi dari publik, akses hanya via tautan undangan /?masuk=<kode> yang divalidasi server, bisa disetting (saklar + kode + pratinjau tautan + salin) di Dashboard → Pengaturan.
+- Perangkat bersesi tersimpan & tautan ckl_ tetap aman; kode rahasia tak pernah disiarkan publik; live broadcast tanpa reload.
+- Verify 644/644, lint 0/0, banner v75, tag rescue-v75.

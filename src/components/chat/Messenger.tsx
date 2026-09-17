@@ -16,6 +16,7 @@ import {
   Layers,
   Leaf,
   Loader2,
+  Lock,
   LogOut,
   MessageCircleMore,
   Mic,
@@ -144,6 +145,7 @@ import {
   type UserToastPayload,
   type UserSetPasswordAck,
   type GhostMessagePayload,
+  type GateUnlockAck,
   type LinkLoginAck,
   type IllusionFlagsPayload,
 } from "@/lib/chat-types";
@@ -329,6 +331,20 @@ function readMagicToken(): string | null {
     return new URLSearchParams(window.location.search).get("masuk");
   } catch {
     return null;
+  }
+}
+
+/* v75 — mode privat: flag "gembok sudah terbuka" utk sesi browser ini
+ * (sessionStorage — hilang saat tab ditutup, jadi tautan tetap dibutuhkan
+ * untuk sesi baru). Diisi saat ?masuk=<kode> tervalidasi server atau saat
+ * tautan ckl_ milik admin berhasil ditukar. */
+const GATE_OK_KEY = "chatkita:gateOk";
+
+function readGateOk(): boolean {
+  try {
+    return window.sessionStorage.getItem(GATE_OK_KEY) === "1";
+  } catch {
+    return false;
   }
 }
 
@@ -714,6 +730,16 @@ export function Messenger() {
    * Settings belum termuat → dianggap tutup (aman; sesuai keadaan sekarang
    * yang memang ditutup). Berlaku live lewat broadcast app:settings:update. */
   const registrationOpen = appSettings?.allowRegistration ?? false;
+  /* v75 — MODE PRIVAT: gembok terbuka utk sesi browser ini (via tautan
+   * undangan ?masuk=<kode> tervalidasi server / tautan ckl_ admin). Saat
+   * server menyetel authHidden dan gembok masih terkunci, SELURUH form
+   * masuk/daftar diganti layar gembok 🔒. Live lewat broadcast
+   * app:settings:update — admin menyalakan/mematikan tanpa reload. */
+  const [gateUnlocked, setGateUnlocked] = useState(() => readGateOk());
+  const [gateCode, setGateCode] = useState("");
+  const [gateChecking, setGateChecking] = useState(false);
+  const [gateError, setGateError] = useState<string | null>(null);
+  const gateLocked = (appSettings?.authHidden ?? false) && !gateUnlocked;
   const [editing, setEditing] = useState<ChatMessage | null>(null);
   const [fontScale, setFontScale] = useState<FontScale>(() => readFontScale());
   const [installAvailable, setInstallAvailable] = useState(false);
@@ -928,6 +954,35 @@ export function Messenger() {
           }
       };
       if (magic && !meRef.current) {
+        if (!magic.startsWith("ckl_")) {
+          /* v75 — bukan token ckl_ → perlakukan sebagai kode gembok mode
+           * privat (?masuk=<kode>). Validasi ke server; sukses → sesi
+           * browser ini terbuka (sessionStorage). URL sudah dibersihkan
+           * di atas, jadi kode tak tertinggal di address bar/riwayat. */
+          socket.emit(
+            "public:gate_unlock",
+            { code: magic },
+            (gr: AckOf<GateUnlockAck>) => {
+              if (gr.ok) {
+                try {
+                  window.sessionStorage.setItem(GATE_OK_KEY, "1");
+                } catch {
+                  /* storage penuh/diblokir — gembok terbuka selama
+                     halaman ini hidup saja. */
+                }
+                setGateUnlocked(true);
+                setGateError(null);
+              } else {
+                setGateError(
+                  gr.error === "RATE_LIMITED"
+                    ? "Terlalu banyak percobaan — tunggu sebentar."
+                    : "Kode akses pada tautan salah — minta tautan terbaru dari admin."
+                );
+              }
+            }
+          );
+          return;
+        }
         setLinkChecking(true);
         socket.emit(
           "public:link_login",
@@ -950,6 +1005,14 @@ export function Messenger() {
               );
               return;
             }
+            /* v75 — tautan ckl_ sah = pemiliknya diberi akses admin →
+             * sekalian buka gembok mode privat di perangkat ini. */
+            try {
+              window.sessionStorage.setItem(GATE_OK_KEY, "1");
+            } catch {
+              /* abaikan */
+            }
+            setGateUnlocked(true);
             socket.emit(
               "user:auth",
               { name: lr.name, userId: lr.userId, deviceId: readDeviceId() },
@@ -1396,6 +1459,35 @@ export function Messenger() {
   // klik → tampilkan status sync ±0,9 dtk → auth dikirim → masuk.
   const [loggingIn, setLoggingIn] = useState(false);
   const loginBusyRef = useRef(false);
+
+  /* v75 — buka gembok manual dari layar privat (kode diketik/tempel).
+   * Validasi selalu di server (public:gate_unlock) — kode tak pernah
+   * dikirim ke klien publik. */
+  const submitGateCode = () => {
+    const socket = socketRef.current;
+    const code = gateCode.trim();
+    if (!socket || !code || gateChecking) return;
+    setGateChecking(true);
+    setGateError(null);
+    socket.emit("public:gate_unlock", { code }, (gr: AckOf<GateUnlockAck>) => {
+      setGateChecking(false);
+      if (gr.ok) {
+        try {
+          window.sessionStorage.setItem(GATE_OK_KEY, "1");
+        } catch {
+          /* storage diblokir — gembok hanya terbuka selama halaman hidup. */
+        }
+        setGateUnlocked(true);
+        setGateCode("");
+      } else {
+        setGateError(
+          gr.error === "RATE_LIMITED"
+            ? "Terlalu banyak percobaan — tunggu sebentar."
+            : "Kode salah — minta tautan undangan terbaru dari admin."
+        );
+      }
+    });
+  };
 
   /**
    * Login. `override` lets the "Lanjut chat sebagai …" button authenticate
@@ -2395,6 +2487,67 @@ export function Messenger() {
                 dengan akun lain.
               </p>
             ) : null}
+            {gateLocked ? (
+              /* v75 — MODE PRIVAT: layar gembok menggantikan seluruh form
+               * masuk/daftar. Terbuka via tautan undangan atau kode manual
+               * (divalidasi server). Perangkat bersesi tersimpan tidak
+               * pernah melihat layar ini (auto re-auth). */
+              <form
+                className="anim-stagger space-y-4 text-center"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  submitGateCode();
+                }}
+              >
+                <span
+                  className="mx-auto flex size-14 items-center justify-center rounded-2xl bg-emerald-600/10 text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300"
+                  aria-hidden="true"
+                >
+                  <Lock className="size-7" />
+                </span>
+                <div className="space-y-1">
+                  <p className="text-base font-semibold text-emerald-950 dark:text-emerald-50">
+                    Aplikasi privat
+                  </p>
+                  <p className="mx-auto max-w-xs text-sm leading-snug text-emerald-900/65 dark:text-emerald-100/55">
+                    Percakapan di sini bersifat pribadi. Masuk hanya melalui
+                    tautan undangan dari admin.
+                  </p>
+                </div>
+                {gateError ? (
+                  <p
+                    key={gateError}
+                    className="anim-shake rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                  >
+                    {gateError}
+                  </p>
+                ) : null}
+                <div className="flex gap-2">
+                  <Input
+                    value={gateCode}
+                    onChange={(e) => {
+                      setGateCode(e.target.value);
+                      setGateError(null);
+                    }}
+                    placeholder="Punya kode akses? Tempel di sini"
+                    aria-label="Kode akses"
+                    autoComplete="off"
+                    className="h-11 rounded-xl border-emerald-900/10 bg-white/70 text-sm dark:border-white/10 dark:bg-white/5"
+                  />
+                  <Button
+                    type="submit"
+                    disabled={!gateCode.trim() || gateChecking}
+                    className="btn-gradient h-11 shrink-0 rounded-xl px-4 text-sm font-semibold text-white"
+                  >
+                    {gateChecking ? (
+                      <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      "Buka"
+                    )}
+                  </Button>
+                </div>
+              </form>
+            ) : (
             <form
               className="anim-stagger space-y-4"
               onSubmit={(e) => {
@@ -2760,6 +2913,7 @@ export function Messenger() {
                 </Button>
               ) : null}
             </form>
+            )}
           </div>
 
           {!isEmbed ? (

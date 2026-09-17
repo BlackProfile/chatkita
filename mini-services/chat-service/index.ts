@@ -72,7 +72,7 @@
 
 import { createServer, type ServerResponse } from 'http'
 import { join, resolve } from 'path'
-import { createHash, createHmac } from 'crypto'
+import { createHash, createHmac, randomBytes } from 'crypto'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { Database } from 'bun:sqlite'
 import { Server, type Socket as IoSocket } from 'socket.io'
@@ -315,7 +315,14 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * "⏳ Media kedaluwarsa" (teks/caption tetap), file disk & blob dibebaskan
  * bila tak ada rujukan lain, semua pihak menerima pembaruan live. Sapu
  * manual admin:cleanup kini mencakup sweep per jenis + per percakapan. */
-const SERVICE_VERSION = 'v74'
+/* v75 (Task 91) — MODE PRIVAT: sembunyikan form masuk & pendaftaran dari
+ * publik. Setting authHidden (Dashboard → Akses & pendaftaran) mengganti
+ * layar masuk jadi gembok 🔒; akses hanya lewat tautan undangan
+ * /?masuk=<kode> yang divalidasi server (public:gate_unlock) memakai kode
+ * rahasia authSecret — TIDAK pernah disiarkan ke klien publik, hanya admin
+ * yang melihatnya via admin:settings:get/set. Perangkat bersesi tersimpan
+ * tetap bisa lanjut; tautan ckl_ (magic link) otomatis membuka gembok. */
+const SERVICE_VERSION = 'v75'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -1051,6 +1058,11 @@ interface AppSettingsApi {
   readReceipts: boolean
   /** Global minimum seconds between two user messages (0 = off; admin exempt). */
   slowmodeSeconds: number
+  /* v75 — mode privat: layar masuk diganti gembok, akses via tautan undangan. */
+  authHidden: boolean
+  /** Kode rahasia tautan undangan — HANYA untuk jalur admin, tidak pernah
+   *  masuk getAppSettings()/broadcast publik. */
+  authSecret?: string
   /* v48 — keamanan media/file/tautan. */
   /** Daftar ekstensi file yang DILARANG diunggah user (dipisah koma). */
   extBlocklist: string
@@ -1142,6 +1154,8 @@ const getAppSettings = (): AppSettingsApi => ({
     min: APP_SETTING_LIMITS.slowmodeSeconds.min,
     max: APP_SETTING_LIMITS.slowmodeSeconds.max,
   }),
+  // v75 — mode privat (kode rahasianya TIDAK ikut — jalur admin tersendiri).
+  authHidden: getSetting('authHidden') === '1',
   // v48 — media/file/tautan.
   extBlocklist: getSetting('extBlocklist') ?? '',
   linkBlacklist: getSetting('linkBlacklist') ?? '',
@@ -4996,6 +5010,29 @@ io.on('connection', (socket) => {
     ack({ ok: true, exists, suggestion: exists ? suggestFreeName(name) : undefined })
   }))
 
+  /* v75 — Mode privat: validasi kode rahasia tautan undangan
+   * (?masuk=<kode>). Kode TIDAK dikirim ke klien publik (public:settings
+   * hanya membawa authHidden bool), jadi pembandingan dilakukan di server:
+   * cocok → klien membuka form masuk/daftar utk sesi browser itu
+   * (sessionStorage). Rate limit ringan per-socket (700 ms) menahan
+   * brute force kasar; kekuatan kode tetap tanggung jawab admin. */
+  socket.on('public:gate_unlock', handler(socket, (data, ack) => {
+    const now = Date.now()
+    const last = Number(socket.data.gateLast ?? 0)
+    socket.data.gateLast = now
+    if (now - last < 700) {
+      ack({ ok: false, error: 'RATE_LIMITED' })
+      return
+    }
+    const code = typeof data?.code === 'string' ? data.code.trim() : ''
+    const secret = getSetting('authSecret') ?? ''
+    if (!secret || code !== secret) {
+      ack({ ok: false, error: 'GATE_INVALID' })
+      return
+    }
+    ack({ ok: true })
+  }))
+
   /* v62 — tautan masuk (magic link): klien membuka ?masuk=<token> lalu menukar
    * token dengan identitas akun ({userId, name}) untuk dilanjutkan ke user:auth
    * jalur sesi tersimpan. Token 256-bit + hanya hash yang disimpan + rate
@@ -6856,7 +6893,9 @@ io.on('connection', (socket) => {
 
   socket.on('admin:settings:get', handler(socket, (_data, ack) => {
     if (!adminGuard(ack)) return
-    ack({ ok: true, settings: getAppSettings() })
+    // v75 — authSecret ikut di sini (jalur admin): dashboard butuh menyusun
+    // tautan undangan /?masuk=<kode> untuk disalin admin.
+    ack({ ok: true, settings: getAppSettings(), authSecret: getSetting('authSecret') ?? '' })
   }))
 
   socket.on('admin:settings:set', handler(socket, (data, ack) => {
@@ -6915,6 +6954,20 @@ io.on('connection', (socket) => {
       next.slowmodeSeconds = clampNum(data.slowmodeSeconds, APP_SETTING_LIMITS.slowmodeSeconds)
       touched += ' slowmode'
     }
+    // v75 — mode privat + kode rahasia tautan undangan.
+    if (typeof data?.authHidden === 'boolean') {
+      next.authHidden = data.authHidden
+      touched += ' authHidden'
+    }
+    if (typeof data?.authSecret === 'string') {
+      const v = data.authSecret.trim()
+      if (v.length > 64 || !/^[A-Za-z0-9._-]*$/.test(v)) {
+        ack({ ok: false, error: 'INVALID_MESSAGE' })
+        return
+      }
+      next.authSecret = v
+      touched += ' authSecret'
+    }
     // v48 — media/file/tautan.
     for (const key of ['extBlocklist', 'linkBlacklist', 'linkWhitelist'] as const) {
       if (typeof data?.[key] === 'string') {
@@ -6944,6 +6997,19 @@ io.on('connection', (socket) => {
     setSetting('allowReactions', next.allowReactions ? '1' : '0')
     setSetting('readReceipts', next.readReceipts ? '1' : '0')
     setSetting('slowmodeSeconds', String(next.slowmodeSeconds))
+    // v75 — persist mode privat. PENTING: authSecret hanya ditimpa bila
+    // admin MEMANG mengirimnya di patch ini (patch saklar hanya membawa
+    // authHidden — jangan sampai kode tersimpan ikut terhapus); kode acak
+    // hanya dibuat saat mode aktif dan DB memang masih kosong.
+    setSetting('authHidden', next.authHidden ? '1' : '0')
+    if (typeof data?.authSecret === 'string') {
+      setSetting('authSecret', next.authSecret ?? '')
+    }
+    if (next.authHidden && !(getSetting('authSecret') ?? '')) {
+      const generated = randomBytes(6).toString('base64url')
+      setSetting('authSecret', generated)
+      next.authSecret = generated
+    }
     // v48 — persist media/file/tautan.
     setSetting('extBlocklist', next.extBlocklist)
     setSetting('linkBlacklist', next.linkBlacklist)
@@ -6955,7 +7021,8 @@ io.on('connection', (socket) => {
     // v11 — audit trail.
     audit('settings', `appName=${next.appName}; maintenance=${next.maintenanceMode};${touched}`)
     console.log(`App settings updated${touched ? ` (${touched.trim()})` : ''}`)
-    ack({ ok: true, settings: next })
+    // v75 — authSecret dikembalikan ke admin saja (kode baru/kode terkini).
+    ack({ ok: true, settings: next, authSecret: getSetting('authSecret') ?? '' })
   }))
 
   /**

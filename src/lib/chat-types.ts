@@ -818,6 +818,9 @@ export interface AppSettings {
   retImageDays?: number;
   retVideoDays?: number;
   retFileDays?: number;
+  /* v75 — mode privat: sembunyikan form masuk & daftar dari publik.
+   * Kode rahasianya TIDAK pernah lewat sini (hanya jalur admin). */
+  authHidden?: boolean;
 }
 
 /** `public:settings` now also carries the public app settings (v10). */
@@ -827,6 +830,13 @@ export interface PublicSettingsAck {
   /** v10 — present on newer servers; optional for older clients. */
   app?: AppSettings;
 }
+
+/* v75 — `public:gate_unlock` — validasi kode rahasia tautan undangan
+ * (?masuk=<kode>) di sisi server. Sukses → klien membuka form masuk/daftar
+ * utk sesi browser itu (sessionStorage). GATE_INVALID = kode salah/kosong. */
+export type GateUnlockAck =
+  | { ok: true }
+  | { ok: false; error: "GATE_INVALID" | "RATE_LIMITED" };
 
 /** One UTC day of message counts (dashboard daily series). */
 export interface DashboardDayPoint {
@@ -905,6 +915,9 @@ export interface DashboardStatsAck {
 export interface AppSettingsAck {
   ok: true;
   settings: AppSettings;
+  /** v75 — kode rahasia tautan undangan; HANYA diisi pada jalur admin
+   *  (admin:settings:get/set). Broadcast publik tidak membawa ini. */
+  authSecret?: string;
 }
 
 export interface BroadcastAck {
@@ -1889,6 +1902,11 @@ export interface ConversationResetPayload {
 //                      insensitive) sudah dipakai akun user / reserved
 //                      "Admin". Hanya boolean `exists` — dipakai kartu login
 //                      utk menyembunyikan kolom kode undangan pada user lama.
+//
+// public:gate_unlock { code: string } → GateUnlockAck                    (v75)
+//                      Pre-login validasi kode rahasia tautan undangan
+//                      (?masuk=<kode>, mode privat). Sukses → klien
+//                      menyimpan flag sessionStorage utk membuka gembok.
 //
 // user:auth         { name: string; userId?: string; pin?: string }
 //                     → UserAuthAck | ChatErrorAck
