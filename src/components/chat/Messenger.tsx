@@ -11,6 +11,7 @@ import {
   Eye,
   Film,
   FolderOpen,
+  FileDown,
   FolderPlus,
   Image as ImageIcon,
   Layers,
@@ -24,6 +25,7 @@ import {
   MoreVertical,
   Music,
   MapPin,
+  Palette,
   Paperclip,
   Pin,
   Plus,
@@ -592,6 +594,19 @@ function PasswordSetupDialog({
  * User lain tidak pernah terlihat di sini (isolasi dijamin server).
  * Owns its own socket connection, always disconnected on unmount.
  */
+/* v76 — preset wallpaper per percakapan (disimpan di localStorage perangkat;
+ * tanpa server — tema bawaan "chat-wallpaper" aktif bila "default"). */
+const WALLPAPER_KEY_PREFIX = "chatkita:wallpaper:";
+const WALLPAPER_PRESETS: { id: string; label: string; css: string }[] = [
+  { id: "default", label: "Bawaan", css: "" },
+  { id: "emerald", label: "Emerald", css: "linear-gradient(160deg,#d8f3e6 0%,#b9ead0 55%,#a8e3c4 100%)" },
+  { id: "teal", label: "Teal", css: "linear-gradient(160deg,#d2f1ef 0%,#b2e6e2 55%,#9fdcd8 100%)" },
+  { id: "sand", label: "Pasir", css: "linear-gradient(160deg,#fbf0d9 0%,#f4e4bc 55%,#eedaac 100%)" },
+  { id: "rose", label: "Rosé", css: "linear-gradient(160deg,#fbe7ee 0%,#f6d3e0 55%,#f0c2d4 100%)" },
+  { id: "forest", label: "Hutan", css: "linear-gradient(160deg,#0f3d2e 0%,#0b2f24 55%,#08241b 100%)" },
+  { id: "graphite", label: "Grafit", css: "linear-gradient(160deg,#232a33 0%,#1a2027 55%,#14181e 100%)" },
+];
+
 export function Messenger() {
   const [me, setMe] = useState<StoredUser | null>(null);
   const [hasPin, setHasPin] = useState(false);
@@ -753,6 +768,9 @@ export function Messenger() {
   /* v60 — terjemahan & transkrip kini KHUSUS ADMIN (di sisi user dihapus). */
   // v22 — unread (pesan masuk saat tab tersembunyi) untuk badge judul tab.
   const [unread, setUnread] = useState(0);
+  /* v76 — wallpaper percakapan aktif (preset disimpan per perangkat). */
+  const [wallpaper, setWallpaper] = useState("default");
+  const [wallOpen, setWallOpen] = useState(false);
   // v22 — panel pesan berbintang (fetch ulang tiap kali dibuka).
   const [starredOpen, setStarredOpen] = useState(false);
   const [starredList, setStarredList] = useState<ChatMessage[]>([]);
@@ -1393,6 +1411,153 @@ export function Messenger() {
     // v47 — badge notifikasi di ikon aplikasi (favicon + App Badging API).
     applyAppBadge(eff);
   }, [unread, illusion.phantomUnread]);
+
+  /* v76 — muat preset wallpaper saat percakapan berganti. */
+  useEffect(() => {
+    try {
+      setWallpaper(
+        localStorage.getItem(`${WALLPAPER_KEY_PREFIX}${conversationId ?? "-"}`) ?? "default"
+      );
+    } catch {
+      setWallpaper("default");
+    }
+  }, [conversationId]);
+
+  const applyWallpaper = (id: string) => {
+    setWallpaper(id);
+    try {
+      localStorage.setItem(`${WALLPAPER_KEY_PREFIX}${conversationId ?? "-"}`, id);
+    } catch {
+      /* penyimpanan penuh / diblokir — abaikan */
+    }
+  };
+
+  const wallCss = WALLPAPER_PRESETS.find((w) => w.id === wallpaper)?.css || "";
+  const wallStyle = wallCss ? ({ background: wallCss } as React.CSSProperties) : undefined;
+
+  /* v76 — ekspor percakapan menjadi file .txt terurut waktu (chat:export). */
+  const [exportBusy, setExportBusy] = useState(false);
+  const exportConversation = () => {
+    if (exportBusy) return;
+    const cid = conversationIdRef.current;
+    if (!cid) return;
+    setExportBusy(true);
+    socketRef.current?.emit(
+      "chat:export",
+      { conversationId: cid },
+      (
+        res: AckOf<{
+          ok: boolean;
+          partner?: string;
+          count?: number;
+          error?: string;
+          lines?: {
+            sender: string;
+            type: string;
+            text: string;
+            fileName: string | null;
+            at: string;
+            deleted: boolean;
+          }[];
+        }>
+      ) => {
+        setExportBusy(false);
+        if (!res?.ok || !res.lines) {
+          toast.error(
+            res?.error === "RATE_LIMITED"
+              ? "Tunggu sebentar, ekspor baru saja dipakai."
+              : res?.error === "PIN_LOCKED"
+                ? "Buka kunci PIN percakapan dulu."
+                : "Gagal mengekspor percakapan."
+          );
+          return;
+        }
+        const stamp = new Date().toISOString().slice(0, 10);
+        const body = res.lines.map((l) => {
+          const when = new Date(l.at).toLocaleString("id-ID", {
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          const text = l.deleted
+            ? "⛔ pesan dihapus"
+            : l.type === "image"
+              ? `📷 Foto${l.text ? ` — ${l.text}` : ""}`
+              : l.type === "voice"
+                ? "🎙️ Pesan suara"
+                : l.type === "file"
+                  ? `📎 File${l.fileName ? `: ${l.fileName}` : ""}`
+                  : l.type === "poll"
+                    ? "📊 Polling"
+                    : l.type === "sticker"
+                      ? "🩹 Stiker"
+                      : l.type === "location"
+                        ? "📍 Lokasi"
+                        : l.type === "contact"
+                          ? "👤 Kontak"
+                          : l.text || "";
+          return `[${when}] ${l.sender}: ${text}`;
+        });
+        const header = [
+          `ChatKita — Ekspor percakapan${res.partner ? ` dengan ${res.partner}` : ""}`,
+          `Dibuat: ${new Date().toLocaleString("id-ID")}`,
+          `Jumlah pesan: ${res.count ?? body.length}`,
+          "".padEnd(48, "="),
+          "",
+        ].join("\n");
+        const blob = new Blob([header + body.join("\n") + "\n"], {
+          type: "text/plain;charset=utf-8",
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `chatkita-${(res.partner ?? "chat")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")}-${stamp}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        toast.success(`Percakapan diekspor (${res.count ?? body.length} pesan)`);
+      }
+    );
+  };
+
+  /* v76 — ringkasan AI percakapan untuk pengguna (chat:ai_summary). */
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiText, setAiText] = useState("");
+  const [aiError, setAiError] = useState<string | null>(null);
+  const openAiSummary = () => {
+    const cid = conversationIdRef.current;
+    if (!cid) return;
+    setAiOpen(true);
+    setAiBusy(true);
+    setAiText("");
+    setAiError(null);
+    socketRef.current?.emit(
+      "chat:ai_summary",
+      { conversationId: cid },
+      (res: AckOf<{ ok: boolean; summary?: string; error?: string }>) => {
+        setAiBusy(false);
+        if (!res?.ok || !res.summary) {
+          setAiError(
+            res?.error === "NO_MESSAGES"
+              ? "Belum ada pesan untuk diringkas."
+              : res?.error === "RATE_LIMITED"
+                ? "Tunggu 20 detik, lalu coba lagi."
+                : res?.error === "PIN_LOCKED"
+                  ? "Buka kunci PIN percakapan dulu."
+                  : "Layanan AI sedang tidak tersedia."
+          );
+          return;
+        }
+        setAiText(res.summary);
+      }
+    );
+  };
 
   /* v28 — cek nama pre-login (debounce 300 ms): akun sudah ada → sembunyikan
    * kolom kode undangan (kode hanya utk pendaftaran akun baru). Nama kosong
@@ -3068,6 +3233,21 @@ export function Messenger() {
                   <ShieldCheck className="mr-2 size-4" aria-hidden="true" />
                   Kunci akun dengan PIN
                 </DropdownMenuItem>
+                {/* v76 — wallpaper percakapan ini. */}
+                <DropdownMenuItem onClick={() => setWallOpen(true)}>
+                  <Palette className="mr-2 size-4" aria-hidden="true" />
+                  Wallpaper chat…
+                </DropdownMenuItem>
+                {/* v76 — ringkasan AI untuk pengguna. */}
+                <DropdownMenuItem onClick={openAiSummary}>
+                  <Sparkles className="mr-2 size-4" aria-hidden="true" />
+                  Ringkas dengan AI
+                </DropdownMenuItem>
+                {/* v76 — ekspor percakapan (.txt). */}
+                <DropdownMenuItem onClick={exportConversation} disabled={exportBusy}>
+                  <FileDown className="mr-2 size-4" aria-hidden="true" />
+                  {exportBusy ? "Menyiapkan…" : "Ekspor percakapan"}
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={toggleDataSaver}
                   className={cn(dataSaver && "bg-accent")}
@@ -3234,6 +3414,7 @@ export function Messenger() {
         <div
           ref={scrollRef}
           className="chat-scroll chat-wallpaper relative h-full min-h-0 overflow-y-auto overscroll-contain"
+          style={wallStyle}
           onScroll={(e) => {
             const el = e.currentTarget;
             const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
@@ -4394,6 +4575,90 @@ export function Messenger() {
                 ))
             )}
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* v76 — dialog wallpaper percakapan */}
+      <Dialog open={wallOpen} onOpenChange={setWallOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>🎨 Wallpaper chat</DialogTitle>
+            <DialogDescription>
+              Latar hanya untuk perangkat ini, tersimpan otomatis per percakapan.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-3 gap-2">
+            {WALLPAPER_PRESETS.map((w) => (
+              <button
+                key={w.id}
+                type="button"
+                aria-label={`Wallpaper ${w.label}`}
+                onClick={() => {
+                  applyWallpaper(w.id);
+                  setWallOpen(false);
+                  toast.success(
+                    w.id === "default"
+                      ? "Wallpaper dikembalikan ke bawaan"
+                      : `Wallpaper: ${w.label}`
+                  );
+                }}
+                className={cn(
+                  "flex h-20 flex-col items-center justify-end gap-1 rounded-xl border p-2 text-[11px] font-medium transition",
+                  wallpaper === w.id
+                    ? "border-emerald-500 ring-2 ring-emerald-500/40"
+                    : "hover:bg-accent"
+                )}
+                style={w.css ? { background: w.css } : undefined}
+              >
+                <span className="rounded-full bg-black/35 px-2 py-0.5 text-white">
+                  {w.label}
+                </span>
+              </button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* v76 — dialog ringkasan AI (user) */}
+      <Dialog open={aiOpen} onOpenChange={setAiOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>✨ Ringkasan percakapan</DialogTitle>
+            <DialogDescription>
+              AI merangkum hingga 100 pesan terakhir percakapan ini.
+            </DialogDescription>
+          </DialogHeader>
+          {aiBusy ? (
+            <p className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              Merangkum percakapan…
+            </p>
+          ) : aiError ? (
+            <div className="space-y-3">
+              <p className="rounded-xl bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-400">
+                {aiError}
+              </p>
+              <Button variant="outline" className="w-full" onClick={openAiSummary}>
+                Coba lagi
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="chat-scroll max-h-80 overflow-y-auto whitespace-pre-wrap rounded-xl bg-accent/40 p-3 text-sm leading-relaxed">
+                {aiText}
+              </div>
+              <Button
+                variant="outline"
+                className="w-full"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(aiText);
+                  toast.success("Ringkasan disalin");
+                }}
+              >
+                Salin ringkasan
+              </Button>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 

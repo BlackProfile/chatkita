@@ -911,3 +911,18 @@ Tanpa perubahan kode server (versi tetap **v75**), disetujui user ("boleh"):
 - **docker-compose.yml**: volume `chatkita_data` DIPAKAI BERSAMA web & chat (MEDIA_DIR chat = `../../db/media` = folder media web) sehingga media konsisten; `chatdata` untuk kode + chat.db (+WAL persisten); entrypoint chat menyinkronkan kode dari image ke volume agar upgrade aman; `ADMIN_PASSWORD` wajib diisi di `.env` compose.
 - **deploy/**: `chatkita-web.service` & `chatkita-chat.service` (User=chatkita, EnvironmentFile, tanpa `--hot`), `chatkita.env.example`, `Caddyfile` (produksi host, routing `?XTransformPort`), `Caddyfile.docker` (`{$DOMAIN}` → chat:3003/web:3000), entrypoint web & chat, `.dockerignore`.
 - Catatan: Docker tidak tersedia di sandbox → compose & entrypoint tervalidasi sintaks (YAML + `sh -n`) saja; build penuh diuji nanti di VPS.
+
+---
+
+## v76 (Task 93) — Paket kemudahan pengguna: wallpaper per chat + ekspor user + ringkasan AI user
+
+**Permintaan:** user minta "semuanya" dari 16 ide fitur. Riset anti-duplikat menyeluruh menemukan 10+ ide ternyata sudah ada (VN 1,5×/2× v10, terjadwal v22, arsip admin, kode undangan sekali pakai v27, bot auto-reply v39/40, pengingat nudge v40, badge PWA v47, insight v37, AI admin v52, terjemahan v60). Batch pertama = 3 yang benar-benar baru di sisi user.
+
+**Fitur:**
+- **🎨 Wallpaper per percakapan**: menu ⋮ → "Wallpaper chat…" → 7 preset (Bawaan/Emerald/Teal/Pasir/Rosé/Hutan/Grafit) → tersimpan di localStorage `chatkita:wallpaper:<convId>` per perangkat (tanpa server), langsung mengganti latar area chat (inline style meng-override doodle bawaan), persisten lintas reload. Dark preset tetap terbaca karena gelembung berlatar solid.
+- **📤 Ekspor percakapan (user)**: menu ⋮ → "Ekspor percakapan" → event `chat:export` (cek partisipan + kunci PIN admin, cooldown 3 dtk/socket, s.d. 5000 pesan via `MAX_EXPORT_MESSAGES`) → unduh `chatkita-<partner>-<tgl>.txt` berisi header + baris `[tgl jam] Nama: isi` terurut waktu; media direpresentasikan emoji (📷 🎙️ 📎 📊 🩹 📍 👤), pesan terhapus jadi "⛔ pesan dihapus". Diaudit (`chat_export`).
+- **✨ Ringkasan AI (user)**: menu ⋮ → "Ringkas dengan AI" → event `chat:ai_summary` (mirror `admin:ai_summary` v52; 100 pesan terakhir, cooldown 20 dtk/socket, prompt netral user) → dialog dengan loading, pesan error ramah (NO_MESSAGES/RATE_LIMITED/PIN_LOCKED/AI_FAILED + Coba lagi), hasil bullet + tombol "Salin ringkasan". Diaudit (`chat_ai_summary`).
+
+**E2E terverifikasi (agent-browser, gateway :81):** registrasi akun uji via tautan gembok (authSecret saat ini "jawa" — kode lama ditolak server dengan pesan yang benar); Ekspor → blob 185 byte dengan isi header + `[21/09/2026, 04.19] uji-v76: Halo uji v76 ekspor`; Wallpaper Emerald → computedStyle `linear-gradient(160deg, rgb(216,243,230)…)` + localStorage benar + tetap terpasang setelah reload; Ringkas AI → LLM mengembalikan bullet nyata + tombol Salin. DB uji dibersihkan penuh (user/conv/messages/reads/devices/invite), `allowRegistration` dikembalikan ke 0.
+
+**File kunci:** `mini-services/chat-service/index.ts` (bump v76 + chat:export + chat:ai_summary), `src/components/chat/Messenger.tsx` (WALLPAPER_PRESETS + dialog + handler ekspor/AI + 3 item menu ⋮), `src/instrumentation.ts` (rescue-v76), `scripts/verify-integrity.sh` (+21 cek, 3 anchor live v75 → dihapus). Verify **662/662**, lint 0/0.

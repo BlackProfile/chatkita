@@ -322,7 +322,14 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * rahasia authSecret — TIDAK pernah disiarkan ke klien publik, hanya admin
  * yang melihatnya via admin:settings:get/set. Perangkat bersesi tersimpan
  * tetap bisa lanjut; tautan ckl_ (magic link) otomatis membuka gembok. */
-const SERVICE_VERSION = 'v75'
+
+/* v76 (Task 93) — PAKET KEMUDAHAN PENGGUNA: (1) wallpaper per percakapan —
+ * user memilih latar dari 7 preset (localStorage per perangkat, tanpa server);
+ * (2) ekspor percakapan untuk USER (chat:export, s.d. 5000 pesan terurut
+ * waktu, cooldown 3 detik, kunci PIN admin tetap dihormati) → file .txt;
+ * (3) ringkasan AI untuk USER (chat:ai_summary, mirror admin:ai_summary
+ * v52 — cooldown 20 detik per socket, audit) dari menu ⋮ header. */
+const SERVICE_VERSION = 'v76'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -5652,6 +5659,68 @@ io.on('connection', (socket) => {
     })
   )
 
+  /* v76 — ekspor percakapan untuk USER: seluruh pesan (s.d. 5000) sebagai
+   * baris terurut waktu; klien menyusun file .txt. Kunci PIN admin tetap
+   * dihormati; cooldown 3 detik per socket. */
+  socket.on('chat:export', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const lastExport = Number(socket.data.exportLast ?? 0)
+    if (Date.now() - lastExport < 3000) {
+      ack({ ok: false, error: 'RATE_LIMITED' })
+      return
+    }
+    socket.data.exportLast = Date.now()
+    const conversation =
+      typeof data?.conversationId === 'string' ? getConversation(data.conversationId) : null
+    if (!conversation) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    if (!isParticipant(conversation, me)) {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    if (me === ADMIN_ID && isConvLockedForAdmin(socket, conversation)) {
+      ack({ ok: false, error: 'PIN_LOCKED' })
+      return
+    }
+    const rows = db
+      .query(
+        `SELECT m.type, m.content, m.caption, m.file_name, m.created_at, m.deleted_at,
+                u.name AS sender_name
+         FROM messages m JOIN users u ON u.id = m.sender_id
+         WHERE m.conversation_id = ? AND (m.scheduled_at IS NULL OR m.delivered_at IS NOT NULL)
+         ORDER BY m.id ASC LIMIT ?`
+      )
+      .all(conversation.id, MAX_EXPORT_MESSAGES) as Array<{
+      type: string
+      content: string | null
+      caption: string | null
+      file_name: string | null
+      created_at: number
+      deleted_at: number | null
+      sender_name: string | null
+    }>
+    const partner = getPartnerUser(conversation, me)
+    const lines = rows.map((r) => ({
+      sender: r.sender_name ?? '?',
+      type: r.type,
+      text: (r.caption ?? r.content ?? '').slice(0, 2000),
+      fileName: r.file_name ?? null,
+      at: new Date(r.created_at).toISOString(),
+      deleted: r.deleted_at != null,
+    }))
+    audit(
+      'chat_export',
+      `user ${me} mengekspor ${lines.length} pesan dari ${conversation.id.slice(0, 8)}`
+    )
+    ack({ ok: true, partner: partner.name, count: lines.length, lines })
+  }))
+
   // v8 — pagination: load one OLDER history page ("Muat pesan lama").
   socket.on(
     'messages:older',
@@ -7366,6 +7435,57 @@ io.on('connection', (socket) => {
       ack({ ok: true, summary: text })
     })().catch((err) => {
       console.error('ai_summary error:', (err as Error)?.message ?? err)
+      ack({ ok: false, error: 'SERVER_ERROR' })
+    })
+  }))
+
+  /* v76 — AI: ringkasan percakapan untuk USER (mirror admin:ai_summary v52).
+   * Cooldown 20 detik per socket; kunci PIN admin tetap dihormati; audit. */
+  socket.on('chat:ai_summary', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const lastSummary = Number(socket.data.aiSummaryLast ?? 0)
+    if (Date.now() - lastSummary < 20_000) {
+      ack({ ok: false, error: 'RATE_LIMITED' })
+      return
+    }
+    socket.data.aiSummaryLast = Date.now()
+    void (async () => {
+      const cid = typeof data?.conversationId === 'string' ? data.conversationId : ''
+      const conv = cid ? getConversation(cid) : null
+      if (!conv) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      if (!isParticipant(conv, me)) {
+        ack({ ok: false, error: 'FORBIDDEN' })
+        return
+      }
+      if (me === ADMIN_ID && isConvLockedForAdmin(socket, conv)) {
+        ack({ ok: false, error: 'PIN_LOCKED' })
+        return
+      }
+      const lines = recentAiLines(cid, 100)
+      if (lines.length === 0) {
+        ack({ ok: false, error: 'NO_MESSAGES' })
+        return
+      }
+      const text = await llmComplete(
+        'Kamu asisten ringkasan percakapan ChatKita. Ringkas dalam Bahasa Indonesia, format bullet singkat: poin utama pembicaraan, info penting, dan tindak lanjut yang disarankan. Maksimal 8 bullet, tanpa pembuka.',
+        `Ringkas percakapan ini:\n\n${lines.join('\n')}`,
+        1500
+      )
+      if (!text) {
+        ack({ ok: false, error: 'AI_FAILED' })
+        return
+      }
+      audit('chat_ai_summary', `ringkasan AI percakapan ${cid.slice(0, 8)} dibuat oleh ${me}`)
+      ack({ ok: true, summary: text })
+    })().catch((err) => {
+      console.error('chat_ai_summary error:', (err as Error)?.message ?? err)
       ack({ ok: false, error: 'SERVER_ERROR' })
     })
   }))
