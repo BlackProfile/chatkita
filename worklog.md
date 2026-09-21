@@ -1927,3 +1927,20 @@ Stage Summary:
 - Rilis v76 (Task 93): 3 fitur kemudahan pengguna — wallpaper per percakapan (7 preset, per perangkat, persisten), ekspor percakapan user (.txt terurut waktu, s.d. 5000 pesan), ringkasan AI untuk user (dialog + salin, cooldown 20 dtk). Kunci PIN admin & audit tetap dihormati.
 - Riset anti-duplikat menyeluruh menyelamatkan banyak kerja: 10+ ide ternyata sudah terimplementasi di versi lama — backlog diperbarui: sisa = grup chat, WebRTC, thread, remind-per-pesan, kunci chat user, translate user.
 - Verify 662/662, lint 0/0, banner v76, E2E 3/3 lolos, DB bersih tanpa artefak.
+
+---
+Task ID: 93-b (lanjutan rilis)
+Agent: Z.ai (main)
+Task: Penyelesaian rilis v76 — insiden GitHub Push Protection (PAT bocor di chat.db)
+
+Work Log:
+- Push v76 awal DITOLAK GitHub (GH013 GITHUB PUSH PROTECTION): `mini-services/chat-service/chat.db` mengandung string terdeteksi sebagai GitHub Personal Access Token (format ghp_…).
+- Pelacakan: token ada di `messages` id 384 (percakapan ce7de494, sender 3db19b70 — akun nyata), konten "username: BlackProfile token: ghp_…" — seseorang menempelkan kredensial GitHub-nya di dalam chat. TIDAK ada salinan di edit_history/deleted_content/kolom lain (total 1 baris).
+- Remediasi: UPDATE content → "username: BlackProfile token: [DIHAPUS — keamanan]" (teks pesan lain dipertahankan), lalu `PRAGMA wal_checkpoint(TRUNCATE)` + `VACUUM` (buang halaman bebas yang masih memuat byte token), verifikasi `grep -acE "ghp_…"` = 0 → FILE BERSIH.
+- Penataan ulang git: commit lama (6e118af duplikat Task 92, 99965ae uuid, 38cc0d0 v76, merge 811234c) memuat DB kotor → `git reset --soft origin/main` (remote masih 402aab3 = Task 92 bersih) → `git add -A` (chat.db bersih + seluruh perubahan v76) → SATU commit bersih `0d932d9` → push `main` SUKSES; tag `rescue-v76` dipindah ke 0d932d9 & push tag SUKSES (penolakan tag sebelumnya juga karena rantai commit kotor).
+- Verifikasi akhir: main == origin/main; verify 662/662; banner v76; port 3000+3003 hidup.
+- ⚠️ PESAN KE USER (wajib disampaikan): token ghp_… itu HARUS di-REVOKE di GitHub (Settings → Developer settings → Personal access tokens) karena sudah pernah terekspos di chat; buat token baru bila perlu. Tautan gembok aktif saat ini memakai authSecret "jawa" (diganti sendiri oleh user — bukan kita-rahasia lagi).
+
+Stage Summary:
+- v76 tuntas & ter-push (0d932d9, tag rescue-v76). Insiden push-protection tuntas: sumber = PAT asli ditempel user di pesan chat; diredaksi + vacuum; disarankan revoke.
+- Pola baru utk sesi berikut: bila push ditolak GH013 PUSH PROTECTION → grep -a chat.db cari pola token → redaksi baris data (bukan kode) → wal_checkpoint(TRUNCATE)+VACUUM → git reset --soft origin/main → commit tunggal bersih → push.
