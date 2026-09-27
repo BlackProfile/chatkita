@@ -133,6 +133,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -186,6 +187,9 @@ import {
   type DashboardUserRow,
   type ExportAck,
   type GhostAck,
+  type GroupCreateAck,
+  type GroupMemberRow,
+  type GroupMembersAck,
   type HistoryAck,
   type MessageAck,
   type MessageUpdatePayload,
@@ -1327,6 +1331,135 @@ export function AdminPanel() {
     setEditing(null);
     setUnreadDividerId(null);
   };
+
+  /* ---------------- v79 — GRUP (hanya admin membuat & mengundang) -------- */
+  const [groupCreateOpen, setGroupCreateOpen] = useState(false);
+  const [groupName, setGroupName] = useState("");
+  const [groupSel, setGroupSel] = useState<string[]>([]);
+  const [groupBusy, setGroupBusy] = useState(false);
+  const [groupManageOpen, setGroupManageOpen] = useState(false);
+  const [groupMembers, setGroupMembers] = useState<GroupMemberRow[]>([]);
+  const [groupMembersBusy, setGroupMembersBusy] = useState(false);
+  const [groupRenameVal, setGroupRenameVal] = useState("");
+  const [groupManageBusy, setGroupManageBusy] = useState(false);
+
+  /** Kandidat anggota = semua percakapan direct (tiap user punya chat admin). */
+  const groupCandidates = useMemo(
+    () => conversations.filter((c) => !c.isGroup && c.partner.id !== ADMIN_ID),
+    [conversations]
+  );
+
+  const fetchGroupMembers = (groupId: string) => {
+    setGroupMembersBusy(true);
+    socketRef.current?.emit(
+      "admin:group_members",
+      { groupId },
+      (res: AckOf<GroupMembersAck>) => {
+        setGroupMembersBusy(false);
+        if (res?.ok) setGroupMembers(res.members);
+      }
+    );
+  };
+
+  const openGroupManage = () => {
+    const conv = activeConversation;
+    if (!conv?.isGroup) return;
+    setGroupRenameVal(conv.partner.name);
+    setGroupManageOpen(true);
+    fetchGroupMembers(conv.partner.id);
+  };
+
+  const handleGroupCreate = () => {
+    const name = groupName.trim();
+    if (!name || groupBusy) return;
+    setGroupBusy(true);
+    socketRef.current?.emit(
+      "admin:group_create",
+      { name, memberIds: groupSel },
+      (res: AckOf<GroupCreateAck>) => {
+        setGroupBusy(false);
+        if (!res?.ok) {
+          showMenuNotice("Gagal membuat grup.");
+          return;
+        }
+        setGroupCreateOpen(false);
+        setGroupName("");
+        setGroupSel([]);
+        showMenuNotice(`Grup "${name}" dibuat ✓`);
+        handleSelectConversation(res.conversationId);
+      }
+    );
+  };
+
+  const handleGroupToggleMember = (userId: string) =>
+    setGroupSel((prev) =>
+      prev.includes(userId) ? prev.filter((x) => x !== userId) : [...prev, userId]
+    );
+
+  const handleGroupAddMember = (userId: string) => {
+    const conv = activeConversation;
+    if (!conv?.isGroup || groupManageBusy) return;
+    setGroupManageBusy(true);
+    socketRef.current?.emit(
+      "admin:group_add_member",
+      { groupId: conv.partner.id, userId },
+      (res: AckOf<{ ok: true }>) => {
+        setGroupManageBusy(false);
+        if (res?.ok) fetchGroupMembers(conv.partner.id);
+        else showMenuNotice("Gagal menambah anggota.");
+      }
+    );
+  };
+
+  const handleGroupRemoveMember = (userId: string) => {
+    const conv = activeConversation;
+    if (!conv?.isGroup || groupManageBusy) return;
+    setGroupManageBusy(true);
+    socketRef.current?.emit(
+      "admin:group_remove_member",
+      { groupId: conv.partner.id, userId },
+      (res: AckOf<{ ok: true }>) => {
+        setGroupManageBusy(false);
+        if (res?.ok) fetchGroupMembers(conv.partner.id);
+        else showMenuNotice("Gagal mengeluarkan anggota.");
+      }
+    );
+  };
+
+  const handleGroupRename = () => {
+    const conv = activeConversation;
+    const name = groupRenameVal.trim();
+    if (!conv?.isGroup || !name || groupManageBusy) return;
+    setGroupManageBusy(true);
+    socketRef.current?.emit(
+      "admin:group_rename",
+      { groupId: conv.partner.id, name },
+      (res: AckOf<{ ok: true }>) => {
+        setGroupManageBusy(false);
+        if (res?.ok) showMenuNotice("Nama grup diperbarui ✓");
+        else showMenuNotice("Gagal mengganti nama grup.");
+      }
+    );
+  };
+
+  const handleGroupDelete = () => {
+    const conv = activeConversation;
+    if (!conv?.isGroup || groupManageBusy) return;
+    setGroupManageBusy(true);
+    socketRef.current?.emit(
+      "admin:group_delete",
+      { groupId: conv.partner.id },
+      (res: AckOf<{ ok: true }>) => {
+        setGroupManageBusy(false);
+        setGroupManageOpen(false);
+        if (res?.ok) {
+          showMenuNotice("Grup dihapus");
+          handleBackToList();
+        } else showMenuNotice("Gagal menghapus grup.");
+      }
+    );
+  };
+
 
   /** v40 — setujui/tolak pesan yang menunggu persetujuan (moderasi pra-kirim). */
   const handleModerate = (messageId: number, action: "approve" | "reject") => {
@@ -2819,6 +2952,15 @@ export function AdminPanel() {
                     </button>
                   ))}
                 </div>
+                {/* v79 — tombol buat grup (hanya admin). */}
+                <Button
+                  variant="outline"
+                  className="mt-2 h-9 w-full justify-start border-emerald-600/40 text-emerald-700 hover:bg-emerald-600/10 dark:text-emerald-400"
+                  onClick={() => setGroupCreateOpen(true)}
+                >
+                  <Plus className="size-4" aria-hidden="true" />
+                  Buat grup
+                </Button>
               </div>
 
               {/* Conversation list — every user, newest activity first */}
@@ -2982,6 +3124,19 @@ export function AdminPanel() {
                     ) : null}
                   </div>
                   <div className="flex shrink-0 items-center gap-0.5">
+                    {/* v79 — kelola grup (hanya utk percakapan grup). */}
+                    {activeConversation.isGroup ? (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-9 text-emerald-700 hover:text-emerald-800 dark:text-emerald-400"
+                        aria-label="Kelola grup"
+                        title="Kelola grup"
+                        onClick={openGroupManage}
+                      >
+                        <Users className="size-4" aria-hidden="true" />
+                      </Button>
+                    ) : null}
                     <Button
                       variant="ghost"
                       size="icon"
@@ -3349,8 +3504,20 @@ export function AdminPanel() {
                           mediaExpired={!!m.mediaExpiredAt}
                           dataSaver={dataSaver}
                           read={m.senderId === ADMIN_ID && m.id <= activeConversation.partnerLastReadId}
+                          /* v79 — label nama pengirim di grup. */
+                          senderLabel={
+                            activeConversation.isGroup &&
+                            m.senderId !== ADMIN_ID &&
+                            m.type !== "system"
+                              ? m.senderName ?? activeConversation.partner.name
+                              : undefined
+                          }
                           replyTo={m.replyTo}
-                          replyAuthor={m.replyTo?.senderId === ADMIN_ID ? "Anda" : activeConversation.partner.name}
+                          replyAuthor={
+                            m.replyTo?.senderId === ADMIN_ID
+                              ? "Anda"
+                              : m.replyTo?.senderName ?? activeConversation.partner.name
+                          }
                           durationMs={m.durationMs}
                           transcript={m.transcript}
                           reactions={m.reactions}
@@ -4932,6 +5099,185 @@ export function AdminPanel() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* v79 — dialog buat grup (hanya admin) */}
+      <Dialog open={groupCreateOpen} onOpenChange={setGroupCreateOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Users className="size-4 text-emerald-600" aria-hidden="true" />
+              Buat grup
+            </DialogTitle>
+            <DialogDescription>
+              Anda menjadi pemilik grup. Pilih user yang diundang — anggota bisa
+              ditambah/dikeluarkan kapan saja.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="group-name">Nama grup</Label>
+              <Input
+                id="group-name"
+                value={groupName}
+                maxLength={60}
+                placeholder="cth. Tim Marketing"
+                onChange={(e) => setGroupName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Undang user ({groupSel.length} dipilih)</Label>
+              <div className="chat-scroll max-h-56 space-y-1 overflow-y-auto rounded-xl border border-border p-2">
+                {groupCandidates.length === 0 ? (
+                  <p className="py-4 text-center text-sm text-muted-foreground">
+                    Belum ada user terdaftar.
+                  </p>
+                ) : (
+                  groupCandidates.map((c) => (
+                    <label
+                      key={c.partner.id}
+                      className="flex cursor-pointer items-center gap-2 rounded-lg p-2 text-sm hover:bg-accent"
+                    >
+                      <Checkbox
+                        checked={groupSel.includes(c.partner.id)}
+                        onCheckedChange={() => handleGroupToggleMember(c.partner.id)}
+                        aria-label={`Undang ${c.partner.name}`}
+                      />
+                      <span className="truncate">{c.partner.name}</span>
+                      {c.partner.online ? (
+                        <span className="ml-auto text-[10px] text-emerald-600">online</span>
+                      ) : null}
+                    </label>
+                  ))
+                )}
+              </div>
+            </div>
+            <Button
+              className="w-full"
+              disabled={!groupName.trim() || groupBusy}
+              onClick={handleGroupCreate}
+            >
+              {groupBusy ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Plus className="size-4" aria-hidden="true" />
+              )}
+              Buat grup
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* v79 — dialog kelola grup */}
+      <Dialog open={groupManageOpen} onOpenChange={setGroupManageOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Users className="size-4 text-emerald-600" aria-hidden="true" />
+              Kelola grup
+              <span className="truncate text-sm font-normal text-muted-foreground">
+                {activeConversation?.partner.name}
+              </span>
+            </DialogTitle>
+            <DialogDescription>
+              Tambah/keluarkan anggota, ganti nama, atau hapus grup.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {/* anggota */}
+            <div className="space-y-1.5">
+              <Label>Anggota ({groupMembers.length})</Label>
+              <div className="chat-scroll max-h-52 space-y-1 overflow-y-auto rounded-xl border border-border p-2">
+                {groupMembersBusy ? (
+                  <p className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                    Memuat…
+                  </p>
+                ) : (
+                  groupMembers.map((m) => (
+                    <div
+                      key={m.id}
+                      className="flex items-center gap-2 rounded-lg p-2 text-sm"
+                    >
+                      {m.role === "owner" ? (
+                        <Badge variant="secondary" className="shrink-0">
+                          pemilik
+                        </Badge>
+                      ) : null}
+                      <span className="truncate">{m.name}</span>
+                      {m.id !== ADMIN_ID ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="ml-auto h-7 px-2 text-xs text-destructive hover:text-destructive"
+                          disabled={groupManageBusy}
+                          onClick={() => handleGroupRemoveMember(m.id)}
+                        >
+                          Keluarkan
+                        </Button>
+                      ) : null}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+            {/* undang anggota baru */}
+            <div className="space-y-1.5">
+              <Label>Undang user</Label>
+              <div className="chat-scroll flex max-h-36 flex-wrap gap-1.5 overflow-y-auto">
+                {groupCandidates
+                  .filter((c) => !groupMembers.some((m) => m.id === c.partner.id))
+                  .map((c) => (
+                    <Button
+                      key={c.partner.id}
+                      variant="outline"
+                      size="sm"
+                      className="h-7 rounded-full px-2.5 text-xs"
+                      disabled={groupManageBusy}
+                      onClick={() => handleGroupAddMember(c.partner.id)}
+                    >
+                      <Plus className="size-3" aria-hidden="true" />
+                      {c.partner.name}
+                    </Button>
+                  ))}
+              </div>
+            </div>
+            {/* ganti nama */}
+            <div className="space-y-1.5 border-t pt-3">
+              <Label htmlFor="group-rename">Nama grup</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="group-rename"
+                  value={groupRenameVal}
+                  maxLength={60}
+                  onChange={(e) => setGroupRenameVal(e.target.value)}
+                />
+                <Button
+                  variant="outline"
+                  disabled={!groupRenameVal.trim() || groupManageBusy}
+                  onClick={handleGroupRename}
+                >
+                  Simpan
+                </Button>
+              </div>
+            </div>
+            <Button
+              variant="destructive"
+              className="w-full"
+              disabled={groupManageBusy}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Hapus grup ini beserta seluruh pesannya? Tindakan ini tidak bisa dibatalkan."
+                  )
+                )
+                  handleGroupDelete();
+              }}
+            >
+              Hapus grup
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* v22 — toast sonner (forward / terjadwal / bintang) */}
       <Toaster position="top-center" richColors closeButton />

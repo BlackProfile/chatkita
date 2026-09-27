@@ -112,6 +112,8 @@ export interface ReplyPreview {
   senderId: string;
   snippet: string;
   type: string;
+  /** v79 — nama tampil pengirim pesan yang di-quote (grup). */
+  senderName?: string;
 }
 
 /**
@@ -139,6 +141,8 @@ export interface ChatMessage {
   replyTo?: ReplyPreview;
   /** v78 — jumlah balasan langsung ke pesan ini (chip utas). */
   replyCount?: number;
+  /** v79 — nama tampil pengirim (hanya diisi utk percakapan grup). */
+  senderName?: string;
   /** Voice notes: recording length in ms. */
   durationMs?: number;
   /** Voice notes: AI transcription (may arrive later via message:updated). */
@@ -220,6 +224,8 @@ export type PartnerInfo = ChatUser & {
 export interface ConversationOverview {
   id: string;
   partner: PartnerInfo;
+  /** v79 — true utk percakapan grup (partner = grup sintetis). */
+  isGroup?: boolean;
   lastMessage: {
     id: number;
     senderId: string;
@@ -2471,4 +2477,27 @@ export interface ThreadOpenAck {
   ok: true;
   root: ChatMessage;
   replies: ChatMessage[];
+}
+
+/* ------------------------------------------------------------------ */
+/* v79 — grup chat (hanya admin membuat & mengundang)                  */
+/* ------------------------------------------------------------------ */
+
+/** v79 — anggota grup (admin:group_members). */
+export interface GroupMemberRow {
+  id: string;
+  name: string;
+  role: "owner" | "member";
+  joinedAt: string;
+}
+
+export interface GroupMembersAck {
+  ok: true;
+  members: GroupMemberRow[];
+}
+
+/** v79 — ack admin:group_create. */
+export interface GroupCreateAck {
+  ok: true;
+  conversationId: string;
 }

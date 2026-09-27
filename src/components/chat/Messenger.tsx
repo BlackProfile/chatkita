@@ -882,6 +882,11 @@ export function Messenger() {
       ? list.map((m) => ({ ...m, createdAt: shiftIso(m.createdAt) }))
       : list;
 
+  /* v79 — loadHistory level komponen: delegasi via ref agar bisa dipanggil
+   * dari handler JSX (pindah percakapan, dialog pengingat) di luar efek. */
+  const loadHistoryRef = useRef<(id: string) => void>(() => {});
+  const loadHistory = useCallback((id: string) => loadHistoryRef.current(id), []);
+
   /* ---------------------------------------------------------------- */
   /* Socket lifecycle (recreated on logout via `epoch`)                */
   /* ---------------------------------------------------------------- */
@@ -890,6 +895,7 @@ export function Messenger() {
     // immediately. State is set inside the connect ack.
     meRef.current = readStoredUser();
 
+    /* v79 — jembatan: implementasi terbaru loadHistory di-share ke luar efek. */
     const socket = createChatSocket();
     socketRef.current = socket;
 
@@ -909,6 +915,9 @@ export function Messenger() {
         }
       );
     };
+    /* v79 — jembatan utk pemanggil di luar efek ini (pindah percakapan,
+     * dialog pengingat) tanpa menduplikasi logika. */
+    loadHistoryRef.current = loadHistory;
 
     socket.on("connect", () => {
       setConnected(true);
@@ -3423,6 +3432,41 @@ export function Messenger() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-60">
+                {/* v79 — pindah percakapan (muncul bila user punya >1 chat). */}
+                {me && convList.length > 1 ? (
+                  <>
+                    <DropdownMenuLabel>Percakapan saya</DropdownMenuLabel>
+                    {convList.map((c) => (
+                      <DropdownMenuItem
+                        key={c.id}
+                        onClick={() => {
+                          if (c.id === conversationIdRef.current) return;
+                          conversationIdRef.current = c.id;
+                          setConversationId(c.id);
+                          setMessages([]);
+                          setPartner(c.partner);
+                          setNewCount(0);
+                          setUnread(0);
+                          loadHistory(c.id);
+                        }}
+                        className={cn(c.id === conversationId && "bg-accent")}
+                      >
+                        {c.isGroup ? (
+                          <Layers className="mr-2 size-4" aria-hidden="true" />
+                        ) : (
+                          <UserRound className="mr-2 size-4" aria-hidden="true" />
+                        )}
+                        <span className="flex-1 truncate">{c.partner.name}</span>
+                        {c.unread > 0 ? (
+                          <span className="ml-1 flex size-5 items-center justify-center rounded-full bg-emerald-600 text-[10px] font-semibold text-white">
+                            {c.unread > 9 ? "9+" : c.unread}
+                          </span>
+                        ) : null}
+                      </DropdownMenuItem>
+                    ))}
+                    <DropdownMenuSeparator />
+                  </>
+                ) : null}
                 <DropdownMenuItem
                   onClick={() => {
                     setStarredOpen(true);
@@ -3740,7 +3784,11 @@ export function Messenger() {
                   dataSaver={dataSaver}
                   read={m.senderId === me.userId && m.id <= adminReadId}
                   replyTo={m.replyTo}
-                  replyAuthor={m.replyTo?.senderId === me.userId ? "Anda" : partner?.name}
+                  replyAuthor={
+                    m.replyTo?.senderId === me.userId
+                      ? "Anda"
+                      : m.replyTo?.senderName ?? partner?.name
+                  }
                   durationMs={m.durationMs}
                   transcript={m.transcript}
                   reactions={m.reactions}
@@ -3767,6 +3815,12 @@ export function Messenger() {
                   replyCount={(m.replyCount ?? 0) + (threadBumps[m.id] ?? 0) || undefined}
                   onOpenThread={
                     !m.deletedAt && m.type !== "system" ? () => openThread(m) : undefined
+                  }
+                  /* v79 — label nama pengirim di grup. */
+                  senderLabel={
+                    m.senderId !== me.userId && m.type !== "system"
+                      ? m.senderName ?? partner?.name
+                      : undefined
                   }
                   onToggleStar={
                     !m.deletedAt && m.type !== "system" ? () => toggleStar(m.id) : undefined
@@ -5034,7 +5088,9 @@ export function Messenger() {
                 threadData.replies.map((r) => (
                   <div key={r.id} className="rounded-xl border border-border p-3">
                     <p className="text-xs font-medium text-muted-foreground">
-                      {r.senderId === me?.userId ? "Anda" : partner?.name ?? r.senderId}
+                      {r.senderId === me?.userId
+                        ? "Anda"
+                        : r.senderName ?? partner?.name ?? r.senderId}
                       {" · "}
                       {formatChatTime(r.createdAt)}
                       {r.senderId !== me?.userId && r.senderId === ADMIN_ID ? " (Admin)" : ""}

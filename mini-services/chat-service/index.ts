@@ -338,8 +338,11 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * dan sweep tiap 10 detik menyerahkan `reminder:due` ke pemilik reminder;
  * (3) v78 UTAS balasan — history kini membawa replyCount (hitungan balasan
  * langsung per pesan induk, query agregat per batch) dan event `thread:open`
- * mengembalikan pesan akar + seluruh balasan langsung (ASC, s.d. 100). */
-const SERVICE_VERSION = 'v78'
+ * mengembalikan pesan akar + seluruh balasan langsung (ASC, s.d. 100);
+ * (4) v79 GRUP — hanya admin membuat grup & mengundang user (tabel groups +
+ * group_members, conversations.group_id, fan-out/read/typing/history/daftar
+ * percakapan group-aware, senderName per pesan, 6 event admin:group_*). */
+const SERVICE_VERSION = 'v79'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -587,6 +590,29 @@ db.run(
 db.run(
   'CREATE INDEX IF NOT EXISTS idx_reminders_user ON message_reminders(user_id, message_id, done)'
 )
+/* v79 — GRUP CHAT: hanya ADMIN yang bisa membuat grup & mengundang user
+ * (arahan eksplisit user). Admin selalu pemilik (role owner); anggota lain
+ * role member. Percakapan grup = baris conversations dgn group_id terisi
+ * (user_a_id = 'admin', user_b_id = NULL) supaya kompatibel dgn query lama. */
+db.run(`
+  CREATE TABLE IF NOT EXISTS groups (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'admin',
+    created_at INTEGER NOT NULL
+  )
+`)
+db.run(`
+  CREATE TABLE IF NOT EXISTS group_members (
+    group_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    joined_at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, user_id)
+  )
+`)
+db.run('CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id)')
+addColumn('conversations', 'group_id', 'TEXT')
 /* v27 — perangkat terikat (1 perangkat maks 1 akun, append-only;
  * admin bisa melepas lewat dashboard). */
 db.run(`
@@ -738,6 +764,8 @@ interface ConversationRow {
   pinned_message_id?: number | null
   /* v74 — TTL media percakapan (jam; 0/NULL = ikuti pengaturan global). */
   media_ttl_hours?: number | null
+  /* v79 — grup: terisi utk percakapan grup (user_b_id = NULL). */
+  group_id?: string | null
 }
 
 /* v27 — perangkat terikat 1 perangkat ↔ 1 akun. */
@@ -827,6 +855,8 @@ interface ChatMessageApi {
   replyTo?: { id: number; senderId: string; snippet: string; type: string }
   /** v78 — jumlah balasan langsung ke pesan ini (utas). */
   replyCount?: number
+  /** v79 — nama tampil pengirim (hanya diisi utk percakapan grup). */
+  senderName?: string
   durationMs?: number
   transcript?: string
   deletedAt?: string
@@ -873,6 +903,8 @@ interface PartnerInfoApi {
 interface ConversationOverviewApi {
   id: string
   partner: PartnerInfoApi
+  /** v79 — true utk percakapan grup. */
+  isGroup?: boolean
   lastMessage:
     | {
         id: number
@@ -1843,10 +1875,27 @@ const attachReplyPreviews = (rows: MessageRow[], messages: ChatMessageApi[]) => 
     Pick<MessageRow, 'id' | 'sender_id' | 'content' | 'type' | 'deleted_at' | 'file_name' | 'media_expired_at'>
   >
   const byId = new Map(originals.map((o) => [o.id, o]))
+  /* v79 — nama pengirim pesan yang di-quote (utk label balasan di grup). */
+  const originIds = [...new Set(originals.map((o) => o.sender_id))]
+  const nameByOrigin = new Map<string, string>()
+  if (originIds.length > 0) {
+    const phN = originIds.map(() => '?').join(',')
+    const urows = db
+      .query(`SELECT id, name FROM users WHERE id IN (${phN})`)
+      .all(...originIds) as Array<{ id: string; name: string }>
+    for (const u of urows) nameByOrigin.set(u.id, u.name)
+  }
   for (const m of messages) {
     if (!m.replyToId) continue
     const o = byId.get(m.replyToId)
-    if (o) m.replyTo = { id: o.id, senderId: o.sender_id, snippet: snippetOf(o), type: o.type ?? 'text' }
+    if (o)
+      m.replyTo = {
+        id: o.id,
+        senderId: o.sender_id,
+        snippet: snippetOf(o),
+        type: o.type ?? 'text',
+        ...(nameByOrigin.get(o.sender_id) ? { senderName: nameByOrigin.get(o.sender_id) } : {}),
+      }
   }
   /* v78 — hitung balasan langsung utk SETIAP pesan di batch (chip utas
    * tampil pada pesan induk): reply_to_id IN (ids batch ini). */
@@ -2092,10 +2141,62 @@ const ensureConversationWithAdmin = (userId: string): ConversationRow => {
 const getPartnerId = (conversation: ConversationRow, userId: string) =>
   conversation.user_a_id === userId ? conversation.user_b_id : conversation.user_a_id
 
-const isParticipant = (conversation: ConversationRow, userId: string) =>
-  conversation.user_a_id === userId || conversation.user_b_id === userId
+const isParticipant = (conversation: ConversationRow, userId: string) => {
+  /* v79 — percakapan grup: peserta = anggota group_members (admin selalu
+   * dianggap peserta — dia pemilik semua grup). */
+  if (conversation.group_id) {
+    if (userId === ADMIN_ID) return true
+    return (
+      !!db
+        .query('SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?')
+        .get(conversation.group_id, userId)
+    )
+  }
+  return conversation.user_a_id === userId || conversation.user_b_id === userId
+}
+
+/* v79 — helper grup. */
+interface GroupRow {
+  id: string
+  name: string
+  created_by: string
+  created_at: number
+}
+const findGroup = (id: string): GroupRow | null =>
+  (db.query('SELECT * FROM groups WHERE id = ?').get(id) as GroupRow | null) ?? null
+const groupMemberIds = (groupId: string): string[] =>
+  (
+    db
+      .query('SELECT user_id FROM group_members WHERE group_id = ? ORDER BY joined_at ASC')
+      .all(groupId) as Array<{ user_id: string }>
+  ).map((r) => r.user_id)
+/** Baris user sintetis utk percakapan grup (nama grup sbg "partner"). */
+const syntheticGroupUser = (groupId: string): UserRow => ({
+  id: groupId,
+  name: findGroup(groupId)?.name ?? 'Grup',
+  role: 'group',
+  password_hash: null,
+  created_at: 0,
+  last_seen_at: 0,
+}) as unknown as UserRow
+/** Bacaan paling awal di antara anggota grup (✓✓ grup = semua sudah baca).
+ * Admin dikecualikan — ✓✓ utk pesan user mengikuti bacaan admin di jalur
+ * direct; di grup yang relevan adalah bacaan ANGGOTA. */
+const groupMinMemberRead = (conversationId: string, groupId: string): number => {
+  const members = groupMemberIds(groupId).filter((m) => m !== ADMIN_ID)
+  if (members.length === 0) return 0
+  const ph = members.map(() => '?').join(',')
+  const row = db
+    .query(
+      `SELECT MIN(last_read_message_id) AS v FROM reads WHERE conversation_id = ? AND user_id IN (${ph})`
+    )
+    .get(conversationId, ...members) as { v: number | null }
+  return row?.v ?? 0
+}
 
 const getPartnerUser = (conversation: ConversationRow, userId: string): UserRow => {
+  /* v79 — percakapan grup: "partner" = grup itu sendiri (baris sintetis). */
+  if (conversation.group_id) return syntheticGroupUser(conversation.group_id)
   const partner = findUserById(getPartnerId(conversation, userId))
   if (!partner) throw new Error(`Partner of conversation ${conversation.id} missing`)
   return partner
@@ -2171,6 +2272,26 @@ const getMessagesPage = (
   })
   attachReplyPreviews(rows, messages)
   attachReactions(rows, messages)
+  /* v79 — di percakapan grup, klien butuh NAMA PENGIRIM tiap pesan. */
+  if (viewerId) {
+    const convRow79 = db
+      .query('SELECT group_id FROM conversations WHERE id = ?')
+      .get(conversationId) as { group_id?: string | null } | undefined
+    if (convRow79?.group_id) {
+      const senderIds = [...new Set(rows.map((r) => r.sender_id))]
+      const ph79 = senderIds.map(() => '?').join(',')
+      const users79 = senderIds.length
+        ? (db
+            .query(`SELECT id, name FROM users WHERE id IN (${ph79})`)
+            .all(...senderIds) as Array<{ id: string; name: string }>)
+        : []
+      const name79 = new Map(users79.map((u) => [u.id, u.name]))
+      for (let i = 0; i < messages.length; i++) {
+        const nm = name79.get(rows[i].sender_id)
+        if (nm) messages[i].senderName = nm
+      }
+    }
+  }
   return { messages, hasMore }
 }
 
@@ -2214,6 +2335,15 @@ const broadcastRead = (conversation: ConversationRow, readerId: string, target: 
   // dikabarkan ke siapa pun (semua user selalu melihat ✓1).
   if (readerId === ADMIN_ID && globalIllusions().adminInvisible === 1) return
   const payload = { conversationId: conversation.id, userId: readerId, lastReadMessageId: target }
+  /* v79 — grup: kabarkan bacaan ke SEMUA anggota + room admins. */
+  if (conversation.group_id) {
+    for (const uid of groupMemberIds(conversation.group_id)) {
+      if (uid === readerId) continue
+      io.to(`user:${uid}`).emit('read:update', payload)
+    }
+    if (readerId !== ADMIN_ID) io.to('admins').emit('read:update', payload)
+    return
+  }
   if (readerId === ADMIN_ID) {
     io.to(`user:${getPartnerId(conversation, readerId)}`).emit('read:update', payload)
   } else {
@@ -2266,6 +2396,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         c.archived_at,
         c.pinned_message_id,
         c.media_ttl_hours,
+        0 AS is_group,
         CASE WHEN c.user_a_id = $me THEN c.user_b_id ELSE c.user_a_id END AS partner_id,
         p.name AS partner_name,
         p.last_seen_at AS partner_last_seen,
@@ -2312,7 +2443,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
         ON pm.id = c.pinned_message_id
       LEFT JOIN users pu
         ON pu.id = pm.sender_id
-      WHERE c.user_a_id = $me OR c.user_b_id = $me
+      WHERE (c.user_a_id = $me OR c.user_b_id = $me) AND c.group_id IS NULL
       ORDER BY c.last_message_at DESC`
     )
     .all({ $me: userId }) as Array<{
@@ -2321,6 +2452,7 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     archived_at: number | null
     pinned_message_id: number | null
     media_ttl_hours: number | null
+    is_group: number
     partner_id: string
     partner_name: string
     partner_last_seen: number
@@ -2344,6 +2476,104 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     unread: number
   }>
 
+  /* v79 — percakapan GRUP yang mengikutsertakan $me (admin melihat semua).
+   * Alias kolom dibuat sama dgn query direct agar satu peta dipakai bersama. */
+  const groupRows = db
+    .query(
+      `SELECT
+        c.id,
+        c.last_message_at,
+        c.archived_at,
+        c.pinned_message_id,
+        c.media_ttl_hours,
+        1 AS is_group,
+        c.group_id AS partner_id,
+        g.name AS partner_name,
+        0 AS partner_last_seen,
+        lm.id AS last_id,
+        lm.sender_id AS last_sender,
+        lm.content AS last_content,
+        lm.created_at AS last_at,
+        lm.type AS last_type,
+        lm.deleted_at AS last_deleted,
+        lm.file_name AS last_file_name,
+        lm.media_expired_at AS last_media_expired,
+        lm.caption AS last_caption,
+        pm.id AS pin_id,
+        pm.sender_id AS pin_sender,
+        pm.content AS pin_content,
+        pm.type AS pin_type,
+        pm.deleted_at AS pin_deleted,
+        pm.file_name AS pin_file_name,
+        pu.name AS pin_sender_name,
+        (CASE WHEN $me = 'admin' THEN
+          (SELECT MIN(r.last_read_message_id) FROM reads r
+            WHERE r.conversation_id = c.id AND r.user_id IN
+              (SELECT user_id FROM group_members WHERE group_id = c.group_id AND user_id != 'admin'))
+         ELSE
+          (SELECT r.last_read_message_id FROM reads r
+            WHERE r.conversation_id = c.id AND r.user_id = 'admin')
+        END) AS partner_read,
+        (
+          SELECT COUNT(*) FROM messages m
+          WHERE m.conversation_id = c.id
+            AND m.sender_id != $me
+            AND m.deleted_at IS NULL
+            AND (m.scheduled_at IS NULL OR m.delivered_at IS NOT NULL)
+            AND m.id > COALESCE(
+              (SELECT r.last_read_message_id FROM reads r
+               WHERE r.conversation_id = c.id AND r.user_id = $me), 0)
+        ) AS unread
+      FROM conversations c
+      JOIN groups g ON g.id = c.group_id
+      LEFT JOIN messages lm
+        ON lm.id = (SELECT m2.id FROM messages m2
+                    WHERE m2.conversation_id = c.id
+                      AND (m2.scheduled_at IS NULL OR m2.delivered_at IS NOT NULL)
+                      AND ($me = 'admin' OR m2.pending IS NULL OR m2.pending = 0)
+                    ORDER BY m2.id DESC LIMIT 1)
+      LEFT JOIN messages pm
+        ON pm.id = c.pinned_message_id
+      LEFT JOIN users pu
+        ON pu.id = pm.sender_id
+      WHERE c.group_id IS NOT NULL
+        AND ($me = 'admin' OR EXISTS (
+          SELECT 1 FROM group_members gm WHERE gm.group_id = c.group_id AND gm.user_id = $me))
+      ORDER BY c.last_message_at DESC`
+    )
+    .all({ $me: userId }) as Array<{
+    id: string
+    last_message_at: number
+    archived_at: number | null
+    pinned_message_id: number | null
+    media_ttl_hours: number | null
+    is_group: number
+    partner_id: string
+    partner_name: string
+    partner_last_seen: number
+    last_id: number | null
+    last_sender: string | null
+    last_content: string | null
+    last_at: number | null
+    last_type: string | null
+    last_deleted: number | null
+    last_file_name: string | null
+    last_media_expired: number | null
+    last_caption: string | null
+    pin_id: number | null
+    pin_sender: string | null
+    pin_content: string | null
+    pin_type: string | null
+    pin_deleted: number | null
+    pin_file_name: string | null
+    pin_sender_name: string | null
+    partner_read: number | null
+    unread: number
+  }>
+
+  /* Gabungkan direct + grup, urutkan berdasar aktivitas terbaru. */
+  const allRows = [...rows, ...groupRows].sort((a, b) => b.last_message_at - a.last_message_at)
+
   // v45 — fakePresence & v47 — mode hantu kini dihitung per-partner lewat
   // adminPartnerPresence (di bawah) bersama bendera ilusi v72 (lastSeenFrozen,
   // recentlyActive) — tidak perlu pra-hitung set lagi.
@@ -2366,23 +2596,32 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     userId !== ADMIN_ID ? cheatFlagsOf(findUserById(userId)) : null
 
   /* v74 — TTL media percakapan ikut mengalir ke daftar percakapan. */
-  return rows.map((r) => ({
+  return allRows.map((r) => ({
     id: r.id,
     mediaTtlHours: r.media_ttl_hours ?? 0,
-    partner: {
-      id: r.partner_id,
-      // v72 — alias ilusi: nama partner tampil beda hanya di mata admin.
-      name: adminAliasOf(r.partner_id) ?? r.partner_name,
-      online: userId === ADMIN_ID
-        ? adminPartnerPresence(r.partner_id, r.partner_last_seen).online
-        : isOnline(r.partner_id),
-      // v11 — a user viewer may get the admin's fake last-seen here.
-      // v45/v47/v72 — fakePresence, mode hantu, dan ilusi presence v72
-      // dihitung lewat adminPartnerPresence untuk viewer admin.
-      lastSeenAt: userId === ADMIN_ID
-        ? adminPartnerPresence(r.partner_id, r.partner_last_seen).lastSeenAt
-        : lastSeenFor(userId, r.partner_id, new Date(r.partner_last_seen).toISOString()),
-    },
+    /* v79 — flag grup utk klien (header, label pengirim, forward). */
+    ...(r.is_group ? { isGroup: true as const } : {}),
+    partner: r.is_group
+      ? {
+          id: r.partner_id,
+          name: r.partner_name,
+          online: false,
+          lastSeenAt: null,
+        }
+      : {
+          id: r.partner_id,
+          // v72 — alias ilusi: nama partner tampil beda hanya di mata admin.
+          name: adminAliasOf(r.partner_id) ?? r.partner_name,
+          online: userId === ADMIN_ID
+            ? adminPartnerPresence(r.partner_id, r.partner_last_seen).online
+            : isOnline(r.partner_id),
+          // v11 — a user viewer may get the admin's fake last-seen here.
+          // v45/v47/v72 — fakePresence, mode hantu, dan ilusi presence v72
+          // dihitung lewat adminPartnerPresence untuk viewer admin.
+          lastSeenAt: userId === ADMIN_ID
+            ? adminPartnerPresence(r.partner_id, r.partner_last_seen).lastSeenAt
+            : lastSeenFor(userId, r.partner_id, new Date(r.partner_last_seen).toISOString()),
+        },
     lastMessage:
       r.last_id != null
         ? {
@@ -2404,8 +2643,13 @@ const getConversationsFor = (userId: string): ConversationOverviewApi[] => {
     lastMessageAt: new Date(r.last_message_at).toISOString(),
     unread: r.unread,
     // v72 — ilusi ✓✓ tertunda: nilai bacaan partner versi pandangan user.
+    // v79 — grup tanpa ilusi: user melihat bacaan admin; admin melihat MIN bacaan anggota.
     partnerLastReadId:
-      userId === ADMIN_ID ? (r.partner_read ?? 0) : effectivePartnerRead(r.id, r.partner_read ?? 0),
+      r.is_group
+        ? (r.partner_read ?? 0)
+        : userId === ADMIN_ID
+          ? (r.partner_read ?? 0)
+          : effectivePartnerRead(r.id, r.partner_read ?? 0),
     archived: r.archived_at != null,
     pinnedMessageId: r.pinned_message_id ?? null,
     // v72 — ilusi tampilan user: badge belum-baca hantu + selalu di atas.
@@ -2736,6 +2980,10 @@ const insertAndFanOut = (
   const row = db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow
   const message = toChatMessage(row)
   attachReplyPreviews([row], [message])
+  /* v79 — pesan live di grup membawa nama tampil pengirim. */
+  if (conversation.group_id) {
+    message.senderName = findUserById(senderId)?.name ?? 'Anggota'
+  }
 
   // v47 — delay pengiriman: penerima dalam daftar baru menerima pesan
   // setelah jeda (cheat delayMs); pengirim selalu instan.
@@ -2767,6 +3015,27 @@ const insertAndFanOut = (
   const selfEcho = (uid: string, fn: () => void) => {
     if (uid === senderId && opts.suppressSelfEcho) return
     later(uid, fn)
+  }
+
+  /* v79 — percakapan GRUP: siarkan ke SEMUA anggota (room user masing2)
+   * + room admins; push offline utk anggota lain; lalu selesai (jalur direct
+   * di bawah tidak relevan utk grup). */
+  if (conversation.group_id) {
+    const members = groupMemberIds(conversation.group_id)
+    const senderName79 = findUserById(senderId)?.name ?? 'ChatKita'
+    for (const uid of members) {
+      selfEcho(uid, () => io.to(`user:${uid}`).emit('message:new', message))
+    }
+    if (opts.suppressAdminRoom !== true) {
+      later(ADMIN_ID, () => io.to('admins').emit('message:new', message))
+    }
+    for (const uid of members) {
+      selfEcho(uid, () => pushConversationsTo(uid))
+      if (type !== 'system' && uid !== senderId) {
+        later(uid, () => pushNewMessageIfOffline(uid, senderName79, snippetOf(row)))
+      }
+    }
+    return message
   }
 
   // (`user:admin` is empty — the admins room carries admin-side delivery.)
@@ -5450,6 +5719,10 @@ io.on('connection', (socket) => {
 
       socket.data.userId = user.id
       socket.join(`user:${user.id}`)
+      /* v79 — daftar percakapan (direct + grup) dikirim begitu auth sukses;
+       * dulu hanya muncul setelah pesan mengalir, sehingga pindah percakapan
+       * belum tersedia pasca-reload. */
+      pushConversationsTo(user.id)
       // v11 — remember connection metadata (ip/user-agent) for admin:xray.
       trackConnMeta(socket, user.id)
       const becameOnline = addOnlineSocket(user.id, socket.id)
@@ -5695,10 +5968,22 @@ io.on('connection', (socket) => {
         messages: page.messages,
         // v8 — older pages load on demand via `messages:older`.
         hasMore: page.hasMore,
-        partner: toPartnerInfo(partner, me),
+        /* v79 — grup: partner sintetis = grup (tanpa presence). */
+        partner: conversation.group_id
+          ? {
+              id: partner.id,
+              name: partner.name,
+              online: false,
+              lastSeenAt: null,
+            }
+          : toPartnerInfo(partner, me),
         // v72 — ilusi ✓✓ tertunda: nilai bacaan partner versi pandangan user.
-        partnerLastReadId:
-          me === ADMIN_ID
+        // v79 — grup: user melihat bacaan admin; admin melihat MIN bacaan anggota.
+        partnerLastReadId: conversation.group_id
+          ? me === ADMIN_ID
+            ? groupMinMemberRead(conversation.id, conversation.group_id)
+            : getReadUpTo(conversation.id, ADMIN_ID)
+          : me === ADMIN_ID
             ? getReadUpTo(conversation.id, partner.id)
             : effectivePartnerRead(conversation.id, getReadUpTo(conversation.id, partner.id)),
         // v5 — where I had read BEFORE this call → "new messages" divider.
@@ -6626,6 +6911,16 @@ io.on('connection', (socket) => {
       const payload = {
         conversationId: conversation.id,
         isTyping: data?.isTyping === true,
+      }
+      /* v79 — grup: sinyal mengetik disiarkan ke SEMUA anggota lain
+       * (admin punya room admins sendiri; user:admin kosong). */
+      if (conversation.group_id) {
+        for (const uid of groupMemberIds(conversation.group_id)) {
+          if (uid === me) continue
+          io.to(`user:${uid}`).emit('partner:typing', payload)
+        }
+        if (me !== ADMIN_ID) io.to('admins').emit('partner:typing', payload)
+        return
       }
       // The `user:admin` room is empty; when the partner is the admin the
       // relay must additionally reach the `admins` room.
@@ -7600,6 +7895,219 @@ io.on('connection', (socket) => {
       .all(cid, limit) as Array<MessageRow & { sender_name?: string }>
     return rows.reverse().map(aiLineOf)
   }
+
+  /* ================= v79 — GRUP (hanya ADMIN bisa bikin & undang) ========= */
+
+  socket.on('admin:group_create', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me || me !== ADMIN_ID) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const name = typeof data?.name === 'string' ? data.name.trim() : ''
+    if (name.length < 1 || name.length > 60) {
+      ack({ ok: false, error: 'INVALID_NAME' })
+      return
+    }
+    const rawIds: unknown[] = Array.isArray(data?.memberIds) ? data.memberIds : []
+    const memberIds = [
+      ...new Set(
+        rawIds
+          .filter((x): x is string => typeof x === 'string')
+          .map((id) => findUserById(id))
+          .filter((u): u is UserRow => !!u && u.role === 'user')
+          .map((u) => u.id)
+      ),
+    ]
+    const gid = crypto.randomUUID()
+    db.run('INSERT INTO groups (id, name, created_by, created_at) VALUES (?, ?, ?, ?)', [
+      gid,
+      name,
+      ADMIN_ID,
+      now(),
+    ])
+    db.run(
+      'INSERT INTO group_members (group_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)',
+      [gid, ADMIN_ID, 'owner', now()]
+    )
+    for (const uid of memberIds) {
+      db.run(
+        'INSERT OR IGNORE INTO group_members (group_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)',
+        [gid, uid, 'member', now()]
+      )
+    }
+    const convId = crypto.randomUUID()
+    db.run(
+      'INSERT INTO conversations (id, user_a_id, user_b_id, created_at, last_message_at, group_id) VALUES (?, ?, ?, ?, ?, ?)',
+      [convId, ADMIN_ID, '', now(), now(), gid]
+    )
+    const conv = getConversation(convId)
+    if (conv) {
+      insertAndFanOut(
+        conv,
+        ADMIN_ID,
+        `Grup "${name}" dibuat oleh Admin dengan ${memberIds.length} anggota.`,
+        'system'
+      )
+    }
+    for (const uid of memberIds) pushConversationsTo(uid)
+    pushConversationsTo(ADMIN_ID)
+    audit('group_create', `grup "${name}" (${memberIds.length} anggota)`)
+    ack({ ok: true, conversationId: convId })
+  }))
+
+  socket.on('admin:group_add_member', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me || me !== ADMIN_ID) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const groupId = typeof data?.groupId === 'string' ? data.groupId : ''
+    const group = findGroup(groupId)
+    const conv = group
+      ? (db
+          .query('SELECT * FROM conversations WHERE group_id = ?')
+          .get(groupId) as ConversationRow | null)
+      : null
+    if (!group || !conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const target = typeof data?.userId === 'string' ? findUserById(data.userId) : null
+    if (!target || target.role !== 'user') {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    db.run(
+      'INSERT OR IGNORE INTO group_members (group_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)',
+      [groupId, target.id, 'member', now()]
+    )
+    insertAndFanOut(conv, ADMIN_ID, `${target.name} ditambahkan ke grup oleh Admin.`, 'system')
+    for (const uid of groupMemberIds(groupId)) pushConversationsTo(uid)
+    pushConversationsTo(ADMIN_ID)
+    audit('group_add_member', `${target.name} → grup "${group.name}"`)
+    ack({ ok: true })
+  }))
+
+  socket.on('admin:group_remove_member', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me || me !== ADMIN_ID) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const groupId = typeof data?.groupId === 'string' ? data.groupId : ''
+    const group = findGroup(groupId)
+    const conv = group
+      ? (db
+          .query('SELECT * FROM conversations WHERE group_id = ?')
+          .get(groupId) as ConversationRow | null)
+      : null
+    if (!group || !conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const target = typeof data?.userId === 'string' ? findUserById(data.userId) : null
+    if (!target || target.role !== 'user') {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    db.run('DELETE FROM group_members WHERE group_id = ? AND user_id = ?', [groupId, target.id])
+    insertAndFanOut(conv, ADMIN_ID, `${target.name} dikeluarkan dari grup oleh Admin.`, 'system')
+    for (const uid of groupMemberIds(groupId)) pushConversationsTo(uid)
+    pushConversationsTo(target.id)
+    pushConversationsTo(ADMIN_ID)
+    audit('group_remove_member', `${target.name} keluar dari grup "${group.name}"`)
+    ack({ ok: true })
+  }))
+
+  socket.on('admin:group_rename', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me || me !== ADMIN_ID) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const groupId = typeof data?.groupId === 'string' ? data.groupId : ''
+    const group = findGroup(groupId)
+    const conv = group
+      ? (db
+          .query('SELECT * FROM conversations WHERE group_id = ?')
+          .get(groupId) as ConversationRow | null)
+      : null
+    if (!group || !conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const name = typeof data?.name === 'string' ? data.name.trim() : ''
+    if (name.length < 1 || name.length > 60) {
+      ack({ ok: false, error: 'INVALID_NAME' })
+      return
+    }
+    db.run('UPDATE groups SET name = ? WHERE id = ?', [name, groupId])
+    insertAndFanOut(conv, ADMIN_ID, `Grup diganti nama menjadi "${name}".`, 'system')
+    for (const uid of groupMemberIds(groupId)) pushConversationsTo(uid)
+    pushConversationsTo(ADMIN_ID)
+    audit('group_rename', `"${group.name}" → "${name}"`)
+    ack({ ok: true })
+  }))
+
+  socket.on('admin:group_delete', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me || me !== ADMIN_ID) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const groupId = typeof data?.groupId === 'string' ? data.groupId : ''
+    const group = findGroup(groupId)
+    const conv = group
+      ? (db
+          .query('SELECT * FROM conversations WHERE group_id = ?')
+          .get(groupId) as ConversationRow | null)
+      : null
+    if (!group || !conv) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const members = groupMemberIds(groupId)
+    db.run('DELETE FROM messages WHERE conversation_id = ?', [conv.id])
+    db.run('DELETE FROM reads WHERE conversation_id = ?', [conv.id])
+    db.run('DELETE FROM message_reminders WHERE conversation_id = ?', [conv.id])
+    db.run('DELETE FROM conversations WHERE id = ?', [conv.id])
+    db.run('DELETE FROM group_members WHERE group_id = ?', [groupId])
+    db.run('DELETE FROM groups WHERE id = ?', [groupId])
+    for (const uid of members) pushConversationsTo(uid)
+    pushConversationsTo(ADMIN_ID)
+    audit('group_delete', `grup "${group.name}" dihapus`)
+    ack({ ok: true })
+  }))
+
+  socket.on('admin:group_members', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me || me !== ADMIN_ID) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const groupId = typeof data?.groupId === 'string' ? data.groupId : ''
+    if (!findGroup(groupId)) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const rows = db
+      .query(
+        `SELECT gm.user_id AS id, gm.role AS role, gm.joined_at AS joinedAt, u.name AS name
+         FROM group_members gm LEFT JOIN users u ON u.id = gm.user_id
+         WHERE gm.group_id = ? ORDER BY gm.joined_at ASC`
+      )
+      .all(groupId) as Array<{ id: string; name: string | null; role: string; joinedAt: number }>
+    ack({
+      ok: true,
+      members: rows.map((r) => ({
+        id: r.id,
+        name: r.name ?? '?',
+        role: r.role,
+        joinedAt: new Date(r.joinedAt).toISOString(),
+      })),
+    })
+  }))
 
   /** v52 — AI: ringkas percakapan (admin). */
   socket.on('admin:ai_summary', handler(socket, (data, ack) => {

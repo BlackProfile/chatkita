@@ -155,6 +155,8 @@ interface ChatBubbleProps {
   replyCount?: number;
   /** v78 — buka dialog utas (akar + seluruh balasan langsung). */
   onOpenThread?: () => void;
+  /** v79 — label nama pengirim (di atas isi bubble; hanya dipakai grup). */
+  senderLabel?: string;
   /** v77 — pasang pengingat pribadi pada pesan ini (dialog waktu di induk). */
   onRemind?: () => void;
   /** v77 — waktu pengingat aktif milik pengguna untuk pesan ini (epoch ms). */
@@ -239,6 +241,7 @@ export function ChatBubble({
   onReminderCancel,
   replyCount,
   onOpenThread,
+  senderLabel,
 }: ChatBubbleProps) {
   // v47 — pesan hantu (kebal hapus) dirender seperti pesan hidup + badge;
   // hanya tombstone sungguhan yang mematikan aksi/media.
@@ -359,6 +362,13 @@ export function ChatBubble({
             }
           }}
         >
+          {/* v79 — label nama pengirim (percakapan grup, bubble kiri). */}
+          {!deleted && senderLabel && side === "left" ? (
+            <p className="mb-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
+              {senderLabel}
+            </p>
+          ) : null}
+
           {/* Reply quote */}
           {replyTo ? (
             <div
