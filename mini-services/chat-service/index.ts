@@ -335,8 +335,11 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * (2) pengingat per pesan (remind) — user/admin memasang alarm pada sebuah
  * pesan (`message:remind`, pilihan waktu, 1 reminder aktif per pesan per
  * user), `reminder:list` utk indikator jam pasca-reload, `reminder:cancel`,
- * dan sweep tiap 10 detik menyerahkan `reminder:due` ke pemilik reminder. */
-const SERVICE_VERSION = 'v77'
+ * dan sweep tiap 10 detik menyerahkan `reminder:due` ke pemilik reminder;
+ * (3) v78 UTAS balasan — history kini membawa replyCount (hitungan balasan
+ * langsung per pesan induk, query agregat per batch) dan event `thread:open`
+ * mengembalikan pesan akar + seluruh balasan langsung (ASC, s.d. 100). */
+const SERVICE_VERSION = 'v78'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -822,6 +825,8 @@ interface ChatMessageApi {
   type: 'text' | 'image' | 'voice' | 'file' | 'system' | 'sticker' | 'poll' | 'location' | 'contact'
   replyToId?: number
   replyTo?: { id: number; senderId: string; snippet: string; type: string }
+  /** v78 — jumlah balasan langsung ke pesan ini (utas). */
+  replyCount?: number
   durationMs?: number
   transcript?: string
   deletedAt?: string
@@ -1823,7 +1828,9 @@ const pinnedSnapshotOf = (conversation: ConversationRow) => {
   }
 }
 
-/** Fetch reply-quote snapshots for a batch of messages (single query). */
+/** Fetch reply-quote snapshots for a batch of messages (single query).
+ * v78 — sekalian lampirkan replyCount (jumlah balasan langsung, utk chip
+ * utas) dengan SATU query agregat per batch. */
 const attachReplyPreviews = (rows: MessageRow[], messages: ChatMessageApi[]) => {
   const ids = [...new Set(rows.filter((r) => r.reply_to_id).map((r) => r.reply_to_id as number))]
   if (ids.length === 0) return
@@ -1840,6 +1847,23 @@ const attachReplyPreviews = (rows: MessageRow[], messages: ChatMessageApi[]) => 
     if (!m.replyToId) continue
     const o = byId.get(m.replyToId)
     if (o) m.replyTo = { id: o.id, senderId: o.sender_id, snippet: snippetOf(o), type: o.type ?? 'text' }
+  }
+  /* v78 — hitung balasan langsung utk SETIAP pesan di batch (chip utas
+   * tampil pada pesan induk): reply_to_id IN (ids batch ini). */
+  const batchIds = [...new Set(rows.map((r) => r.id))]
+  if (batchIds.length === 0) return
+  const countPh = batchIds.map(() => '?').join(',')
+  const counts = db
+    .query(
+      `SELECT reply_to_id, COUNT(*) AS n FROM messages
+       WHERE reply_to_id IN (${countPh}) AND (scheduled_at IS NULL OR delivered_at IS NOT NULL)
+       GROUP BY reply_to_id`
+    )
+    .all(...batchIds) as Array<{ reply_to_id: number; n: number }>
+  const countById = new Map(counts.map((c) => [c.reply_to_id, c.n]))
+  for (const m of messages) {
+    const n = countById.get(m.id)
+    if (n) m.replyCount = n
   }
 }
 
@@ -5826,6 +5850,51 @@ io.on('connection', (socket) => {
       ok: true,
       reminders: rows.map((r) => ({ messageId: r.message_id, remindAt: r.remind_at })),
     })
+  }))
+
+  /* v78 — buka utas: pesan akar + SEMUA balasan langsung kepadanya
+   * (s.d. 100, terurut naik). Peserta percakapan (atau admin); kunci PIN
+   * admin tetap dihormati. */
+  socket.on('thread:open', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const id = Number(data?.messageId)
+    const root =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!root) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const conv = db
+      .query('SELECT * FROM conversations WHERE id = ?')
+      .get(root.conversation_id) as ConversationRow | null
+    if (!conv || !isParticipant(conv, me)) {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    if (me === ADMIN_ID && isConvLockedForAdmin(socket, conv)) {
+      ack({ ok: false, error: 'PIN_LOCKED' })
+      return
+    }
+    const viewerAdmin = me === ADMIN_ID
+    const rootList = [toChatMessage(root, viewerAdmin)]
+    attachReactions([root], rootList)
+    attachReplyPreviews([root], rootList)
+    const replyRows = db
+      .query(
+        `SELECT * FROM messages WHERE reply_to_id = ? AND (scheduled_at IS NULL OR delivered_at IS NOT NULL)
+         ORDER BY id ASC LIMIT 100`
+      )
+      .all(id) as MessageRow[]
+    const replies = replyRows.map((r) => toChatMessage(r, viewerAdmin))
+    attachReactions(replyRows, replies)
+    attachReplyPreviews(replyRows, replies)
+    ack({ ok: true, root: rootList[0], replies })
   }))
 
   // v8 — pagination: load one OLDER history page ("Muat pesan lama").

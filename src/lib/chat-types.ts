@@ -137,6 +137,8 @@ export interface ChatMessage {
   type: MessageContentType;
   replyToId?: number;
   replyTo?: ReplyPreview;
+  /** v78 — jumlah balasan langsung ke pesan ini (chip utas). */
+  replyCount?: number;
   /** Voice notes: recording length in ms. */
   durationMs?: number;
   /** Voice notes: AI transcription (may arrive later via message:updated). */
@@ -2426,6 +2428,15 @@ export interface ConversationResetPayload {
 //                      Indikator ⏰ tetap ada setelah reload.
 // reminder:due         ReminderDuePayload — dikirim HANYA ke pemilik
 //                      reminder (room user:<id> / admins) oleh sweep 10 dtk.
+//
+// ---- v78 (utas / thread balasan) ----
+//
+// thread:open          { messageId } → ThreadOpenAck | ChatErrorAck
+//                      Pesan akar + semua balasan langsung (ASC, s.d. 100).
+//                      ChatMessage kini membawa replyCount (chip utas di
+//                      bubble induk); hasil dihitung server di history &
+//                      thread:open, klien menaikkan hitungan live saat
+//                      message:new membawa replyToId.
 export interface ReminderPending {
   messageId: number;
   remindAt: number;
@@ -2453,4 +2464,11 @@ export interface ReminderDuePayload {
   senderName: string;
   deleted: boolean;
   content: string;
+}
+
+/** v78 — ack thread:open: pesan akar + seluruh balasan langsung (ASC). */
+export interface ThreadOpenAck {
+  ok: true;
+  root: ChatMessage;
+  replies: ChatMessage[];
 }

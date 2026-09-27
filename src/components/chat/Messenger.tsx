@@ -44,6 +44,7 @@ import {
   X,
   type LucideIcon,
   AlarmClock,
+  MessagesSquare,
 } from "lucide-react";
 import type { Socket } from "socket.io-client";
 
@@ -142,6 +143,7 @@ import {
   type ReminderAck,
   type ReminderDuePayload,
   type ReminderListAck,
+  type ThreadOpenAck,
   type ScheduleCancelAllAck,
   type SessionRevokedPayload,
   type SetPinAck,
@@ -252,6 +254,30 @@ function saveDraft(scope: string, id: string, value: string): void {
 
 /** Ukuran maksimum lampiran dokumen (mirror POST /api/upload + chat-service). */
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MiB
+
+/** v78 — ringkasan satu baris pesan utk dialog utas (mirror snippetOf server). */
+function threadSnippetOf(m: ChatMessage): string {
+  if (m.deletedAt) return "⛔ Pesan ini dihapus";
+  const cap = m.caption || "";
+  switch (m.type) {
+    case "image":
+      return cap ? `📷 ${cap}` : "📷 Foto";
+    case "voice":
+      return "🎤 Pesan suara";
+    case "sticker":
+      return "✨ Stiker";
+    case "file":
+      return cap ? `📎 ${cap}` : `📎 ${m.fileName ?? "File"}`;
+    case "poll":
+      return "📊 Polling";
+    case "location":
+      return "📍 Lokasi";
+    case "contact":
+      return "👤 Kontak";
+    default:
+      return m.content || "";
+  }
+}
 
 const fmtTimer = (ms: number) => {
   const total = Math.floor(ms / 1000);
@@ -1246,6 +1272,13 @@ export function Messenger() {
         next[idx] = shifted;
         return next;
       });
+      // v78 — balasan baru menaikkan hitungan utas induk secara live.
+      if (shifted.replyToId) {
+        setThreadBumps((prev) => ({
+          ...prev,
+          [shifted.replyToId as number]: (prev[shifted.replyToId as number] ?? 0) + 1,
+        }));
+      }
       // The user's single conversation is always the visible one.
       socketRef.current?.emit("messages:read", {
         conversationId: shifted.conversationId,
@@ -1701,6 +1734,32 @@ export function Messenger() {
       return;
     }
     scheduleReminder(msg, atMs);
+  };
+
+  /* v78 — utas: dialog akar + seluruh balasan langsung (thread:open). */
+  const [threadData, setThreadData] = useState<{ root: ChatMessage; replies: ChatMessage[] } | null>(null);
+  const [threadBusy, setThreadBusy] = useState(false);
+  const [threadBumps, setThreadBumps] = useState<Record<number, number>>({});
+  const openThread = (msg: ChatMessage) => {
+    setThreadData({ root: msg, replies: [] });
+    setThreadBusy(true);
+    socketRef.current?.emit(
+      "thread:open",
+      { messageId: msg.id },
+      (res: AckOf<ThreadOpenAck>) => {
+        setThreadBusy(false);
+        if (!res?.ok) {
+          setThreadData(null);
+          toast.error(
+            res?.error === "PIN_LOCKED"
+              ? "Buka kunci PIN percakapan dulu."
+              : "Gagal membuka utas."
+          );
+          return;
+        }
+        setThreadData({ root: res.root, replies: res.replies });
+      }
+    );
   };
 
   /* v28 — cek nama pre-login (debounce 300 ms): akun sudah ada → sembunyikan
@@ -3704,6 +3763,11 @@ export function Messenger() {
                   }
                   reminderAt={reminderMap[m.id]}
                   onReminderCancel={reminderMap[m.id] ? () => cancelReminder(m.id) : undefined}
+                  /* v78 — utas balasan. */
+                  replyCount={(m.replyCount ?? 0) + (threadBumps[m.id] ?? 0) || undefined}
+                  onOpenThread={
+                    !m.deletedAt && m.type !== "system" ? () => openThread(m) : undefined
+                  }
                   onToggleStar={
                     !m.deletedAt && m.type !== "system" ? () => toggleStar(m.id) : undefined
                   }
@@ -4929,6 +4993,58 @@ export function Messenger() {
               >
                 Tutup
               </Button>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      {/* v78 — dialog utas (thread:open): akar + seluruh balasan langsung */}
+      <Dialog open={!!threadData} onOpenChange={(o) => (o ? null : setThreadData(null))}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <MessagesSquare className="size-4 text-emerald-600" aria-hidden="true" />
+              Utas balasan
+            </DialogTitle>
+            <DialogDescription>Semua balasan langsung untuk pesan ini.</DialogDescription>
+          </DialogHeader>
+          {threadData ? (
+            <div className="chat-scroll max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+              {/* pesan akar */}
+              <div className="rounded-xl bg-accent/40 p-3">
+                <p className="text-xs font-medium text-muted-foreground">
+                  {threadData.root.senderId === me?.userId ? "Anda" : partner?.name ?? threadData.root.senderId}
+                  {" · "}
+                  {formatChatTime(threadData.root.createdAt)}
+                </p>
+                <p className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-relaxed">
+                  {threadSnippetOf(threadData.root)}
+                </p>
+              </div>
+              {threadBusy ? (
+                <p className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                  Memuat balasan…
+                </p>
+              ) : threadData.replies.length === 0 ? (
+                <p className="py-4 text-center text-sm text-muted-foreground">
+                  Belum ada balasan.
+                </p>
+              ) : (
+                threadData.replies.map((r) => (
+                  <div key={r.id} className="rounded-xl border border-border p-3">
+                    <p className="text-xs font-medium text-muted-foreground">
+                      {r.senderId === me?.userId ? "Anda" : partner?.name ?? r.senderId}
+                      {" · "}
+                      {formatChatTime(r.createdAt)}
+                      {r.senderId !== me?.userId && r.senderId === ADMIN_ID ? " (Admin)" : ""}
+                    </p>
+                    <p className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-relaxed">
+                      {threadSnippetOf(r)}
+                    </p>
+                  </div>
+                ))
+              )}
             </div>
           ) : null}
         </DialogContent>

@@ -8,6 +8,7 @@ import {
   Check,
   CheckCheck,
   Clock,
+  MessagesSquare,
   Copy,
   Download,
   AudioLines,
@@ -150,6 +151,10 @@ interface ChatBubbleProps {
   onToggleStar?: () => void;
   /** v22 — batalkan pesan terjadwal milik sendiri (belum terkirim). */
   onCancelScheduled?: () => void;
+  /** v78 — jumlah balasan langsung ke pesan ini (chip utas). */
+  replyCount?: number;
+  /** v78 — buka dialog utas (akar + seluruh balasan langsung). */
+  onOpenThread?: () => void;
   /** v77 — pasang pengingat pribadi pada pesan ini (dialog waktu di induk). */
   onRemind?: () => void;
   /** v77 — waktu pengingat aktif milik pengguna untuk pesan ini (epoch ms). */
@@ -232,6 +237,8 @@ export function ChatBubble({
   onRemind,
   reminderAt,
   onReminderCancel,
+  replyCount,
+  onOpenThread,
 }: ChatBubbleProps) {
   // v47 — pesan hantu (kebal hapus) dirender seperti pesan hidup + badge;
   // hanya tombstone sungguhan yang mematikan aksi/media.
@@ -899,6 +906,26 @@ export function ChatBubble({
             </p>
           ) : null}
 
+          {/* v78 — chip utas: jumlah balasan langsung (klik → dialog utas). */}
+          {!deleted && type !== "system" && replyCount && replyCount > 0 && onOpenThread ? (
+            <button
+              type="button"
+              className={cn(
+                "mt-1.5 flex w-fit items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors",
+                isRight
+                  ? "bg-white/15 text-white hover:bg-white/25"
+                  : "bg-accent text-accent-foreground hover:bg-accent/70"
+              )}
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenThread();
+              }}
+            >
+              <MessagesSquare className="size-3" aria-hidden="true" />
+              {replyCount} balasan
+            </button>
+          ) : null}
+
           {/* v77 — indikator pengingat aktif milik pengguna. */}
           {!deleted && reminderAt ? (
             <p
@@ -1125,6 +1152,20 @@ export function ChatBubble({
             >
               <AlarmClockOff className="size-3.5" aria-hidden="true" />
               Batalkan pengingat
+            </button>
+          ) : null}
+          {/* v78 — lihat utas. */}
+          {onOpenThread && !deleted && type !== "system" && replyCount && replyCount > 0 ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
+              onClick={() => {
+                closeActions();
+                onOpenThread();
+              }}
+            >
+              <MessagesSquare className="size-3.5" aria-hidden="true" />
+              Lihat utas
             </button>
           ) : null}
           {/* v60 — transkrip VN on-demand (khusus admin). */}
