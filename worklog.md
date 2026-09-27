@@ -1969,3 +1969,19 @@ Stage Summary:
 - Backlog diperbarui: WebRTC = sudah ada (v44); kunci chat user = PIN akun v40 (per-conv menyusul dgn grup); SISA = thread, grup chat (admin-only create + invite — arahan user), kunci chat per-conv utk era grup.
 - Temuan infrastruktur penting: pohon git remote v76 TIDAK LENGKAP (±108 file hilang) — telah dipulihkan via checkpoint + force-push; commit 8ba56cb kini sumber kebenaran.
 - Verify 685/685, lint 0/0, banner v77, E2E translate + remind 6/6 lolos, DB bersih tanpa artefak.
+
+---
+Task ID: 94-b
+Agent: Z.ai (main)
+Task: v78 — utas balasan (thread): chip hitungan balasan + dialog utas
+
+Work Log:
+- SERVER: ChatMessageApi.replyCount; attachReplyPreviews kini menghitung balasan langsung utk SETIAP pesan batch (reply_to_id IN ids batch, GROUP BY, exclude terjadwal belum terkirim) — chip tampil di pesan INDUK; event thread:open (auth, peserta via conversations, PIN admin, akar + s.d. 100 balasan ASC; attachReactions + attachReplyPreviews pada akar & balasan; serializer toChatMessage(viewerAdmin)); blok komentar versi v77 diperluas + v78.
+- KLIEN: chat-types replyCount + ThreadOpenAck + dok event; ChatBubble props replyCount/onOpenThread → chip "N balasan" (bg white/15 utk bubble kanan, accent utk kiri; stopPropagation) + menu "Lihat utas"; Messenger: openThread (emit → dialog "Utas balasan": kartu akar accent/40 + kartu balasan ber-border, nama "Anda"/partner, formatChatTime, threadSnippetOf mirror snippetOf server; loading Loader2; kosong → "Belum ada balasan."), state threadData/threadBusy/threadBumps, bump di handler message:new bila replyToId, props replyCount=(replyCount server)+(bump) & onOpenThread ke ChatBubble; helper modul threadSnippetOf + import MessagesSquare/ThreadOpenAck.
+- instrumentation rescue-v78 + void 0 v78; verify +12 → 697/697; SERVICE_VERSION v78; restart → banner v78; lint 0/0.
+- E2E (t122, gateway :81, uji-v78 via CK-UJI78-TEST): kirim akar → Balas → kirim "Ini balasan pertama ke akar" → chip "1 balasan" MUNCUL LIVE (bump) tanpa reload; balasan kedua pertama kali GAGAL karena lupa klik Balas (terkirim biasa — bukan bug); ulang dgn reply aktif → chip "2 balasan"; klik chip → dialog utas: akar + 2 balasan rapi (screenshot /tmp/v78-thread.png); RELOAD → "2 balasan" PERSISTEN dari server. Catatan UX: klik Balas lalu batal tidak membatalkan mode reply? — dikonfirmasi reply state dibersihkan setelah kirim (perilaku benar).
+- Cleanup: user uji-v78 + conv + pesan + kode uji dihapus; allowRegistration=0; browser ditutup; commit b895637 + tag rescue-v78 ter-push (push pertama main sukses via hook commit; tag gagal pertama lalu sukses diulang).
+
+Stage Summary:
+- Rilis v78: utas balasan — bubble induk menampilkan chip jumlah balasan langsung (live + persisten), klik → dialog utas berisi akar + seluruh balasan.
+- Sisa backlog: GRUP CHAT (admin-only bikin + undang user — arahan eksplisit user), lalu opsional kunci chat per-conv di era grup.
