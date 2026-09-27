@@ -2409,3 +2409,48 @@ export interface ConversationResetPayload {
 // admin:db_backup      {} → DbBackupAck | ChatErrorAck
 //                      VACUUM INTO backups/dbconsole-<stamp>.db (retensi 10).
 //                      Semua tulisan pertama tiap sesi → backup otomatis.
+//
+// ---- v77 (terjemahan user + pengingat per pesan) ----
+//
+// message:translate    { messageId } → TranslateAck | ChatErrorAck
+//                      v77: partisipan percakapan BOLEH (v60 khusus admin).
+//                      Hasil di-cache di server dan broadcast via
+//                      message:updated { translation } ke semua pihak.
+//
+// message:remind       { messageId, atMs } → ReminderAck | ChatErrorAck
+//                      Pasang pengingat pribadi pada sebuah pesan (≥30 detik
+//                      ke depan, maks 365 hari). 1 reminder aktif per
+//                      (user, message) — pasang ulang menimpa yang lama.
+// reminder:cancel      { messageId } → { ok, removed }
+// reminder:list        {} → { ok, reminders: ReminderPending[] }
+//                      Indikator ⏰ tetap ada setelah reload.
+// reminder:due         ReminderDuePayload — dikirim HANYA ke pemilik
+//                      reminder (room user:<id> / admins) oleh sweep 10 dtk.
+export interface ReminderPending {
+  messageId: number;
+  remindAt: number;
+}
+
+/** Ack message:remind. */
+export interface ReminderAck {
+  ok: true;
+  reminderId: string;
+  remindAt: number;
+}
+
+/** Ack reminder:list. */
+export interface ReminderListAck {
+  ok: true;
+  reminders: ReminderPending[];
+}
+
+/** v77 — reminder jatuh tempo (sweep server), hanya untuk pemiliknya. */
+export interface ReminderDuePayload {
+  reminderId: string;
+  messageId: number;
+  conversationId: string;
+  remindAt: string;
+  senderName: string;
+  deleted: boolean;
+  content: string;
+}

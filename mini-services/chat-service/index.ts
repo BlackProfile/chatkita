@@ -329,7 +329,14 @@ const PORT = 3003 // hardcoded — gateway routes XTransformPort=3003 here
  * waktu, cooldown 3 detik, kunci PIN admin tetap dihormati) → file .txt;
  * (3) ringkasan AI untuk USER (chat:ai_summary, mirror admin:ai_summary
  * v52 — cooldown 20 detik per socket, audit) dari menu ⋮ header. */
-const SERVICE_VERSION = 'v76'
+/* v77 (Task 94) — LANJUTAN BACKLOG: (1) terjemahan AI untuk USER —
+ * `message:translate` v60 tadinya khusus admin; kini partisipan percakapan
+ * boleh meminta terjemahan (hasil dibroadcast ke kedua partisipan + admin);
+ * (2) pengingat per pesan (remind) — user/admin memasang alarm pada sebuah
+ * pesan (`message:remind`, pilihan waktu, 1 reminder aktif per pesan per
+ * user), `reminder:list` utk indikator jam pasca-reload, `reminder:cancel`,
+ * dan sweep tiap 10 detik menyerahkan `reminder:due` ke pemilik reminder. */
+const SERVICE_VERSION = 'v77'
 const BOOT_AT = Date.now()
 const ADMIN_ID = 'admin'
 const ADMIN_NAME = 'Admin'
@@ -557,6 +564,26 @@ db.run(`
   )
 `)
 db.run('CREATE INDEX IF NOT EXISTS idx_login_events_user ON login_events(user_id, at)')
+/* v77 — pengingat per pesan: alarm pribadi per user pada sebuah pesan.
+ * Satu reminder AKTIF per (user, message) — pasang baru menimpa yang lama.
+ * done=1 setelah sweep menyerahkan reminder:due; baris done dibersihkan >7 hari. */
+db.run(`
+  CREATE TABLE IF NOT EXISTS message_reminders (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    remind_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0
+  )
+`)
+db.run(
+  'CREATE INDEX IF NOT EXISTS idx_reminders_due ON message_reminders(done, remind_at)'
+)
+db.run(
+  'CREATE INDEX IF NOT EXISTS idx_reminders_user ON message_reminders(user_id, message_id, done)'
+)
 /* v27 — perangkat terikat (1 perangkat maks 1 akun, append-only;
  * admin bisa melepas lewat dashboard). */
 db.run(`
@@ -5721,6 +5748,86 @@ io.on('connection', (socket) => {
     ack({ ok: true, partner: partner.name, count: lines.length, lines })
   }))
 
+  /* v77 — pengingat per pesan: pasang alarm pribadi pada sebuah pesan.
+   * Partisipan (atau admin) boleh; 1 reminder aktif per (user, message) —
+   * pasang ulang MENIMPA yang lama. Waktu valid: > sekarang, < 365 hari. */
+  socket.on('message:remind', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const lastRemind = Number(socket.data.remindLast ?? 0)
+    if (Date.now() - lastRemind < 600) {
+      ack({ ok: false, error: 'RATE_LIMITED' })
+      return
+    }
+    socket.data.remindLast = Date.now()
+    const id = Number(data?.messageId)
+    const row =
+      Number.isInteger(id) && id > 0
+        ? (db.query('SELECT * FROM messages WHERE id = ?').get(id) as MessageRow | null)
+        : null
+    if (!row || (row.type ?? 'text') === 'system') {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const conv = db
+      .query('SELECT * FROM conversations WHERE id = ?')
+      .get(row.conversation_id) as ConversationRow | null
+    if (!conv || !isParticipant(conv, me)) {
+      ack({ ok: false, error: 'FORBIDDEN' })
+      return
+    }
+    const atMs = Number(data?.atMs)
+    const minAt = now() + 30_000
+    const maxAt = now() + 365 * 86_400_000
+    if (!Number.isFinite(atMs) || atMs < minAt || atMs > maxAt) {
+      ack({ ok: false, error: 'INVALID_TIME' })
+      return
+    }
+    const rid = crypto.randomUUID()
+    db.run('DELETE FROM message_reminders WHERE user_id = ? AND message_id = ? AND done = 0', [me, id])
+    db.run(
+      'INSERT INTO message_reminders (id, user_id, conversation_id, message_id, remind_at, created_at, done) VALUES (?, ?, ?, ?, ?, ?, 0)',
+      [rid, me, conv.id, id, Math.round(atMs), now()]
+    )
+    ack({ ok: true, reminderId: rid, remindAt: Math.round(atMs) })
+  }))
+
+  /* v77 — batalkan pengingat aktif milik saya pada sebuah pesan. */
+  socket.on('reminder:cancel', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const id = Number(data?.messageId)
+    if (!Number.isInteger(id) || id <= 0) {
+      ack({ ok: false, error: 'NOT_FOUND' })
+      return
+    }
+    const info = db
+      .run('UPDATE message_reminders SET done = 1 WHERE user_id = ? AND message_id = ? AND done = 0', [me, id])
+    ack({ ok: true, removed: info.changes > 0 })
+  }))
+
+  /* v77 — daftar pengingat aktif milik saya (indikator ⏰ pasca-reload). */
+  socket.on('reminder:list', handler(socket, (data, ack) => {
+    const me = authedUserId(socket)
+    if (!me) {
+      ack({ ok: false, error: 'UNAUTHORIZED' })
+      return
+    }
+    const rows = db
+      .query('SELECT message_id, remind_at FROM message_reminders WHERE user_id = ? AND done = 0')
+      .all(me) as Array<{ message_id: number; remind_at: number }>
+    ack({
+      ok: true,
+      reminders: rows.map((r) => ({ messageId: r.message_id, remindAt: r.remind_at })),
+    })
+  }))
+
   // v8 — pagination: load one OLDER history page ("Muat pesan lama").
   socket.on(
     'messages:older',
@@ -6752,13 +6859,15 @@ io.on('connection', (socket) => {
     })
   )
 
-  /* v60 — terjemahan AI KHUSUS ADMIN (sebelumnya semua peserta). Hasil
-   * disimpan (cache) dan disiarkan HANYA ke room admin — user tak menerima. */
+  /* v77 — terjemahan AI untuk SEMUA PARTISIPAN (v60 tadinya khusus admin).
+   * Partisipan percakapan (user_a/user_b) atau admin boleh meminta; hasil
+   * di-cache di messages.translation dan disiarkan ke kedua partisipan +
+   * admin. */
   socket.on(
     'message:translate',
     handler(socket, (data, ack) => {
       const me = authedUserId(socket)
-      if (!me || me !== ADMIN_ID) {
+      if (!me) {
         ack({ ok: false, error: 'UNAUTHORIZED' })
         return
       }
@@ -6769,6 +6878,18 @@ io.on('connection', (socket) => {
           : null
       if (!row || row.deleted_at || (row.type ?? 'text') !== 'text') {
         ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const conv = db
+        .query('SELECT * FROM conversations WHERE id = ?')
+        .get(row.conversation_id) as ConversationRow | null
+      if (!conv) {
+        ack({ ok: false, error: 'NOT_FOUND' })
+        return
+      }
+      const isParticipant = conv.user_a_id === me || conv.user_b_id === me
+      if (!isParticipant && me !== ADMIN_ID) {
+        ack({ ok: false, error: 'UNAUTHORIZED' })
         return
       }
       if (row.translation) {
@@ -6789,11 +6910,15 @@ io.on('connection', (socket) => {
         }
         db.run('UPDATE messages SET translation = ? WHERE id = ?', [translation, id])
         ack({ ok: true, translation })
-        io.to('admins').emit('message:updated', {
+        const payload = {
           id,
-          conversationId: row.conversation_id,
+          conversationId: conv.id,
           translation,
-        })
+        }
+        /* v77 — terjemahan disiarkan ke kedua partisipan + admin. */
+        io.to(`user:${conv.user_a_id}`).emit('message:updated', payload)
+        io.to(`user:${conv.user_b_id}`).emit('message:updated', payload)
+        io.to('admins').emit('message:updated', payload)
       })
     })
   )
@@ -11493,6 +11618,57 @@ const sweepNudges = () => {
 }
 setTimeout(sweepNudges, 25_000)
 setInterval(sweepNudges, 30 * 60_000)
+
+/* v77 — sweep pengingat per pesan: tiap 10 detik ambil reminder jatuh tempo
+ * dan serahkan ke pemiliknya via reminder:due (admin → room admins).
+ * Pesan yang sudah terhapus tetap diserahkan (konten diganti tombstone). */
+const sweepReminders = () => {
+  try {
+    const due = db
+      .query(
+        'SELECT * FROM message_reminders WHERE done = 0 AND remind_at <= ? ORDER BY remind_at ASC LIMIT 25'
+      )
+      .all(now()) as Array<{
+      id: string
+      user_id: string
+      conversation_id: string
+      message_id: number
+      remind_at: number
+    }>
+    if (due.length === 0) return
+    for (const r of due) {
+      db.run('UPDATE message_reminders SET done = 1 WHERE id = ?', [r.id])
+      const msg = db
+        .query('SELECT * FROM messages WHERE id = ?')
+        .get(r.message_id) as MessageRow | null
+      const senderName = msg
+        ? (db.query('SELECT name FROM users WHERE id = ?').get(msg.sender_id) as
+            | { name: string }
+            | undefined)?.name ?? '?'
+        : '?'
+      const payload = {
+        reminderId: r.id,
+        messageId: r.message_id,
+        conversationId: r.conversation_id,
+        remindAt: new Date(r.remind_at).toISOString(),
+        senderName,
+        deleted: !msg || msg.deleted_at != null,
+        content: msg && msg.deleted_at == null ? snippetOf(msg) : '',
+      }
+      if (r.user_id === ADMIN_ID) io.to('admins').emit('reminder:due', payload)
+      else io.to(`user:${r.user_id}`).emit('reminder:due', payload)
+    }
+    // Higien: baris done > 7 hari dibuang.
+    db.run('DELETE FROM message_reminders WHERE done = 1 AND remind_at < ?', [
+      now() - 7 * 86_400_000,
+    ])
+    console.log(`[reminder] ${due.length} pengingat jatuh tempo`)
+  } catch (err) {
+    console.error('[reminder] error:', (err as Error)?.message ?? err)
+  }
+}
+setTimeout(sweepReminders, 12_000)
+setInterval(sweepReminders, 10_000)
 
 /* v40 — auto-bersih chat per-user: pesan lebih tua dari X hari di
  * percakapan user tsb di-tombstone via pipeline resmi (isi asli tersimpan

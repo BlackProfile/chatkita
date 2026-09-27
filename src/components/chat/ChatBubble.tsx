@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
+  AlarmClock,
+  AlarmClockOff,
   Check,
   CheckCheck,
   Clock,
@@ -148,6 +150,12 @@ interface ChatBubbleProps {
   onToggleStar?: () => void;
   /** v22 — batalkan pesan terjadwal milik sendiri (belum terkirim). */
   onCancelScheduled?: () => void;
+  /** v77 — pasang pengingat pribadi pada pesan ini (dialog waktu di induk). */
+  onRemind?: () => void;
+  /** v77 — waktu pengingat aktif milik pengguna untuk pesan ini (epoch ms). */
+  reminderAt?: number;
+  /** v77 — batalkan pengingat aktif pada pesan ini. */
+  onReminderCancel?: () => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -221,6 +229,9 @@ export function ChatBubble({
   onPin,
   onToggleStar,
   onCancelScheduled,
+  onRemind,
+  reminderAt,
+  onReminderCancel,
 }: ChatBubbleProps) {
   // v47 — pesan hantu (kebal hapus) dirender seperti pesan hidup + badge;
   // hanya tombstone sungguhan yang mematikan aksi/media.
@@ -888,6 +899,25 @@ export function ChatBubble({
             </p>
           ) : null}
 
+          {/* v77 — indikator pengingat aktif milik pengguna. */}
+          {!deleted && reminderAt ? (
+            <p
+              className={cn(
+                "mt-1.5 flex items-center gap-1 text-[11px] font-medium",
+                isRight ? "text-amber-200" : "text-amber-600"
+              )}
+            >
+              <AlarmClock className="size-3" aria-hidden="true" />
+              Pengingat{" "}
+              {new Date(reminderAt).toLocaleString("id-ID", {
+                day: "2-digit",
+                month: "short",
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </p>
+          ) : null}
+
           {/* Time + read receipts */}
           <span
             className={cn(
@@ -1068,6 +1098,33 @@ export function ChatBubble({
             >
               <Languages className="size-3.5" aria-hidden="true" />
               {translation ? "Terjemahan" : "Terjemahkan"}
+            </button>
+          ) : null}
+          {/* v77 — pengingat per pesan (semua partisipan). */}
+          {onRemind && !deleted && type !== "system" && !scheduledAt ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-xs hover:bg-accent"
+              onClick={() => {
+                closeActions();
+                onRemind();
+              }}
+            >
+              <AlarmClock className="size-3.5" aria-hidden="true" />
+              Ingatkan saya
+            </button>
+          ) : null}
+          {onReminderCancel && reminderAt && !deleted ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-xs text-amber-600 hover:bg-accent"
+              onClick={() => {
+                closeActions();
+                onReminderCancel();
+              }}
+            >
+              <AlarmClockOff className="size-3.5" aria-hidden="true" />
+              Batalkan pengingat
             </button>
           ) : null}
           {/* v60 — transkrip VN on-demand (khusus admin). */}

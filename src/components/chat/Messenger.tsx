@@ -43,6 +43,7 @@ import {
   UserRound,
   X,
   type LucideIcon,
+  AlarmClock,
 } from "lucide-react";
 import type { Socket } from "socket.io-client";
 
@@ -138,6 +139,9 @@ import {
   type PinUpdatePayload,
   type PublicCheckNameAck,
   type PublicSettingsAck,
+  type ReminderAck,
+  type ReminderDuePayload,
+  type ReminderListAck,
   type ScheduleCancelAllAck,
   type SessionRevokedPayload,
   type SetPinAck,
@@ -928,6 +932,14 @@ export function Messenger() {
             setConvTtlHours(res.mediaTtlHours ?? 0);
             setInput(readDraft("user", res.user.id));
             void subscribeToPush(socket, res.pushPublicKey);
+            // v77 — muat daftar pengingat aktif milik saya (indikator ⏰).
+            socket.emit("reminder:list", {}, (rres: AckOf<ReminderListAck>) => {
+              if (rres?.ok) {
+                const map: Record<number, number> = {};
+                for (const r of rres.reminders) map[r.messageId] = r.remindAt;
+                setReminderMap(map);
+              }
+            });
           } else {
             // Stored login no longer valid — drop it, back to the form.
             window.localStorage.removeItem(CHAT_SESSION_KEY);
@@ -1261,6 +1273,8 @@ export function Messenger() {
                 deletedAt: u.deletedAt ?? m.deletedAt,
                 transcript: u.transcript ?? m.transcript,
                 editedAt: u.editedAt ?? m.editedAt,
+                /* v77 — terjemahan kini juga mengalir ke user. */
+                translation: u.translation ?? m.translation,
                 reactions: u.reactions ?? m.reactions,
                 starredBy: u.starredBy ?? m.starredBy,
                 /* v25 — Pusat Cheat: waktu pesan diubah admin. */
@@ -1286,6 +1300,17 @@ export function Messenger() {
     // v22 — pesan terjadwal dibatalkan (pengirim atau admin) → hapus dr daftar.
     socket.on("message:scheduled_cancelled", (p: { id: number; conversationId: string }) => {
       setMessages((prev) => prev.filter((m) => m.id !== p.id));
+    });
+
+    // v77 — pengingat jatuh tempo (sweep server, hanya ke pemilik) → dialog.
+    socket.on("reminder:due", (p: ReminderDuePayload) => {
+      if (!p || typeof p.messageId !== "number") return;
+      setReminderMap((prev) => {
+        const next = { ...prev };
+        delete next[p.messageId];
+        return next;
+      });
+      setReminderDue(p);
     });
 
     // v47 — antiDelete (kebal hapus): isi asli pesan yang dihapus tetap
@@ -1557,6 +1582,125 @@ export function Messenger() {
         setAiText(res.summary);
       }
     );
+  };
+
+  /* v77 — terjemahan AI untuk pengguna (message:translate kini partisipan). */
+  const [translatingId, setTranslatingId] = useState<number | null>(null);
+  const translatingIdRef = useRef<number | null>(null);
+  const handleTranslate = (msg: ChatMessage) => {
+    if (translatingIdRef.current) return;
+    if (msg.translation) return;
+    translatingIdRef.current = msg.id;
+    setTranslatingId(msg.id);
+    socketRef.current?.emit(
+      "message:translate",
+      { messageId: msg.id },
+      (res: AckOf<{ ok: boolean; translation?: string | null; error?: string }>) => {
+        translatingIdRef.current = null;
+        setTranslatingId(null);
+        if (!res?.ok) {
+          toast.error("Gagal menerjemahkan pesan.");
+          return;
+        }
+        if (res.translation) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === msg.id ? { ...m, translation: res.translation ?? undefined } : m
+            )
+          );
+        } else {
+          toast.error("Layanan AI sedang tidak tersedia.");
+        }
+      }
+    );
+  };
+
+  /* v77 — pengingat per pesan: dialog waktu cepat + custom, indikator ⏰,
+   * pembatalan, dan dialog saat reminder:due tiba (hanya ke pemilik). */
+  const [remindMsg, setRemindMsg] = useState<ChatMessage | null>(null);
+  const [remindCustom, setRemindCustom] = useState("");
+  const [reminderMap, setReminderMap] = useState<Record<number, number>>({});
+  const [reminderDue, setReminderDue] = useState<ReminderDuePayload | null>(null);
+  const remindMsgRef = useRef<ChatMessage | null>(null);
+  remindMsgRef.current = remindMsg;
+
+  const scheduleReminder = (msg: ChatMessage, atMs: number) => {
+    socketRef.current?.emit(
+      "message:remind",
+      { messageId: msg.id, atMs },
+      (res: AckOf<ReminderAck>) => {
+        if (!res?.ok) {
+          toast.error(
+            res?.error === "INVALID_TIME"
+              ? "Waktu pengingat tidak valid."
+              : "Gagal memasang pengingat."
+          );
+          return;
+        }
+        setReminderMap((prev) => ({ ...prev, [msg.id]: res.remindAt }));
+        toast.success(
+          `Pengingat dipasang: ${new Date(res.remindAt).toLocaleString("id-ID", {
+            day: "2-digit",
+            month: "short",
+            hour: "2-digit",
+            minute: "2-digit",
+          })}`
+        );
+        setRemindMsg(null);
+        setRemindCustom("");
+      }
+    );
+  };
+
+  const cancelReminder = (messageId: number) => {
+    socketRef.current?.emit(
+      "reminder:cancel",
+      { messageId },
+      (res: AckOf<{ ok: boolean; removed?: boolean }>) => {
+        if (res?.ok) {
+          setReminderMap((prev) => {
+            const next = { ...prev };
+            delete next[messageId];
+            return next;
+          });
+          toast.success(res.removed ? "Pengingat dibatalkan." : "Tidak ada pengingat aktif.");
+        }
+      }
+    );
+  };
+
+  const quickReminderOptions = useMemo(
+    () => [
+      { label: "10 menit lagi", ms: 10 * 60_000 },
+      { label: "30 menit lagi", ms: 30 * 60_000 },
+      { label: "1 jam lagi", ms: 60 * 60_000 },
+      { label: "3 jam lagi", ms: 3 * 60 * 60_000 },
+      { label: "Besok 09.00", ms: -1 },
+    ],
+    []
+  );
+  const remindQuick = (optMs: number) => {
+    const msg = remindMsgRef.current;
+    if (!msg) return;
+    let atMs: number;
+    if (optMs === -1) {
+      const d = new Date(Date.now() + 86_400_000);
+      d.setHours(9, 0, 0, 0);
+      atMs = d.getTime();
+    } else {
+      atMs = Date.now() + optMs;
+    }
+    scheduleReminder(msg, atMs);
+  };
+  const remindCustomSubmit = () => {
+    const msg = remindMsgRef.current;
+    if (!msg || !remindCustom) return;
+    const atMs = new Date(remindCustom).getTime();
+    if (!Number.isFinite(atMs) || atMs <= Date.now() + 25_000) {
+      toast.error("Pilih waktu di masa depan (minimal 1 menit lagi).");
+      return;
+    }
+    scheduleReminder(msg, atMs);
   };
 
   /* v28 — cek nama pre-login (debounce 300 ms): akun sudah ada → sembunyikan
@@ -3546,6 +3690,20 @@ export function Messenger() {
                   pinned={pinnedMsg?.id === m.id}
                   starred={!!m.starredBy?.includes(me.userId)}
                   scheduledAt={m.scheduledAt}
+                  /* v77 — terjemahan AI kini tersedia untuk pengguna. */
+                  translation={m.translation}
+                  translating={translatingId === m.id}
+                  onTranslate={
+                    m.type === "text" && !m.deletedAt && !m.translation
+                      ? () => handleTranslate(m)
+                      : undefined
+                  }
+                  /* v77 — pengingat per pesan. */
+                  onRemind={
+                    !m.deletedAt && m.type !== "system" ? () => setRemindMsg(m) : undefined
+                  }
+                  reminderAt={reminderMap[m.id]}
+                  onReminderCancel={reminderMap[m.id] ? () => cancelReminder(m.id) : undefined}
                   onToggleStar={
                     !m.deletedAt && m.type !== "system" ? () => toggleStar(m.id) : undefined
                   }
@@ -4659,6 +4817,120 @@ export function Messenger() {
               </Button>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* v77 — dialog pasang pengingat per pesan */}
+      <Dialog open={!!remindMsg} onOpenChange={(o) => (o ? null : setRemindMsg(null))}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlarmClock className="size-4 text-amber-600" aria-hidden="true" />
+              Ingatkan saya
+            </DialogTitle>
+            <DialogDescription className="line-clamp-2">
+              {remindMsg
+                ? remindMsg.deletedAt
+                  ? "Pesan sudah dihapus."
+                  : `Pengingat pribadi untuk pesan: “${remindMsg.content.slice(0, 80)}”`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+          {remindMsg && !remindMsg.deletedAt ? (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                {quickReminderOptions.map((opt) => (
+                  <Button
+                    key={opt.label}
+                    variant="outline"
+                    className="justify-start"
+                    onClick={() => remindQuick(opt.ms)}
+                  >
+                    <Clock className="size-4" aria-hidden="true" />
+                    {opt.label}
+                  </Button>
+                ))}
+              </div>
+              <div className="space-y-1.5 border-t pt-3">
+                <Label htmlFor="remind-custom">Waktu khusus</Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="remind-custom"
+                    type="datetime-local"
+                    value={remindCustom}
+                    onChange={(e) => setRemindCustom(e.target.value)}
+                  />
+                  <Button onClick={remindCustomSubmit} disabled={!remindCustom}>
+                    Pasang
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      {/* v77 — dialog pengingat jatuh tempo (reminder:due) */}
+      <Dialog
+        open={!!reminderDue}
+        onOpenChange={(o) => (o ? null : setReminderDue(null))}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlarmClock className="size-4 text-amber-600" aria-hidden="true" />
+              Pengingat pesan
+            </DialogTitle>
+            <DialogDescription>
+              Waktunya tiba — Anda memasang pengingat untuk pesan ini.
+            </DialogDescription>
+          </DialogHeader>
+          {reminderDue ? (
+            <div className="space-y-3">
+              <div className="rounded-xl bg-accent/40 p-3">
+                <p className="text-xs font-medium text-muted-foreground">
+                  {reminderDue.senderName}
+                </p>
+                <p className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-relaxed">
+                  {reminderDue.deleted
+                    ? "⛔ Pesan sudah dihapus."
+                    : reminderDue.content || "(tanpa teks)"}
+                </p>
+                <p className="mt-1.5 text-[11px] text-muted-foreground">
+                  Dipasang untuk{" "}
+                  {new Date(reminderDue.remindAt).toLocaleString("id-ID", {
+                    day: "2-digit",
+                    month: "short",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </p>
+              </div>
+              {reminderDue.conversationId !== conversationId ? (
+                <Button
+                  className="w-full"
+                  onClick={() => {
+                    const cid = reminderDue.conversationId;
+                    setReminderDue(null);
+                    if (convList.some((c) => c.id === cid)) {
+                      conversationIdRef.current = cid;
+                      setConversationId(cid);
+                      loadHistory(cid);
+                    }
+                  }}
+                >
+                  Buka percakapan
+                </Button>
+              ) : null}
+              <Button
+                variant="outline"
+                className="w-full"
+                onClick={() => setReminderDue(null)}
+              >
+                Tutup
+              </Button>
+            </div>
+          ) : null}
         </DialogContent>
       </Dialog>
 
